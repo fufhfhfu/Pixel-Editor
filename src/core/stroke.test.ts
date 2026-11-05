@@ -101,4 +101,29 @@ describe('StrokeSession', () => {
     expect(session.abortAny()).toBe(false);
     expect(session.start(8, tool('pencil'), 'primary', 1, 1)).toBe(true);
   });
+
+  it('передаёт изменения давления пера даже при той же позиции пикселя', () => {
+    const buffer = new PixelBuffer(16, 16);
+    const session = new StrokeSession({
+      makeContext: (_slot, pressure = 1): ToolContext => ({
+        buffer,
+        color: RED,
+        brushSize: 8,
+        pressure,
+        invalidate: () => {},
+        setColor: () => {},
+      }),
+      onBegin: () => {},
+      onUseColor: () => {},
+      onEnd: () => {},
+    });
+
+    session.start(1, tool('pencil'), 'primary', 8, 8, 0.25);
+    session.move(1, [{ x: 8, y: 8, pressure: 0.5 }]);
+    session.finish(1);
+
+    expect(buffer.getPixel(7, 7)?.a).toBe(255);
+    expect(buffer.getPixel(10, 10)?.a).toBe(255);
+    expect(buffer.getPixel(11, 11)?.a).toBe(0);
+  });
 });

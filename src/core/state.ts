@@ -71,6 +71,9 @@ export class PixelBuffer {
   readonly height: number;
   readonly data: Uint8ClampedArray;
   private readonly changeListeners = new Set<PixelChangeListener>();
+  private clipMask: Uint8Array | null = null;
+  private locked = false;
+  private alphaLock = false;
 
   // Грязная область: границы включительно; minX > maxX означает «изменений нет»
   private dirtyMinX = 0;
@@ -121,10 +124,19 @@ export class PixelBuffer {
    */
   setPixel(x: number, y: number, color: RGBA): boolean {
     if (!this.inBounds(x, y)) return false;
-    this.capturePixel(y * this.width + x);
+    const pixel = y * this.width + x;
+    if (this.locked) return false;
+    if (this.clipMask && this.clipMask[pixel] === 0) return false;
+    this.capturePixel(pixel);
     const i = this.index(x, y);
     const d = this.data;
-    if (color.a === 0) {
+    if (this.alphaLock) {
+      if (d[i + 3] === 0 || color.a === 0) return false;
+      const opacity = color.a / 255;
+      d[i] = Math.round(d[i] + (color.r - d[i]) * opacity);
+      d[i + 1] = Math.round(d[i + 1] + (color.g - d[i + 1]) * opacity);
+      d[i + 2] = Math.round(d[i + 2] + (color.b - d[i + 2]) * opacity);
+    } else if (color.a === 0) {
       d[i] = 0;
       d[i + 1] = 0;
       d[i + 2] = 0;
@@ -139,8 +151,36 @@ export class PixelBuffer {
     return true;
   }
 
+  setClipMask(mask: Uint8Array | null): void {
+    if (mask && mask.length !== this.width * this.height) {
+      throw new RangeError(`Selection mask must contain ${this.width * this.height} pixels.`);
+    }
+    this.clipMask = mask;
+  }
+
+  getClipMask(): Uint8Array | null {
+    return this.clipMask;
+  }
+
+  setLocked(locked: boolean): void {
+    this.locked = locked;
+  }
+
+  get isLocked(): boolean {
+    return this.locked;
+  }
+
+  setAlphaLock(alphaLock: boolean): void {
+    this.alphaLock = alphaLock;
+  }
+
+  get isAlphaLocked(): boolean {
+    return this.alphaLock;
+  }
+
   /** Делает весь холст прозрачным. */
   clear(): void {
+    if (this.locked || this.alphaLock) return;
     if (this.changeListeners.size > 0) {
       for (let pixel = 0; pixel < this.width * this.height; pixel++) {
         const i = pixel * CHANNELS;

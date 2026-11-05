@@ -14,11 +14,23 @@
 
 import { DEFAULT_PALETTE_ID, MAX_RECENT_COLORS, PALETTES, getPalette, nearestPaletteColor } from './palette';
 import { CHANNELS, isValidCanvasSize, normalizeTransparent, type RGBA } from './state';
+import {
+  DEFAULT_LAYER_EFFECTS,
+  MAX_GROUP_COMPOSITE_PIXELS,
+  compositeLayers,
+  createRasterLayer,
+  updateRasterLayer,
+  type LayerBlendMode,
+  type LayerEffects,
+  type LayerGroup,
+  type LayerRole,
+} from './layers';
 
 export const PROJECT_FORMAT = 'pixel-editor-project';
-export const PROJECT_VERSION = 2;
+export const PROJECT_VERSION = 5;
 export const MAX_PROJECT_CANVASES = 32;
 export const MAX_PROJECT_TOTAL_PIXELS = 4_194_304;
+export const MAX_PROJECT_LAYERS = 64;
 export const MAX_PROJECT_CANVAS_COORDINATE = 1_000_000;
 /** Максимальный размер JSON проекта (символов), рассчитан на холст до 4 мегапикселей. */
 export const MAX_PROJECT_JSON_LENGTH = 32 * 1024 * 1024;
@@ -30,6 +42,24 @@ export interface ProjectCanvasData {
   width: number;
   height: number;
   pixels: Uint8ClampedArray;
+  layers?: ProjectLayerData[];
+  groups?: LayerGroup[];
+  activeLayerId?: string;
+}
+
+export interface ProjectLayerData {
+  id: string;
+  name: string;
+  pixels: Uint8ClampedArray;
+  visible: boolean;
+  locked: boolean;
+  opacity: number;
+  blendMode: LayerBlendMode;
+  alphaLock: boolean;
+  clippingMask: boolean;
+  role?: LayerRole;
+  effects?: LayerEffects;
+  groupId?: string | null;
 }
 
 export interface ProjectData {
@@ -79,12 +109,14 @@ function colorToArray(color: RGBA): [number, number, number, number] {
 export function serializeProject(project: ProjectData): string {
   const canvases = project.canvases;
   const multiCanvas = canvases !== undefined;
+  const layered = canvases?.some((canvas) => canvas.layers !== undefined) ?? false;
   if (canvases !== undefined && (canvases.length === 0 || canvases.length > MAX_PROJECT_CANVASES)) {
     throw new ProjectFormatError(`Проект должен содержать от 1 до ${MAX_PROJECT_CANVASES} холстов.`);
   }
   if (canvases !== undefined) {
     const ids = new Set<string>();
     let totalPixels = 0;
+    let totalGroupPixels = 0;
     for (const canvas of canvases) {
       if (
         typeof canvas.id !== 'string' ||
@@ -103,7 +135,88 @@ export function serializeProject(project: ProjectData): string {
         throw new ProjectFormatError('В проекте повторяется идентификатор холста.');
       }
       ids.add(canvas.id);
-      totalPixels += canvas.width * canvas.height;
+      if (layered) {
+        const layers = canvas.layers;
+        if (!layers || layers.length === 0 || layers.length > MAX_PROJECT_LAYERS) {
+          throw new ProjectFormatError(`Каждый холст должен содержать от 1 до ${MAX_PROJECT_LAYERS} слоёв.`);
+        }
+        const layerIds = new Set<string>();
+        for (const layer of layers) {
+          if (
+            typeof layer.id !== 'string' || layer.id.length === 0 || layer.id.length > 80 ||
+            typeof layer.name !== 'string' || layer.name.trim().length === 0 || layer.name.length > 80 ||
+            !(layer.blendMode === 'normal' || layer.blendMode === 'multiply' || layer.blendMode === 'screen' ||
+              layer.blendMode === 'overlay' || layer.blendMode === 'add') ||
+            typeof layer.visible !== 'boolean' || typeof layer.locked !== 'boolean' ||
+            typeof layer.alphaLock !== 'boolean' || typeof layer.clippingMask !== 'boolean' ||
+            !Number.isFinite(layer.opacity) || layer.opacity < 0 || layer.opacity > 1 ||
+            (layer.role !== undefined && !['paint', 'background', 'reference'].includes(layer.role)) ||
+            (layer.effects !== undefined && !['brightness', 'contrast', 'saturation'].every((key) => {
+              const value = layer.effects?.[key as keyof LayerEffects];
+              return typeof value === 'number' && Number.isFinite(value) && value >= -100 && value <= 100;
+            })) ||
+            (layer.groupId !== undefined && layer.groupId !== null &&
+              (typeof layer.groupId !== 'string' || layer.groupId.length === 0 || layer.groupId.length > 80)) ||
+            layer.pixels.length !== canvas.width * canvas.height * CHANNELS
+          ) {
+            throw new ProjectFormatError('В проекте указаны некорректные данные слоя.');
+          }
+          if (layerIds.has(layer.id)) throw new ProjectFormatError('В проекте повторяется идентификатор слоя.');
+          layerIds.add(layer.id);
+          totalPixels += canvas.width * canvas.height;
+          if (totalPixels > MAX_PROJECT_TOTAL_PIXELS) {
+            throw new ProjectFormatError('Общая площадь пиксельных данных проекта превышает допустимый лимит.');
+          }
+        }
+        const groups = canvas.groups ?? [];
+        if (groups.length > MAX_PROJECT_LAYERS) throw new ProjectFormatError('В проекте слишком много групп слоёв.');
+        totalGroupPixels += groups.length * canvas.width * canvas.height;
+        if (totalGroupPixels > MAX_GROUP_COMPOSITE_PIXELS) {
+          throw new ProjectFormatError('Общая площадь буферов групп превышает допустимый лимит.');
+        }
+        const groupIds = new Set<string>();
+        for (const group of groups) {
+          if (
+            typeof group.id !== 'string' || group.id.length === 0 || group.id.length > 80 ||
+            layerIds.has(group.id) || groupIds.has(group.id) ||
+            typeof group.name !== 'string' || group.name.trim().length === 0 || group.name.length > 80 ||
+            (group.parentGroupId !== null &&
+              (typeof group.parentGroupId !== 'string' || group.parentGroupId.length === 0 || group.parentGroupId.length > 80)) ||
+            typeof group.visible !== 'boolean' || typeof group.locked !== 'boolean' ||
+            !Number.isFinite(group.opacity) || group.opacity < 0 || group.opacity > 1 ||
+            !(group.blendMode === 'normal' || group.blendMode === 'multiply' || group.blendMode === 'screen' ||
+              group.blendMode === 'overlay' || group.blendMode === 'add') ||
+            !['brightness', 'contrast', 'saturation'].every((key) => {
+              const value = group.effects?.[key as keyof LayerEffects];
+              return typeof value === 'number' && Number.isFinite(value) && value >= -100 && value <= 100;
+            })
+          ) throw new ProjectFormatError('В проекте указаны некорректные данные группы слоёв.');
+          groupIds.add(group.id);
+        }
+        for (const layer of layers) {
+          if (layer.groupId && !groupIds.has(layer.groupId)) {
+            throw new ProjectFormatError('Слой ссылается на неизвестную группу.');
+          }
+        }
+        const groupMap = new Map(groups.map((group) => [group.id, group]));
+        for (const group of groups) {
+          if (group.parentGroupId !== null && !groupIds.has(group.parentGroupId)) {
+            throw new ProjectFormatError('Группа ссылается на неизвестную родительскую группу.');
+          }
+          const ancestors = new Set([group.id]);
+          let parentId = group.parentGroupId;
+          while (parentId) {
+            if (ancestors.has(parentId)) throw new ProjectFormatError('Вложенность групп содержит цикл.');
+            ancestors.add(parentId);
+            parentId = groupMap.get(parentId)?.parentGroupId ?? null;
+          }
+        }
+        if (canvas.activeLayerId !== undefined && !layerIds.has(canvas.activeLayerId)) {
+          throw new ProjectFormatError('В проекте указан неизвестный активный слой.');
+        }
+      } else {
+        totalPixels += canvas.width * canvas.height;
+      }
       if (totalPixels > MAX_PROJECT_TOTAL_PIXELS) {
         throw new ProjectFormatError('Общая площадь холстов в проекте превышает допустимый лимит.');
       }
@@ -114,7 +227,7 @@ export function serializeProject(project: ProjectData): string {
   }
   const common = {
     format: PROJECT_FORMAT,
-    version: multiCanvas ? PROJECT_VERSION : 1,
+    version: multiCanvas ? (layered ? PROJECT_VERSION : 2) : 1,
     savedAt: new Date().toISOString(),
     palette: { id: project.paletteId, freeColor: project.freeColor },
     colors: { primary: colorToArray(project.primary), secondary: colorToArray(project.secondary) },
@@ -124,10 +237,27 @@ export function serializeProject(project: ProjectData): string {
     return JSON.stringify({
       ...common,
       activeCanvasId: project.activeCanvasId,
-      canvases: canvases.map((canvas) => ({
-        ...canvas,
-        pixels: bytesToBase64(canvas.pixels),
-      })),
+      canvases: canvases.map((canvas) => layered
+        ? {
+            id: canvas.id,
+            x: canvas.x,
+            y: canvas.y,
+            width: canvas.width,
+            height: canvas.height,
+            activeLayerId: canvas.activeLayerId,
+            groups: canvas.groups ?? [],
+            layers: canvas.layers!.map((layer) => ({
+              ...layer,
+              role: layer.role ?? 'paint',
+              effects: layer.effects ?? { ...DEFAULT_LAYER_EFFECTS },
+              groupId: layer.groupId ?? null,
+              pixels: bytesToBase64(layer.pixels),
+            })),
+          }
+        : {
+            ...canvas,
+            pixels: bytesToBase64(canvas.pixels),
+          }),
     });
   }
   return JSON.stringify({
@@ -140,6 +270,13 @@ export function serializeProject(project: ProjectData): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isLayerEffects(value: unknown): value is LayerEffects {
+  return isRecord(value) && ['brightness', 'contrast', 'saturation'].every((key) => {
+    const channel = value[key];
+    return typeof channel === 'number' && Number.isFinite(channel) && channel >= -100 && channel <= 100;
+  });
 }
 
 function readColor(value: unknown): RGBA | null {
@@ -182,11 +319,12 @@ export function parseProject(text: string): ProjectData {
   let canvases: ProjectCanvasData[] | undefined;
   let activeCanvasId: string | undefined;
 
-  if (version === 2) {
+  if (version === 2 || version === 3 || version === 4 || version === 5) {
     if (!Array.isArray(raw.canvases) || raw.canvases.length === 0 || raw.canvases.length > MAX_PROJECT_CANVASES) {
       throw new ProjectFormatError(`Проект должен содержать от 1 до ${MAX_PROJECT_CANVASES} холстов.`);
     }
     let totalPixels = 0;
+    let totalGroupPixels = 0;
     const ids = new Set<string>();
     canvases = raw.canvases.map((entry): ProjectCanvasData => {
       if (!isRecord(entry) || typeof entry.id !== 'string' || entry.id.length === 0 || entry.id.length > 80) {
@@ -207,15 +345,155 @@ export function parseProject(text: string): ProjectData {
       ) {
         throw new ProjectFormatError('В проекте указан недопустимый размер или позиция холста.');
       }
-      totalPixels += entry.width * entry.height;
-      if (totalPixels > MAX_PROJECT_TOTAL_PIXELS) throw new ProjectFormatError('Общая площадь холстов в проекте превышает допустимый лимит.');
+      const canvasWidth = entry.width;
+      const canvasHeight = entry.height;
+      let layerData: ProjectLayerData[] | undefined;
+      let groupData: LayerGroup[] = [];
+      let activeLayerId: string | undefined;
+      if (version >= 3) {
+        if (!Array.isArray(entry.layers) || entry.layers.length === 0 || entry.layers.length > MAX_PROJECT_LAYERS) {
+          throw new ProjectFormatError(`Каждый холст должен содержать от 1 до ${MAX_PROJECT_LAYERS} слоёв.`);
+        }
+        const layerIds = new Set<string>();
+        layerData = entry.layers.map((item): ProjectLayerData => {
+          if (!isRecord(item) || typeof item.id !== 'string' || item.id.length === 0 || item.id.length > 80 ||
+            typeof item.name !== 'string' || item.name.trim().length === 0 || item.name.length > 80) {
+            throw new ProjectFormatError('В проекте указаны некорректные данные слоя.');
+          }
+          if (layerIds.has(item.id)) throw new ProjectFormatError('В проекте повторяется идентификатор слоя.');
+          layerIds.add(item.id);
+          const blendMode = item.blendMode;
+          const role = item.role;
+          const rawEffects = item.effects;
+          const groupId = item.groupId;
+          if (
+            typeof item.visible !== 'boolean' || typeof item.locked !== 'boolean' ||
+            typeof item.alphaLock !== 'boolean' || typeof item.clippingMask !== 'boolean' ||
+            typeof item.opacity !== 'number' || !Number.isFinite(item.opacity) || item.opacity < 0 || item.opacity > 1 ||
+            !(blendMode === 'normal' || blendMode === 'multiply' || blendMode === 'screen' ||
+              blendMode === 'overlay' || blendMode === 'add') ||
+            (version >= 4 && role !== 'paint' && role !== 'background' && role !== 'reference') ||
+            (version >= 4 && (!isRecord(rawEffects) ||
+              !['brightness', 'contrast', 'saturation'].every((key) =>
+                typeof rawEffects[key] === 'number' && Number.isFinite(rawEffects[key]) &&
+                (rawEffects[key] as number) >= -100 && (rawEffects[key] as number) <= 100))) ||
+            (version >= 5 && groupId !== null &&
+              (typeof groupId !== 'string' || groupId.length === 0 || groupId.length > 80))
+          ) {
+            throw new ProjectFormatError('В проекте указаны некорректные параметры слоя.');
+          }
+          totalPixels += canvasWidth * canvasHeight;
+          if (totalPixels > MAX_PROJECT_TOTAL_PIXELS) {
+            throw new ProjectFormatError('Общая площадь пиксельных данных проекта превышает допустимый лимит.');
+          }
+          return {
+            id: item.id,
+            name: item.name.trim(),
+            visible: item.visible,
+            locked: item.locked,
+            alphaLock: item.alphaLock,
+            clippingMask: item.clippingMask,
+            opacity: item.opacity,
+            blendMode,
+            role: version >= 4 ? role as LayerRole : 'paint',
+            effects: version >= 4 ? rawEffects as LayerEffects : { ...DEFAULT_LAYER_EFFECTS },
+            groupId: version >= 5 ? groupId as string | null : null,
+            pixels: parsePixelData(item.pixels, canvasWidth, canvasHeight),
+          };
+        });
+        if (version >= 5) {
+          if (!Array.isArray(entry.groups) || entry.groups.length > MAX_PROJECT_LAYERS) {
+            throw new ProjectFormatError('В проекте указаны некорректные группы слоёв.');
+          }
+          const groupIds = new Set<string>();
+          groupData = entry.groups.map((value): LayerGroup => {
+            if (!isRecord(value) || typeof value.id !== 'string' || value.id.length === 0 || value.id.length > 80 ||
+              layerIds.has(value.id) || groupIds.has(value.id) ||
+              typeof value.name !== 'string' || value.name.trim().length === 0 || value.name.length > 80 ||
+              (value.parentGroupId !== null &&
+                (typeof value.parentGroupId !== 'string' || value.parentGroupId.length === 0 || value.parentGroupId.length > 80)) ||
+              typeof value.visible !== 'boolean' || typeof value.locked !== 'boolean' ||
+              typeof value.opacity !== 'number' || !Number.isFinite(value.opacity) || value.opacity < 0 || value.opacity > 1 ||
+              !(value.blendMode === 'normal' || value.blendMode === 'multiply' || value.blendMode === 'screen' ||
+                value.blendMode === 'overlay' || value.blendMode === 'add') || !isLayerEffects(value.effects)) {
+              throw new ProjectFormatError('В проекте указаны некорректные данные группы слоёв.');
+            }
+            groupIds.add(value.id);
+            return {
+              id: value.id,
+              name: value.name.trim(),
+              parentGroupId: value.parentGroupId as string | null,
+              visible: value.visible,
+              locked: value.locked,
+              opacity: value.opacity,
+              blendMode: value.blendMode,
+              effects: value.effects as unknown as LayerEffects,
+            };
+          });
+          for (const group of groupData) {
+            if (group.parentGroupId !== null && !groupIds.has(group.parentGroupId)) {
+              throw new ProjectFormatError('Группа ссылается на неизвестную родительскую группу.');
+            }
+            const ancestors = new Set([group.id]);
+            let parentId = group.parentGroupId;
+            while (parentId) {
+              if (ancestors.has(parentId)) throw new ProjectFormatError('Вложенность групп содержит цикл.');
+              ancestors.add(parentId);
+              parentId = groupData.find((candidate) => candidate.id === parentId)?.parentGroupId ?? null;
+            }
+          }
+          for (const layer of layerData) {
+            if (layer.groupId && !groupIds.has(layer.groupId)) {
+              throw new ProjectFormatError('Слой ссылается на неизвестную группу.');
+            }
+          }
+          totalGroupPixels += groupData.length * canvasWidth * canvasHeight;
+          if (totalGroupPixels > MAX_GROUP_COMPOSITE_PIXELS) {
+            throw new ProjectFormatError('Общая площадь буферов групп превышает допустимый лимит.');
+          }
+        }
+        activeLayerId = typeof entry.activeLayerId === 'string' && layerIds.has(entry.activeLayerId)
+          ? entry.activeLayerId
+          : layerData[0]!.id;
+      } else {
+        totalPixels += canvasWidth * canvasHeight;
+        if (totalPixels > MAX_PROJECT_TOTAL_PIXELS) {
+          throw new ProjectFormatError('Общая площадь холстов в проекте превышает допустимый лимит.');
+        }
+      }
+      const pixels = layerData
+        ? compositeLayers(
+            canvasWidth,
+            canvasHeight,
+            layerData.map((layer) => updateRasterLayer(
+              createRasterLayer(layer.id, layer.name, canvasWidth, canvasHeight, layer.pixels),
+              {
+                visible: layer.visible,
+                locked: layer.locked,
+                opacity: layer.opacity,
+                blendMode: layer.blendMode,
+                alphaLock: layer.alphaLock,
+                clippingMask: layer.clippingMask,
+                role: layer.role,
+                effects: layer.effects,
+                groupId: layer.groupId,
+              },
+            )),
+            undefined,
+            undefined,
+            groupData,
+          ).data
+        : parsePixelData(entry.pixels, canvasWidth, canvasHeight);
       return {
         id: entry.id,
         x: entry.x,
         y: entry.y,
         width: entry.width,
         height: entry.height,
-        pixels: parsePixelData(entry.pixels, entry.width, entry.height),
+        pixels,
+        layers: layerData,
+        groups: groupData,
+        activeLayerId,
       };
     });
     activeCanvasId = typeof raw.activeCanvasId === 'string' && ids.has(raw.activeCanvasId)

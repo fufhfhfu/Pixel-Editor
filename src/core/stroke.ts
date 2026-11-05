@@ -19,7 +19,7 @@ export type StrokeOwner = number | 'keyboard';
 export type StrokeOutcome = 'commit' | 'rollback';
 
 export interface StrokeHooks {
-  makeContext(slot: ColorSlot): ToolContext;
+  makeContext(slot: ColorSlot, pressure?: number): ToolContext;
   /** Перед первым изменением пикселей (история запоминает исходное состояние). */
   onBegin(): void;
   /** Штрих начат этим цветом (список недавних). */
@@ -34,6 +34,7 @@ interface ActiveStroke {
   slot: ColorSlot;
   x: number;
   y: number;
+  pressure: number;
 }
 
 export class StrokeSession {
@@ -50,11 +51,12 @@ export class StrokeSession {
   }
 
   /** Начинает штрих. Возвращает false, если другой штрих уже идёт. */
-  start(owner: StrokeOwner, tool: Tool, slot: ColorSlot, x: number, y: number): boolean {
+  start(owner: StrokeOwner, tool: Tool, slot: ColorSlot, x: number, y: number, pressure = 1): boolean {
     if (this.current) return false;
-    this.current = { owner, tool, slot, x, y };
+    const normalizedPressure = Math.min(1, Math.max(0, pressure));
+    this.current = { owner, tool, slot, x, y, pressure: normalizedPressure };
 
-    const ctx = this.hooks.makeContext(slot);
+    const ctx = this.hooks.makeContext(slot, normalizedPressure);
     if (tool.usesColor) this.hooks.onUseColor(ctx.color);
     this.hooks.onBegin();
     tool.begin(ctx, x, y);
@@ -66,11 +68,20 @@ export class StrokeSession {
     const stroke = this.current;
     if (!stroke || stroke.owner !== owner) return;
 
-    const ctx = this.hooks.makeContext(stroke.slot);
     for (const p of points) {
-      if (p.x === stroke.x && p.y === stroke.y) continue;
+      if (
+        p.x === stroke.x &&
+        p.y === stroke.y &&
+        (p.pressure === undefined || p.pressure === stroke.pressure)
+      ) {
+        continue;
+      }
       stroke.x = p.x;
       stroke.y = p.y;
+      if (p.pressure !== undefined && Number.isFinite(p.pressure) && p.pressure > 0) {
+        stroke.pressure = Math.min(1, Math.max(0, p.pressure));
+      }
+      const ctx = this.hooks.makeContext(stroke.slot, stroke.pressure);
       stroke.tool.move?.(ctx, p.x, p.y);
     }
   }
@@ -82,7 +93,10 @@ export class StrokeSession {
     this.current = null;
 
     const p = at ?? { x: stroke.x, y: stroke.y };
-    stroke.tool.end?.(this.hooks.makeContext(stroke.slot), p.x, p.y);
+    if (p.pressure !== undefined && Number.isFinite(p.pressure) && p.pressure > 0) {
+      stroke.pressure = Math.min(1, Math.max(0, p.pressure));
+    }
+    stroke.tool.end?.(this.hooks.makeContext(stroke.slot, stroke.pressure), p.x, p.y);
     this.hooks.onEnd('commit');
     return true;
   }
@@ -93,7 +107,7 @@ export class StrokeSession {
     if (!stroke || stroke.owner !== owner) return false;
     this.current = null;
 
-    stroke.tool.cancel?.(this.hooks.makeContext(stroke.slot));
+    stroke.tool.cancel?.(this.hooks.makeContext(stroke.slot, stroke.pressure));
     this.hooks.onEnd('rollback');
     return true;
   }

@@ -15,6 +15,7 @@ export interface ViewState {
 export interface PixelPos {
   x: number;
   y: number;
+  pressure?: number;
 }
 
 /** Допустимые уровни зума (шаг колеса мыши переключает соседние). */

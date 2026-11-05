@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { PixelBuffer, type RGBA } from './state';
-import { TOOLS, type ToolContext, type ToolId } from './tools';
-import { bresenham, stampSquare } from './tools/draw';
+import { createBrushDefinition, TOOLS, type BrushDefinition, type ToolContext, type ToolId } from './tools';
+import { bresenham, isPixelPerfectCorner, stampSquare } from './tools/draw';
 import { floodFill } from './tools/floodFill';
 
 const RED: RGBA = { r: 255, g: 0, b: 0, a: 255 };
@@ -13,13 +13,52 @@ const tool = (id: ToolId) => {
   return found;
 };
 
-function ctxOf(buffer: PixelBuffer, color = RED, brushSize = 1) {
+function ctxOf(
+  buffer: PixelBuffer,
+  color = RED,
+  brushSize = 1,
+  options: {
+    brushShape?: 'square' | 'circle';
+    opacity?: number;
+    pressure?: number;
+    pixelPerfect?: boolean;
+    brushDefinition?: BrushDefinition;
+  } = {},
+) {
   let invalidated = 0;
   let picked: RGBA | null = null;
   const ctx: ToolContext = {
     buffer,
     color,
     brushSize,
+    brushShape: options.brushShape,
+    opacity: options.opacity,
+    pressure: options.pressure,
+    brushDefinition: options.brushDefinition,
+    settings: options.pixelPerfect === undefined
+      ? undefined
+      : {
+          pixelPerfect: options.pixelPerfect,
+          lineAngleSnap: 0,
+          fillContiguous: true,
+          fillTolerance: 0,
+          fillConnectivity: 4,
+          fillProtectAlpha: false,
+          sampleMerged: false,
+          pickerRadius: 1,
+          polygonSides: 6,
+          gradientKind: 'linear',
+          gradientDither: false,
+          gradientTransparency: false,
+          gradientMidpointEnabled: false,
+          gradientMidpoint: RED,
+          gradientMidpointPosition: 50,
+          ditherPattern: 'bayer4',
+          ditherDensity: 0.5,
+          ditherScale: 1,
+          ditherAngle: 0,
+          ditherCustomPattern: '01/10',
+        },
     invalidate: () => invalidated++,
     setColor: (c) => (picked = c),
   };
@@ -66,6 +105,69 @@ describe('Кисть', () => {
     stampSquare(b, 0, 0, 4, RED);
     expect(countWhere(b, opaque)).toBe(9);
   });
+
+  it('поддерживает размер 64 без потери пикселей', () => {
+    const b = new PixelBuffer(80, 80);
+    stampSquare(b, 40, 40, 64, RED);
+    expect(countWhere(b, opaque)).toBe(64 * 64);
+  });
+
+  it('круглый отпечаток не закрашивает углы квадратной рамки', () => {
+    const b = new PixelBuffer(16, 16);
+    const { ctx } = ctxOf(b, RED, 4, { brushShape: 'circle' });
+    tool('pencil').begin(ctx, 8, 8);
+    expect(countWhere(b, opaque)).toBe(12);
+    expect(b.getPixel(8, 7)?.a).toBe(255);
+    expect(b.getPixel(6, 6)?.a).toBe(0);
+  });
+
+  it('непрозрачность рисования задаёт альфу пикселя', () => {
+    const b = new PixelBuffer(8, 8);
+    const { ctx } = ctxOf(b, RED, 1, { opacity: 0.5 });
+    tool('pencil').begin(ctx, 3, 3);
+    expect(b.getPixel(3, 3)?.a).toBe(128);
+  });
+
+  it('давление пера масштабирует размер кисти даже без смены пиксельной позиции', () => {
+    const b = new PixelBuffer(16, 16);
+    const pencil = tool('pencil');
+    pencil.begin(ctxOf(b, RED, 4, { pressure: 0.5 }).ctx, 8, 8);
+    expect(countWhere(b, opaque)).toBe(4);
+  });
+
+  it('ластик с неполной непрозрачностью постепенно уменьшает альфу', () => {
+    const b = new PixelBuffer(8, 8);
+    b.setPixel(3, 3, RED);
+    const eraser = tool('eraser');
+    eraser.begin(ctxOf(b, RED, 1, { opacity: 0.5 }).ctx, 3, 3);
+    expect(b.getPixel(3, 3)?.a).toBe(128);
+    eraser.begin(ctxOf(b, RED, 1, { opacity: 0.5 }).ctx, 3, 3);
+    expect(b.getPixel(3, 3)?.a).toBe(64);
+  });
+
+  it('нулевая непрозрачность не рисует и не стирает', () => {
+    const b = new PixelBuffer(8, 8);
+    const pencil = tool('pencil');
+    pencil.begin(ctxOf(b, RED, 1, { opacity: 0 }).ctx, 3, 3);
+    expect(b.getPixel(3, 3)?.a).toBe(0);
+    b.setPixel(3, 3, RED);
+    tool('eraser').begin(ctxOf(b, RED, 1, { opacity: 0 }).ctx, 3, 3);
+    expect(b.getPixel(3, 3)).toEqual(RED);
+  });
+
+  it('Pixel Perfect пропускает ортогональный угол-пиксель и сохраняет диагональные концы', () => {
+    const b = new PixelBuffer(8, 8);
+    const pencil = tool('pencil');
+    const { ctx } = ctxOf(b, RED, 1, { pixelPerfect: true });
+    pencil.begin(ctx, 1, 1);
+    pencil.move?.(ctx, 2, 1);
+    pencil.move?.(ctx, 2, 2);
+    pencil.end?.(ctx, 2, 2);
+    expect(isPixelPerfectCorner({ x: 1, y: 1 }, { x: 2, y: 1 }, { x: 2, y: 2 })).toBe(true);
+    expect(b.getPixel(1, 1)?.a).toBe(255);
+    expect(b.getPixel(2, 1)?.a).toBe(0);
+    expect(b.getPixel(2, 2)?.a).toBe(255);
+  });
 });
 
 describe('Свободное рисование', () => {
@@ -96,6 +198,16 @@ describe('Свободное рисование', () => {
     tool('eraser').begin(ctx, 4, 4);
     tool('eraser').end?.(ctx, 4, 4);
     expect(countWhere(b, opaque)).toBe(256 - 4);
+  });
+
+  it('ластик использует маску и настройки пользовательской кисти', () => {
+    const b = new PixelBuffer(16, 16);
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) b.setPixel(x, y, RED);
+    const brush = createBrushDefinition('Round eraser', 4, 'circle');
+    const { ctx } = ctxOf(b, RED, 4, { brushDefinition: brush });
+    tool('eraser').begin(ctx, 8, 8);
+    expect(b.getPixel(8, 8)?.a).toBe(0);
+    expect(b.getPixel(6, 6)).toEqual(RED);
   });
 
   it('разрывов нет при редких событиях: 2400 случайных штрихов, все кисти', () => {

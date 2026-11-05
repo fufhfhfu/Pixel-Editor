@@ -75,7 +75,7 @@
           {#each tools as tool (tool.id)}
             <div><dt><span class="kbd">{tool.hotkeyLabel}</span></dt><dd>{tool.label}</dd></div>
           {/each}
-          <div><dt><span class="kbd">1</span>–<span class="kbd">4</span></dt><dd>Размер кисти, px</dd></div>
+          <div><dt><span class="kbd">1</span>–<span class="kbd">9</span></dt><dd>Размер кисти, px</dd></div>
         </dl>
 
         <h3>Цвета</h3>

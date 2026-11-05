@@ -3,8 +3,25 @@
   import type { ColorSlot } from '../core/palette';
   import { PixelRenderer } from '../core/render';
   import type { PixelBuffer, RGBA } from '../core/state';
+  import {
+    combineSelections,
+    createColorSelection,
+    createEllipseSelection,
+    createPolygonSelection,
+    createRectSelection,
+    type SelectionMask,
+    type SelectionMode,
+    type SelectionOperation,
+  } from '../core/selection';
   import { StrokeSession, type StrokeOutcome } from '../core/stroke';
-  import type { Tool, ToolContext } from '../core/tools';
+  import {
+    getTool,
+    type BrushDefinition,
+    type BrushShape,
+    type DrawingSettings,
+    type Tool,
+    type ToolContext,
+  } from '../core/tools';
   import {
     centerView,
     ensurePixelVisible,
@@ -22,6 +39,90 @@
     y: number;
     buffer: PixelBuffer;
   }
+
+  function drawSelectionOverlay(id: string): void {
+    const canvas = selectionCanvases.get(id);
+    const board = boards.find((entry) => entry.id === id);
+    if (!canvas || !board) return;
+    if (canvas.width !== board.buffer.width || canvas.height !== board.buffer.height) {
+      canvas.width = board.buffer.width;
+      canvas.height = board.buffer.height;
+    }
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('Не удалось создать контекст отображения выделения.');
+    const image = context.getImageData(0, 0, canvas.width, canvas.height);
+    const activeSelection = previewSelection ?? selectionMask;
+    if (id === activeBoardId && activeSelection && activeSelection.width === canvas.width && activeSelection.height === canvas.height) {
+      const { width, height, data: selected } = activeSelection;
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const pixel = y * width + x;
+          if (!selected[pixel]) continue;
+          const edge = x === 0 || y === 0 || x === width - 1 || y === height - 1 ||
+            !selected[pixel - 1] || !selected[pixel + 1] ||
+            !selected[pixel - width] || !selected[pixel + width];
+          if (!edge) continue;
+          const offset = pixel * 4;
+          const color = (x + y) % 2 === 0 ? 255 : 0;
+          image.data[offset] = color;
+          image.data[offset + 1] = color;
+          image.data[offset + 2] = color;
+          image.data[offset + 3] = 255;
+        }
+      }
+    }
+    context.putImageData(image, 0, 0);
+  }
+
+  function drawTransformPreview(id: string): void {
+    const canvas = transformPreviewCanvases.get(id);
+    const board = boards.find((entry) => entry.id === id);
+    if (!canvas || !board) return;
+    if (canvas.width !== board.buffer.width || canvas.height !== board.buffer.height) {
+      canvas.width = board.buffer.width;
+      canvas.height = board.buffer.height;
+    }
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('Не удалось создать контекст предпросмотра трансформации.');
+    const image = context.getImageData(0, 0, canvas.width, canvas.height);
+    if (id === activeBoardId && previewBuffer &&
+      previewBuffer.width === canvas.width && previewBuffer.height === canvas.height) {
+      image.data.set(previewBuffer.data);
+    }
+    context.putImageData(image, 0, 0);
+  }
+
+  function registerSelectionCanvas(element: HTMLCanvasElement, id: string) {
+    selectionCanvases.set(id, element);
+    drawSelectionOverlay(id);
+    return {
+      destroy() {
+        selectionCanvases.delete(id);
+      },
+    };
+  }
+
+  function registerTransformPreviewCanvas(element: HTMLCanvasElement, id: string) {
+    transformPreviewCanvases.set(id, element);
+    drawTransformPreview(id);
+    return {
+      destroy() {
+        transformPreviewCanvases.delete(id);
+      },
+    };
+  }
+
+  $effect(() => {
+    const currentSelection = selectionMask;
+    const currentActiveBoard = activeBoardId;
+    for (const board of boards) {
+      void board.buffer;
+      drawSelectionOverlay(board.id);
+      drawTransformPreview(board.id);
+    }
+    void currentSelection;
+    void currentActiveBoard;
+  });
 
   interface AlignmentGuide {
     x1: number;
@@ -45,6 +146,15 @@
     primary: RGBA;
     secondary: RGBA;
     brushSize: number;
+    brushShape: BrushShape;
+    brushOpacity: number;
+    brushDefinition: BrushDefinition | null;
+    settings: DrawingSettings;
+    temporaryPicker: boolean;
+    selectionMask: SelectionMask | null;
+    previewSelection: SelectionMask | null;
+    selectionMode: SelectionMode | null;
+    selectionOperation: SelectionOperation;
     /** Пипетка выбрала цвет для слота. */
     onpickcolor: (slot: ColorSlot, color: RGBA) => void;
     /** Штрих начат этим цветом (для списка недавних). */
@@ -53,8 +163,13 @@
     onstrokebegin: () => void;
     /** После штриха: commit — записать в историю, rollback — откатить целиком. */
     onstrokeend: (outcome: StrokeOutcome) => void;
+    onrender: () => void;
     onselectboard: (id: string) => void;
     onmoveboard: (id: string, x: number, y: number) => void;
+    onselection: (selection: SelectionMask | null) => void;
+    previewBuffer: PixelBuffer | null;
+    onconfirmtransform: () => void;
+    oncanceltransform: () => void;
   }
 
   let {
@@ -71,12 +186,26 @@
     primary,
     secondary,
     brushSize,
+    brushShape,
+    brushOpacity,
+    brushDefinition,
+    settings,
+    temporaryPicker,
+    selectionMask,
+    previewSelection,
+    selectionMode,
+    selectionOperation,
+    previewBuffer,
     onpickcolor,
     onusecolor,
     onstrokebegin,
     onstrokeend,
+    onrender,
     onselectboard,
     onmoveboard,
+    onselection,
+    onconfirmtransform,
+    oncanceltransform,
   }: Props = $props();
 
   /** Ниже этого зума линии сетки слишком частые и не рисуются. */
@@ -116,6 +245,8 @@
 
   const renderers = new Map<string, { canvas: HTMLCanvasElement; buffer: PixelBuffer; renderer: PixelRenderer }>();
   const canvasElements = new Map<string, HTMLCanvasElement>();
+  const selectionCanvases = new Map<string, HTMLCanvasElement>();
+  const transformPreviewCanvases = new Map<string, HTMLCanvasElement>();
   let frame = 0;
 
   let viewW = 0;
@@ -134,20 +265,41 @@
   let movingBoardStart = { x: 0, y: 0, boardX: 0, boardY: 0 };
   let rightClickBoardId: string | null = null;
   let activeStrokeBoardId: string | null = null;
+  let selectionDrag: {
+    pointerId: number;
+    boardId: string;
+    start: PixelPos;
+    points: PixelPos[];
+    original: SelectionMask | null;
+  } | null = null;
+  let polygonPoints = $state<PixelPos[]>([]);
   let panStart = { x: 0, y: 0, offsetX: 0, offsetY: 0 };
 
   const touches = new Map<number, { x: number; y: number }>();
   let gesture: Gesture | null = null;
+
+  $effect(() => {
+    if (selectionMode !== 'polygon') polygonPoints = [];
+  });
   const sceneBounds = $derived(getSceneBounds());
   const horizontalScroll = $derived(getHorizontalScrollMetrics());
   /** После жеста палец, оставшийся на экране, не должен рисовать. */
   let touchLocked = false;
 
-  function makeContext(slot: ColorSlot): ToolContext {
+  function makeContext(slot: ColorSlot, pressure = 1): ToolContext {
     return {
       buffer,
       color: slot === 'primary' ? primary : secondary,
       brushSize,
+      brushShape,
+      brushDefinition: brushDefinition ?? undefined,
+      opacity: brushOpacity / 100,
+      pressure,
+      secondaryColor: slot === 'primary' ? secondary : primary,
+      settings,
+      sampleBuffer: settings.sampleMerged
+        ? boards.find((board) => board.id === activeBoardId)?.buffer
+        : undefined,
       invalidate: requestRender,
       setColor: (color) => onpickcolor(slot, color),
     };
@@ -167,6 +319,7 @@
 
   /** Просит перерисовать холст в ближайшем кадре (вызывается и снаружи: bind:this). */
   export function requestRender(): void {
+    onrender();
     if (frame !== 0) return;
     frame = requestAnimationFrame(() => {
       frame = 0;
@@ -411,6 +564,32 @@
     return { x: point.x - board.x, y: point.y - board.y };
   }
 
+  function selectionFromDrag(drag: NonNullable<typeof selectionDrag>, end: PixelPos): SelectionMask {
+    if (selectionMode === 'ellipse') {
+      return createEllipseSelection(buffer.width, buffer.height, drag.start.x, drag.start.y, end.x, end.y);
+    }
+    if (selectionMode === 'lasso') {
+      const points = [...drag.points, end].filter((point, index, all) =>
+        index === 0 || point.x !== all[index - 1]!.x || point.y !== all[index - 1]!.y,
+      );
+      return createPolygonSelection(buffer.width, buffer.height, points);
+    }
+    return createRectSelection(buffer.width, buffer.height, drag.start.x, drag.start.y, end.x, end.y);
+  }
+
+  function updateSelectionDrag(drag: NonNullable<typeof selectionDrag>, point: PixelPos): void {
+    if (selectionMode === 'lasso') drag.points.push(point);
+    const next = selectionFromDrag(drag, point);
+    onselection(combineSelections(drag.original, next, selectionOperation));
+  }
+
+  function finishPolygonSelection(): void {
+    if (polygonPoints.length < 3) return;
+    const next = createPolygonSelection(buffer.width, buffer.height, polygonPoints);
+    onselection(combineSelections(selectionMask, next, selectionOperation));
+    polygonPoints = [];
+  }
+
   function getHorizontalScrollMetrics(): {
     scrollContentWidth: number;
   } {
@@ -592,8 +771,41 @@
 
     // Рисование: левая кнопка (касание и перо тоже считаются левой) — основной цвет,
     // правая — дополнительный
-    if (panning || session.isActive || panMode) return;
+    if (panning || session.isActive || panMode || previewBuffer) return;
     if (!board || board.id !== activeBoardId) return;
+    if (selectionMode && e.button === 0) {
+      e.preventDefault();
+      viewportEl.focus({ preventScroll: true });
+      viewportEl.setPointerCapture(e.pointerId);
+      const point = pixelAtBoard(board, e.clientX, e.clientY);
+      if (selectionMode === 'wand' || selectionMode === 'color') {
+        const sampleBuffer = settings.sampleMerged ? board.buffer : buffer;
+        const next = createColorSelection(sampleBuffer, point.x, point.y, {
+          tolerance: settings.fillTolerance,
+          connectivity: settings.fillConnectivity,
+          contiguous: selectionMode === 'wand',
+        });
+        onselection(combineSelections(selectionMask, next, selectionOperation));
+        releasePointer(e.pointerId);
+        return;
+      }
+      if (selectionMode === 'polygon') {
+        const previous = polygonPoints.at(-1);
+        if (!previous || previous.x !== point.x || previous.y !== point.y) polygonPoints = [...polygonPoints, point];
+        if (e.detail >= 2) finishPolygonSelection();
+        releasePointer(e.pointerId);
+        return;
+      }
+      selectionDrag = {
+        pointerId: e.pointerId,
+        boardId: board.id,
+        start: point,
+        points: [point],
+        original: selectionMask,
+      };
+      updateSelectionDrag(selectionDrag, point);
+      return;
+    }
     const slot: ColorSlot | null = e.button === 0 ? 'primary' : e.button === 2 ? 'secondary' : null;
     if (slot === null) return;
 
@@ -602,7 +814,8 @@
     viewportEl.setPointerCapture(e.pointerId);
     const p = pixelAtBoard(board, e.clientX, e.clientY);
     activeStrokeBoardId = board.id;
-    session.start(e.pointerId, tool, slot, p.x, p.y);
+    const activeTool = temporaryPicker || e.altKey ? getTool('picker') : tool;
+    session.start(e.pointerId, activeTool, slot, p.x, p.y, e.pointerType === 'pen' ? e.pressure : 1);
   }
 
   function onPointerMove(e: PointerEvent): void {
@@ -637,6 +850,13 @@
       return;
     }
 
+    if (selectionDrag?.pointerId === e.pointerId) {
+      const board = boards.find((entry) => entry.id === selectionDrag?.boardId);
+      if (board) updateSelectionDrag(selectionDrag, pixelAtBoard(board, e.clientX, e.clientY));
+      updateCursor();
+      return;
+    }
+
     if (
       rightPanPointerId === e.pointerId &&
       !panning &&
@@ -662,7 +882,15 @@
       const board = activeStrokeBoardId
         ? boards.find((entry) => entry.id === activeStrokeBoardId)
         : undefined;
-      if (board) session.move(e.pointerId, events.map((event) => pixelAtBoard(board, event.clientX, event.clientY)));
+      if (board) {
+        session.move(
+          e.pointerId,
+          events.map((event) => ({
+            ...pixelAtBoard(board, event.clientX, event.clientY),
+            pressure: event.pointerType === 'pen' ? event.pressure : 1,
+          })),
+        );
+      }
     }
 
     updateCursor();
@@ -687,13 +915,29 @@
       return;
     }
 
+    if (selectionDrag?.pointerId === e.pointerId) {
+      const drag = selectionDrag;
+      const board = boards.find((entry) => entry.id === drag.boardId);
+      if (board) updateSelectionDrag(drag, pixelAtBoard(board, e.clientX, e.clientY));
+      selectionDrag = null;
+      releasePointer(e.pointerId);
+      return;
+    }
+
     if (rightPanPointerId === e.pointerId) {
       rightPanPointerId = -1;
       if (!panning) {
         const board = rightClickBoardId ? boards.find((entry) => entry.id === rightClickBoardId) : undefined;
         if (board && board.id === activeBoardId) {
           const point = pixelAtBoard(board, e.clientX, e.clientY);
-          session.start(e.pointerId, tool, 'secondary', point.x, point.y);
+          session.start(
+            e.pointerId,
+            temporaryPicker || e.altKey ? getTool('picker') : tool,
+            'secondary',
+            point.x,
+            point.y,
+            e.pointerType === 'pen' ? e.pressure : 1,
+          );
           session.finish(e.pointerId, point);
         }
       }
@@ -707,7 +951,12 @@
     }
     if (session.isActiveFor(e.pointerId)) {
       const board = activeStrokeBoardId ? boards.find((entry) => entry.id === activeStrokeBoardId) : undefined;
-      if (board) session.finish(e.pointerId, pixelAtBoard(board, e.clientX, e.clientY));
+      if (board) {
+        session.finish(e.pointerId, {
+          ...pixelAtBoard(board, e.clientX, e.clientY),
+          pressure: e.pointerType === 'pen' ? e.pressure : 1,
+        });
+      }
       activeStrokeBoardId = null;
       releasePointer(e.pointerId);
     }
@@ -718,6 +967,11 @@
   function onPointerCancel(e: PointerEvent): void {
     if (e.pointerType === 'touch') forgetTouch(e.pointerId);
     if (rightPanPointerId === e.pointerId) rightPanPointerId = -1;
+    if (selectionDrag?.pointerId === e.pointerId) {
+      onselection(selectionDrag.original);
+      selectionDrag = null;
+      releasePointer(e.pointerId);
+    }
     if (movingBoardId !== null && movingPointerId === e.pointerId) {
       movingBoardId = null;
       movingPointerId = -1;
@@ -743,6 +997,10 @@
    */
   function onLostPointerCapture(e: PointerEvent): void {
     if (rightPanPointerId === e.pointerId) rightPanPointerId = -1;
+    if (selectionDrag?.pointerId === e.pointerId) {
+      onselection(selectionDrag.original);
+      selectionDrag = null;
+    }
     if (movingBoardId !== null && movingPointerId === e.pointerId) {
       movingBoardId = null;
       movingPointerId = -1;
@@ -800,6 +1058,16 @@
   }
 
   function onKeyDown(e: KeyboardEvent): void {
+    if (selectionMode === 'polygon' && e.key === 'Enter') {
+      e.preventDefault();
+      finishPolygonSelection();
+      return;
+    }
+    if (selectionMode === 'polygon' && e.key === 'Escape' && polygonPoints.length > 0) {
+      e.preventDefault();
+      polygonPoints = [];
+      return;
+    }
     if (e.ctrlKey || e.metaKey || e.altKey) return;
 
     const arrow = ARROWS[e.key];
@@ -901,12 +1169,46 @@
           style:height="{board.buffer.height * view.zoom}px"
           style:background={canvasBackground}
         >
-          <canvas use:registerBoardCanvas={board.id}></canvas>
+          <canvas
+            use:registerBoardCanvas={board.id}
+            style:display={board.id === activeBoardId && previewBuffer ? 'none' : 'block'}
+          ></canvas>
           {#if showGrid && view.zoom >= GRID_MIN_ZOOM}
             <div class="grid" style:background-size="{view.zoom}px {view.zoom}px"></div>
           {/if}
+          <canvas
+            use:registerTransformPreviewCanvas={board.id}
+            class="transform-preview"
+            style:display={board.id === activeBoardId && previewBuffer ? 'block' : 'none'}
+            aria-hidden="true"
+          ></canvas>
+          <canvas
+            use:registerSelectionCanvas={board.id}
+            class="selection-overlay"
+            aria-hidden="true"
+            style:display={board.id === activeBoardId && (previewSelection || selectionMask) ? 'block' : 'none'}
+          ></canvas>
+          {#if board.id === activeBoardId && selectionMode === 'polygon' && polygonPoints.length > 0}
+            <svg class="selection-draft" viewBox="0 0 {board.buffer.width} {board.buffer.height}" aria-hidden="true">
+              <polyline points={polygonPoints.map((point) => `${point.x + 0.5},${point.y + 0.5}`).join(' ')} />
+            </svg>
+          {/if}
         </div>
       {/each}
+      {#if cursor && tool.usesBrush}
+        {@const activeBoard = boards.find((board) => board.id === activeBoardId)}
+        {#if activeBoard}
+          <div
+            class="brush-cursor"
+            class:circle={brushShape === 'circle'}
+            style:left="{(activeBoard.x + cursor.x - Math.floor((brushSize - 1) / 2)) * view.zoom}px"
+            style:top="{(activeBoard.y + cursor.y - Math.floor((brushSize - 1) / 2)) * view.zoom}px"
+            style:width="{brushSize * view.zoom}px"
+            style:height="{brushSize * view.zoom}px"
+            aria-hidden="true"
+          ></div>
+        {/if}
+      {/if}
       {#if dragPreview}
         {@const previewBoard = boards.find((board) => board.id === dragPreview?.id)}
         {#if previewBoard && (previewBoard.x !== dragPreview.x || previewBoard.y !== dragPreview.y)}
@@ -954,6 +1256,13 @@
         ></div>
       {/if}
     </div>
+    {#if previewBuffer}
+      <div class="transform-preview-controls" role="group" aria-label="Подтверждение трансформации">
+        <span>Предпросмотр трансформации</span>
+        <button type="button" class="confirm" onclick={onconfirmtransform}>Применить</button>
+        <button type="button" onclick={oncanceltransform}>Отмена</button>
+      </div>
+    {/if}
   </div>
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
   <div
@@ -1063,6 +1372,87 @@
     background-image:
       linear-gradient(to right, rgba(150, 155, 175, 0.4) 1px, transparent 1px),
       linear-gradient(to bottom, rgba(150, 155, 175, 0.4) 1px, transparent 1px);
+  }
+
+  .selection-overlay {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    image-rendering: pixelated;
+  }
+
+  .selection-draft {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+  .selection-draft polyline {
+    fill: color-mix(in srgb, var(--accent) 18%, transparent);
+    stroke: var(--accent);
+    stroke-width: 1;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .transform-preview {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    image-rendering: pixelated;
+  }
+
+  .transform-preview-controls {
+    position: absolute;
+    z-index: 20;
+    right: 12px;
+    bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--panel);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    color: var(--text);
+    font-size: 12px;
+  }
+
+  .transform-preview-controls button {
+    min-height: 30px;
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--panel-2);
+    color: var(--text);
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .transform-preview-controls .confirm {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: var(--bg);
+  }
+
+  .brush-cursor {
+    position: absolute;
+    z-index: 4;
+    box-sizing: border-box;
+    border: 1px solid #fff;
+    outline: 1px solid #000;
+    pointer-events: none;
+  }
+
+  .brush-cursor.circle {
+    border-radius: 50%;
   }
 
   .kcursor {

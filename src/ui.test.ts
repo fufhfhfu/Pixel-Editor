@@ -16,9 +16,12 @@ const rasterDrawCalls: number[][] = [];
 
 function installBrowserStubs(): void {
   const proto = HTMLCanvasElement.prototype as unknown as { getContext: () => unknown };
-  proto.getContext = function () {
+  proto.getContext = function (this: HTMLCanvasElement) {
+    const canvas = this;
     return {
       putImageData(image: { data: Uint8ClampedArray }, _dx: number, _dy: number, x: number, y: number, w: number, h: number) {
+        if (canvas.classList.contains('thumbnail') || canvas.classList.contains('selection-overlay') ||
+          canvas.classList.contains('transform-preview')) return;
         canvasData = image.data;
         putCalls.push({ dirty: [x, y, w, h] });
       },

@@ -36,6 +36,7 @@
     MAX_PROJECT_JSON_LENGTH,
     MAX_PROJECT_CANVASES,
     MAX_PROJECT_CANVAS_COORDINATE,
+    MAX_PROJECT_LAYERS,
     MAX_PROJECT_TOTAL_PIXELS,
     ProjectFormatError,
     parseProject,
@@ -62,16 +63,133 @@
     type AutosaveStorageMode,
   } from './core/autosave';
   import { DEFAULT_GRID_SIZE, PixelBuffer, isValidCanvasSize, type RGBA } from './core/state';
+  import {
+    compositeLayers,
+    createRasterLayer,
+    updateRasterLayer,
+    type RasterLayer,
+    type LayerGroup,
+    type LayerBlendMode,
+    type LayerUpdate,
+    type LayerGroupUpdate,
+    createLayerGroup,
+    updateLayerGroup,
+    MAX_GROUP_COMPOSITE_PIXELS,
+  } from './core/layers';
+  import {
+    clearSelection,
+    combineSelections,
+    copySelection,
+    createOpaqueSelection,
+    createRectSelection,
+    flipClipboard,
+    integerScaleClipboard,
+    invertSelection,
+    moveSelection,
+    pasteClipboard,
+    rotateClipboard,
+    scaleClipboard,
+    selectionBounds,
+    type PixelClipboard,
+    type SelectionMask,
+    type SelectionMode,
+    type SelectionOperation,
+  } from './core/selection';
   import { getBrowserStorage, type SaveStatus } from './core/storage';
   import type { StrokeOutcome } from './core/stroke';
-  import { MAX_BRUSH_SIZE, MIN_BRUSH_SIZE, TOOLS, clampBrushSize, getTool, type ToolId } from './core/tools';
+  import {
+    MAX_BRUSH_SIZE,
+    MIN_BRUSH_SIZE,
+    TOOLS,
+    clampBrushSize,
+    getTool,
+    createBrushDefinition,
+    parseBrushDefinition,
+    parseBrushLibrary,
+    serializeBrushLibrary,
+    type BrushShape,
+    type BrushDefinition,
+    type BrushType,
+    type DrawingSettings,
+    type ToolId,
+  } from './core/tools';
   import type { PixelPos, ViewState } from './core/viewport';
+  import type { SelectionAction } from './components/ToolPanel.svelte';
 
   interface Props {
     initialProject: ProjectData | null;
     initialLoadError: string | null;
     initialStorageMode: AutosaveStorageMode;
     autosaveRepository: AutosaveRepository;
+  }
+
+  function setBrushShape(shape: BrushShape): void {
+    brushShape = shape;
+    selectedBrushId = '';
+  }
+
+  function updateDrawingSettings(next: DrawingSettings): void {
+    drawingSettings = next;
+  }
+
+  function updateBrush(brush: BrushDefinition): void {
+    const validated = parseBrushDefinition(brush);
+    brushLibrary = brushLibrary.map((entry) => entry.id === validated.id ? validated : entry);
+    persistBrushLibrary();
+  }
+
+  function persistBrushLibrary(): void {
+    if (!storage) {
+      notify('Библиотека кистей недоступна: браузер не разрешил доступ к локальному хранилищу.', 'error');
+      return;
+    }
+    try {
+      storage.setItem(BRUSH_LIBRARY_KEY, serializeBrushLibrary(brushLibrary));
+    } catch (error) {
+      notify(`Не удалось сохранить библиотеку кистей: ${error instanceof Error ? error.message : String(error)}`, 'error');
+    }
+  }
+
+  function saveBrush(name: string, type: BrushType): void {
+    const brush = createBrushDefinition(name, brushSize, brushShape, type);
+    const existing = brushLibrary.findIndex((entry) => entry.name.toLowerCase() === brush.name.toLowerCase());
+    if (existing >= 0) brushLibrary = brushLibrary.map((entry, index) => index === existing ? brush : entry);
+    else if (brushLibrary.length < 64) brushLibrary = [...brushLibrary, brush];
+    else {
+      notify('Библиотека кистей заполнена (максимум 64 кисти).', 'error');
+      return;
+    }
+    selectedBrushId = brush.id;
+    persistBrushLibrary();
+  }
+
+  function selectBrush(id: string): void {
+    selectedBrushId = id;
+    const brush = brushLibrary.find((entry) => entry.id === id);
+    if (!brush) return;
+    brushSize = brush.size;
+    brushShape = brush.type === 'circle' ? 'circle' : 'square';
+  }
+
+  function removeBrush(): void {
+    if (!selectedBrushId) return;
+    brushLibrary = brushLibrary.filter((brush) => brush.id !== selectedBrushId);
+    selectedBrushId = '';
+    persistBrushLibrary();
+  }
+
+  function importBrushLibrary(incoming: readonly BrushDefinition[]): void {
+    const merged = [...brushLibrary];
+    for (const brush of incoming) {
+      const byId = merged.findIndex((entry) => entry.id === brush.id);
+      const byName = merged.findIndex((entry) => entry.name.toLowerCase() === brush.name.toLowerCase());
+      const index = byId >= 0 ? byId : byName;
+      if (index >= 0) merged[index] = brush;
+      else if (merged.length < 64) merged.push(brush);
+    }
+    brushLibrary = merged;
+    persistBrushLibrary();
+    notify(`Импортировано кистей: ${incoming.length}.`);
   }
 
   let { initialProject, initialLoadError, initialStorageMode, autosaveRepository }: Props = $props();
@@ -92,6 +210,10 @@
     id: string;
     x: number;
     y: number;
+    layers: RasterLayer[];
+    groups: LayerGroup[];
+    groupBuffers: Map<string, PixelBuffer>;
+    activeLayerId: string;
     buffer: PixelBuffer;
   }
 
@@ -102,7 +224,28 @@
         before: Array<{ id: string; x: number; y: number }>;
         after: Array<{ id: string; x: number; y: number }>;
       };
-  type UndoEntry = { kind: 'pixels'; boardId: string } | { kind: 'board'; action: BoardAction };
+  type UndoEntry =
+    | { kind: 'pixels'; boardId: string; historyKey: string }
+    | {
+        kind: 'selection-pixels';
+        boardId: string;
+        historyKey: string;
+        beforeSelection: SelectionMask | null;
+        afterSelection: SelectionMask | null;
+      }
+    | {
+        kind: 'layer-stack';
+        boardId: string;
+        beforeLayers: RasterLayer[];
+        afterLayers: RasterLayer[];
+        beforeGroups: LayerGroup[];
+        afterGroups: LayerGroup[];
+        beforeActiveLayerId: string;
+        afterActiveLayerId: string;
+        beforeSelection?: SelectionMask | null;
+        afterSelection?: SelectionMask | null;
+      }
+    | { kind: 'board'; action: BoardAction };
 
   /** Пауза после последнего изменения перед сохранением проекта в локальное хранилище. */
   const AUTOSAVE_DELAY_MS = 800;
@@ -118,28 +261,81 @@
   const startupStorageMode = untrack(() => initialStorageMode);
   const startPalette = getPalette(start?.paletteId ?? DEFAULT_PALETTE_ID);
 
+  function makeArtboard(
+    id: string,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    pixels: Uint8ClampedArray,
+    sourceLayers?: NonNullable<ProjectData['canvases']>[number]['layers'],
+    sourceActiveLayerId?: string,
+    sourceGroups: LayerGroup[] = [],
+  ): Artboard {
+    const layers = (sourceLayers?.map((source) => {
+      const layer = createRasterLayer(source.id, source.name, width, height, source.pixels);
+      const restored = updateRasterLayer(layer, {
+        visible: source.visible,
+        locked: source.locked,
+        alphaLock: source.alphaLock,
+        opacity: source.opacity,
+        blendMode: source.blendMode,
+        clippingMask: source.clippingMask,
+        role: source.role ?? 'paint',
+        effects: source.effects,
+        groupId: source.groupId ?? null,
+      });
+      restored.buffer.setLocked(restored.locked || groupHasLock(sourceGroups, restored.groupId));
+      restored.buffer.setAlphaLock(restored.alphaLock);
+      return restored;
+    }) ?? [createRasterLayer(`${id}-layer-1`, 'Слой 1', width, height, pixels)]).sort((a, b) =>
+      Number(a.role !== 'background') - Number(b.role !== 'background'));
+    const activeLayerId = layers.some((layer) => layer.id === sourceActiveLayerId)
+      ? sourceActiveLayerId!
+      : layers[0]!.id;
+    const groups = sourceGroups.map((group) => ({ ...group }));
+    const groupBuffers = new Map<string, PixelBuffer>();
+    const composite = compositeLayers(width, height, layers, undefined, undefined, groups, groupBuffers);
+    for (const layer of layers) layer.buffer.takeDirty();
+    return { id, x, y, layers, groups, groupBuffers, activeLayerId, buffer: composite };
+  }
+
   const initialBoards: Artboard[] = start?.canvases
-    ? start.canvases.map((canvas) => ({
-        id: canvas.id,
-        x: canvas.x,
-        y: canvas.y,
-        buffer: new PixelBuffer(canvas.width, canvas.height, canvas.pixels),
-      }))
-    : [{
-        id: start?.activeCanvasId ?? 'canvas-1',
-        x: 0,
-        y: 0,
-        buffer: start
-          ? new PixelBuffer(start.width, start.height, start.pixels)
-          : new PixelBuffer(DEFAULT_GRID_SIZE, DEFAULT_GRID_SIZE),
-      }];
-  const histories = new Map(initialBoards.map((board) => [board.id, new History()]));
+    ? start.canvases.map((canvas) => makeArtboard(
+        canvas.id, canvas.x, canvas.y, canvas.width, canvas.height, canvas.pixels, canvas.layers, canvas.activeLayerId,
+        canvas.groups,
+      ))
+    : [makeArtboard(
+        start?.activeCanvasId ?? 'canvas-1',
+        0,
+        0,
+        start?.width ?? DEFAULT_GRID_SIZE,
+        start?.height ?? DEFAULT_GRID_SIZE,
+        start?.pixels ?? new Uint8ClampedArray(DEFAULT_GRID_SIZE * DEFAULT_GRID_SIZE * 4),
+      )];
+  const bufferHistoryIds = new WeakMap<PixelBuffer, number>();
+  let nextBufferHistoryId = 1;
+  function getHistoryKey(boardId: string, layer: RasterLayer): string {
+    let historyId = bufferHistoryIds.get(layer.buffer);
+    if (!historyId) {
+      historyId = nextBufferHistoryId++;
+      bufferHistoryIds.set(layer.buffer, historyId);
+    }
+    return `${boardId}:${historyId}`;
+  }
+  const histories = new Map(initialBoards.flatMap((board) =>
+    board.layers.map((layer) => [getHistoryKey(board.id, layer), new History()] as const),
+  ));
   const undoTimeline: UndoEntry[] = [];
   const redoTimeline: UndoEntry[] = [];
-  let history = histories.get(start?.activeCanvasId ?? initialBoards[0]!.id)!;
+  const initialActiveBoardId = start?.activeCanvasId ?? initialBoards[0]!.id;
+  const initialActiveBoard = initialBoards.find((board) => board.id === initialActiveBoardId)!;
+  const initialActiveLayer = initialActiveBoard.layers.find((layer) => layer.id === initialActiveBoard.activeLayerId)!;
+  let history = histories.get(getHistoryKey(initialActiveBoardId, initialActiveLayer))!;
   let boards = $state.raw<Artboard[]>(initialBoards);
-  let activeBoardId = $state(start?.activeCanvasId ?? initialBoards[0]!.id);
-  let buffer = $state.raw(initialBoards.find((board) => board.id === activeBoardId)!.buffer);
+  let activeBoardId = $state(initialActiveBoardId);
+  let activeLayerId = $state(initialActiveBoard.activeLayerId);
+  let buffer = $state.raw(initialActiveBoard.layers.find((layer) => layer.id === activeLayerId)!.buffer);
   let view = $state.raw<ViewState>({ zoom: 1, offsetX: 0, offsetY: 0 });
   let cursor = $state.raw<PixelPos | null>(null);
   let showGrid = $state(true);
@@ -157,9 +353,50 @@
   const saveFilePickerSupported = supportsSaveFilePicker();
   let canvasApi = $state.raw<ReturnType<typeof Canvas>>();
   let boardSequence = 1;
+  let layerSequence = 1;
 
   let activeToolId = $state<ToolId>('pencil');
+  let selectionMask = $state.raw<SelectionMask | null>(null);
+  let selectionMode = $state<SelectionMode | null>(null);
+  let selectionOperation = $state<SelectionOperation>('replace');
+  let selectionClipboard = $state.raw<PixelClipboard | null>(null);
+  let selectionPreview = $state.raw<{
+    clipboard: PixelClipboard;
+    x: number;
+    y: number;
+    selection: SelectionMask;
+    preview: PixelBuffer;
+  } | null>(null);
   let brushSize = $state(MIN_BRUSH_SIZE);
+  let brushShape = $state<BrushShape>('square');
+  let brushOpacity = $state(100);
+  const BRUSH_LIBRARY_KEY = 'pixel-editor:brush-library';
+  let brushLibrary = $state.raw<BrushDefinition[]>([]);
+  let selectedBrushId = $state('');
+  let brushLibraryError: string | null = null;
+  let temporaryPicker = $state(false);
+  let drawingSettings = $state<DrawingSettings>({
+    pixelPerfect: false,
+    lineAngleSnap: 0,
+    fillContiguous: true,
+    fillTolerance: 0,
+    fillConnectivity: 4,
+    fillProtectAlpha: false,
+    sampleMerged: false,
+    pickerRadius: 1,
+    polygonSides: 6,
+    gradientKind: 'linear',
+    gradientDither: false,
+    gradientTransparency: false,
+    gradientMidpointEnabled: false,
+    gradientMidpoint: { r: 128, g: 128, b: 128, a: 255 },
+    gradientMidpointPosition: 50,
+    ditherPattern: 'bayer4',
+    ditherDensity: 0.5,
+    ditherScale: 1,
+    ditherAngle: 0,
+    ditherCustomPattern: '01/10',
+  });
 
   let paletteId = $state(start?.paletteId ?? DEFAULT_PALETTE_ID);
   let freeColor = $state(start?.freeColor ?? false);
@@ -196,6 +433,8 @@
   let autosaveRevision = 0;
 
   const activeTool = $derived(getTool(activeToolId));
+  const activeBoard = $derived(boards.find((board) => board.id === activeBoardId) ?? boards[0]!);
+  const activeLayers = $derived(activeBoard.layers);
   const palette = $derived(getPalette(paletteId));
   // В режиме палитры показываем только недавние цвета, которые в ней есть
   const visibleRecent = $derived(freeColor ? recent : filterToPalette(recent, palette));
@@ -236,23 +475,139 @@
         width: board.buffer.width,
         height: board.buffer.height,
         pixels: board.buffer.data,
+        activeLayerId: board.activeLayerId,
+        layers: board.layers.map((layer) => ({
+          id: layer.id,
+          name: layer.name,
+          pixels: layer.buffer.data,
+          visible: layer.visible,
+          locked: layer.locked,
+          opacity: layer.opacity,
+          blendMode: layer.blendMode,
+          alphaLock: layer.alphaLock,
+          clippingMask: layer.clippingMask,
+          role: layer.role ?? 'paint',
+          effects: layer.effects,
+          groupId: layer.groupId ?? null,
+        })),
+        groups: board.groups,
       })),
       activeCanvasId: activeBoardId,
     };
   }
 
-  function setActiveBuffer(next: PixelBuffer): void {
-    buffer = next;
-    boards = boards.map((board) => board.id === activeBoardId ? { ...board, buffer: next } : board);
+  function groupHasLock(groups: readonly LayerGroup[], groupId: string | null | undefined): boolean {
+    const byId = new Map(groups.map((group) => [group.id, group]));
+    let currentId = groupId;
+    while (currentId) {
+      const current = byId.get(currentId);
+      if (!current) return false;
+      if (current.locked) return true;
+      currentId = current.parentGroupId;
+    }
+    return false;
+  }
+
+  function replaceLayerStack(
+    boardId: string,
+    layers: RasterLayer[],
+    nextActiveLayerId: string,
+    groups?: LayerGroup[],
+  ): void {
+    const board = boards.find((entry) => entry.id === boardId);
+    if (!board || !layers.some((layer) => layer.id === nextActiveLayerId)) {
+      throw new RangeError('Layer stack must contain its active layer.');
+    }
+    const nextGroups = (groups ?? board.groups).map((group) => ({ ...group }));
+    const activeGroupIds = new Set(nextGroups.map((group) => group.id));
+    for (const groupId of board.groupBuffers.keys()) {
+      if (!activeGroupIds.has(groupId)) board.groupBuffers.delete(groupId);
+    }
+    const nextLayers = [
+      ...layers.filter((layer) => layer.role === 'background'),
+      ...layers.filter((layer) => layer.role !== 'background'),
+    ].map((layer) => ({ ...layer }));
+    for (const layer of nextLayers) {
+      layer.buffer.setLocked(layer.locked || groupHasLock(nextGroups, layer.groupId));
+      layer.buffer.setAlphaLock(layer.alphaLock);
+    }
+    const composite = compositeLayers(
+      nextLayers[0]!.buffer.width,
+      nextLayers[0]!.buffer.height,
+      nextLayers,
+      undefined,
+      undefined,
+      nextGroups,
+      board.groupBuffers,
+    );
+    for (const layer of nextLayers) layer.buffer.takeDirty();
+    boards = boards.map((entry) => entry.id === boardId
+      ? { ...entry, layers: nextLayers, groups: nextGroups, activeLayerId: nextActiveLayerId, buffer: composite }
+      : entry);
+    if (activeBoardId === boardId) {
+      activeLayerId = nextActiveLayerId;
+      buffer = nextLayers.find((layer) => layer.id === nextActiveLayerId)!.buffer;
+      const activeLayer = nextLayers.find((layer) => layer.id === nextActiveLayerId)!;
+      buffer.setLocked(activeLayer.locked || groupHasLock(nextGroups, activeLayer.groupId));
+      const key = getHistoryKey(boardId, activeLayer);
+      history = histories.get(key) ?? new History();
+      histories.set(key, history);
+      buffer.setClipMask(selectionMask?.data ?? null);
+      canvasApi?.requestRender();
+    }
+  }
+
+  function getActiveLayer(): RasterLayer {
+    const layer = boards.find((board) => board.id === activeBoardId)?.layers.find((entry) => entry.id === activeLayerId);
+    if (!layer) throw new Error('Активный слой не найден.');
+    return layer;
+  }
+
+  function refreshComposite(boardId: string, changedLayer?: RasterLayer): void {
+    const board = boards.find((entry) => entry.id === boardId);
+    if (!board) return;
+    const sourceLayer = changedLayer ??
+      board.layers.find((layer) => layer.id === board.activeLayerId);
+    const dirty = sourceLayer?.buffer.takeDirty();
+    if (!sourceLayer || !dirty) return;
+    compositeLayers(
+      sourceLayer.buffer.width,
+      sourceLayer.buffer.height,
+      board.layers,
+      board.buffer,
+      dirty,
+      board.groups,
+      board.groupBuffers,
+    );
+    if (activeBoardId === boardId) canvasApi?.requestRender();
+  }
+
+  function applyLayerStackAction(entry: Extract<UndoEntry, { kind: 'layer-stack' }>, direction: 'undo' | 'redo'): void {
+    if (activeBoardId !== entry.boardId) setActiveBoard(entry.boardId);
+    const layers = direction === 'undo' ? entry.beforeLayers : entry.afterLayers;
+    const groups = direction === 'undo' ? entry.beforeGroups : entry.afterGroups;
+    const layerId = direction === 'undo' ? entry.beforeActiveLayerId : entry.afterActiveLayerId;
+    replaceLayerStack(entry.boardId, layers, layerId, groups);
+    if (entry.beforeSelection !== undefined || entry.afterSelection !== undefined) {
+      setSelection(direction === 'undo' ? entry.beforeSelection ?? null : entry.afterSelection ?? null);
+    }
+    scheduleAutosave();
   }
 
   function selectBoard(id: string): void {
     const board = boards.find((entry) => entry.id === id);
     if (!board || id === activeBoardId) return;
+    selectionPreview = null;
+    buffer.setClipMask(null);
+    selectionMask = null;
     activeBoardId = id;
-    buffer = board.buffer;
-    history = histories.get(id) ?? new History();
-    histories.set(id, history);
+    activeLayerId = board.activeLayerId;
+    const layer = board.layers.find((entry) => entry.id === activeLayerId)!;
+    buffer = layer.buffer;
+    buffer.setClipMask(null);
+    const key = getHistoryKey(id, layer);
+    history = histories.get(key) ?? new History();
+    histories.set(key, history);
     syncHistory();
     cursor = null;
     scheduleAutosave();
@@ -343,7 +698,7 @@
       notify(`В проекте может быть не больше ${MAX_PROJECT_CANVASES} холстов.`, 'error');
       return;
     }
-    const totalPixels = boards.reduce((total, entry) => total + entry.buffer.width * entry.buffer.height, 0);
+    const totalPixels = getTotalLayerPixels();
     if (totalPixels + buffer.width * buffer.height > MAX_PROJECT_TOTAL_PIXELS) {
       notify(
         `Общая площадь холстов не может превышать ${MAX_PROJECT_TOTAL_PIXELS.toLocaleString('ru-RU')} пикселей.`,
@@ -351,6 +706,9 @@
       );
       return;
     }
+    buffer.setClipMask(null);
+    selectionMask = null;
+    selectionPreview = null;
     const previousActiveBoardId = activeBoardId;
     const activeBoard = boards.find((board) => board.id === activeBoardId) ?? boards[0]!;
     const position = findBoardPosition(buffer.width, buffer.height, activeBoard);
@@ -359,17 +717,24 @@
       return;
     }
     const id = `canvas-${Date.now().toString(36)}-${boardSequence++}`;
+    const newLayer = createRasterLayer(`${id}-layer-1`, 'Слой 1', buffer.width, buffer.height);
     const board: Artboard = {
       id,
       ...position,
-      buffer: new PixelBuffer(buffer.width, buffer.height),
+      layers: [newLayer],
+      groups: [],
+      groupBuffers: new Map(),
+      activeLayerId: newLayer.id,
+      buffer: compositeLayers(buffer.width, buffer.height, [newLayer], undefined, undefined, [], new Map()),
     };
+    newLayer.buffer.takeDirty();
     const index = boards.length;
     boards = [...boards, board];
     activeBoardId = id;
-    buffer = board.buffer;
+    activeLayerId = board.activeLayerId;
+    buffer = board.layers.find((layer) => layer.id === activeLayerId)!.buffer;
     history = new History();
-    histories.set(id, history);
+    histories.set(getHistoryKey(id, board.layers.find((layer) => layer.id === activeLayerId)!), history);
     pushUndoEntry({ kind: 'board', action: { kind: 'add', board, index, previousActiveBoardId } });
     syncHistory();
     cursor = null;
@@ -472,14 +837,18 @@
     undoTimeline.push(entry);
     redoTimeline.length = 0;
     for (const boardHistory of histories.values()) boardHistory.discardRedo();
-    if (entry.kind === 'pixels') {
-      const historyCount = histories.get(entry.boardId)?.undoCount ?? 0;
+    if (entry.kind === 'pixels' || entry.kind === 'selection-pixels') {
+      const historyCount = histories.get(entry.historyKey)?.undoCount ?? 0;
       let timelineCount = undoTimeline.filter(
-        (candidate) => candidate.kind === 'pixels' && candidate.boardId === entry.boardId,
+        (candidate) =>
+          (candidate.kind === 'pixels' || candidate.kind === 'selection-pixels') &&
+          candidate.historyKey === entry.historyKey,
       ).length;
       while (timelineCount > historyCount) {
         const oldestIndex = undoTimeline.findIndex(
-          (candidate) => candidate.kind === 'pixels' && candidate.boardId === entry.boardId,
+          (candidate) =>
+            (candidate.kind === 'pixels' || candidate.kind === 'selection-pixels') &&
+            candidate.historyKey === entry.historyKey,
         );
         if (oldestIndex < 0) break;
         undoTimeline.splice(oldestIndex, 1);
@@ -500,10 +869,18 @@
   function setActiveBoard(id: string): void {
     const board = boards.find((entry) => entry.id === id);
     if (!board) return;
+    selectionPreview = null;
+    buffer.setClipMask(null);
+    selectionMask = null;
     activeBoardId = id;
-    buffer = board.buffer;
-    history = histories.get(id) ?? new History();
-    histories.set(id, history);
+    activeLayerId = board.activeLayerId;
+    const layer = board.layers.find((entry) => entry.id === activeLayerId)!;
+    buffer = layer.buffer;
+    buffer.setLocked(layer.locked || groupHasLock(board.groups, layer.groupId));
+    buffer.setClipMask(null);
+    const key = getHistoryKey(id, layer);
+    history = histories.get(key) ?? new History();
+    histories.set(key, history);
     cursor = null;
   }
 
@@ -531,26 +908,34 @@
   function endStroke(outcome: StrokeOutcome): void {
     if (outcome === 'rollback') {
       history.rollback(buffer);
+      refreshComposite(activeBoardId, getActiveLayer());
       return;
     }
     if (history.commit(buffer)) {
-      pushUndoEntry({ kind: 'pixels', boardId: activeBoardId });
+      pushUndoEntry({
+        kind: 'pixels',
+        boardId: activeBoardId,
+        historyKey: getHistoryKey(activeBoardId, getActiveLayer()),
+      });
       scheduleAutosave();
     }
+    refreshComposite(activeBoardId, getActiveLayer());
   }
 
   /** Применяет результат undo/redo к указанному холсту. */
-  function applyHistoryResult(next: PixelBuffer | null, boardId: string): boolean {
+  function applyHistoryResult(next: PixelBuffer | null, boardId: string, historyKey: string): boolean {
     if (!next) return false;
     const target = boards.find((board) => board.id === boardId);
     if (!target) return false;
-    if (next !== target.buffer) {
-      boards = boards.map((board) => board.id === boardId ? { ...board, buffer: next } : board);
-      if (activeBoardId === boardId) buffer = next;
+    const layer = target.layers.find((item) => getHistoryKey(boardId, item) === historyKey);
+    if (!layer) return false;
+    if (next !== layer.buffer) {
+      const layers = target.layers.map((item) => item === layer ? { ...item, buffer: next } : item);
+      replaceLayerStack(boardId, layers, target.activeLayerId);
+      if (activeBoardId === boardId && activeLayerId === layer.id) buffer = next;
       if (activeBoardId === boardId) cursor = null;
-    }
-    if (activeBoardId === boardId) {
-      canvasApi?.requestRender();
+    } else {
+      refreshComposite(boardId, layer);
     }
     scheduleAutosave();
     return true;
@@ -561,17 +946,23 @@
     if (!entry) return;
     if (entry.kind === 'board') {
       applyBoardAction(entry.action, 'undo');
+    } else if (entry.kind === 'layer-stack') {
+      applyLayerStackAction(entry, 'undo');
     } else {
       const target = boards.find((board) => board.id === entry.boardId);
-      const targetHistory = histories.get(entry.boardId);
+      const targetHistory = histories.get(entry.historyKey);
       if (!target || !targetHistory) {
         undoTimeline.push(entry);
         return;
       }
-      setActiveBoard(entry.boardId);
-      if (!applyHistoryResult(targetHistory.undo(target.buffer), entry.boardId)) {
+      if (activeBoardId !== entry.boardId) setActiveBoard(entry.boardId);
+      const targetLayer = target.layers.find((layer) => getHistoryKey(entry.boardId, layer) === entry.historyKey);
+      if (!targetLayer || !applyHistoryResult(targetHistory.undo(targetLayer.buffer), entry.boardId, entry.historyKey)) {
         undoTimeline.push(entry);
         return;
+      }
+      if (entry.kind === 'selection-pixels' && activeBoardId === entry.boardId) {
+        setSelection(entry.beforeSelection);
       }
     }
     redoTimeline.push(entry);
@@ -583,17 +974,23 @@
     if (!entry) return;
     if (entry.kind === 'board') {
       applyBoardAction(entry.action, 'redo');
+    } else if (entry.kind === 'layer-stack') {
+      applyLayerStackAction(entry, 'redo');
     } else {
       const target = boards.find((board) => board.id === entry.boardId);
-      const targetHistory = histories.get(entry.boardId);
+      const targetHistory = histories.get(entry.historyKey);
       if (!target || !targetHistory) {
         redoTimeline.push(entry);
         return;
       }
-      setActiveBoard(entry.boardId);
-      if (!applyHistoryResult(targetHistory.redo(target.buffer), entry.boardId)) {
+      if (activeBoardId !== entry.boardId) setActiveBoard(entry.boardId);
+      const targetLayer = target.layers.find((layer) => getHistoryKey(entry.boardId, layer) === entry.historyKey);
+      if (!targetLayer || !applyHistoryResult(targetHistory.redo(targetLayer.buffer), entry.boardId, entry.historyKey)) {
         redoTimeline.push(entry);
         return;
+      }
+      if (entry.kind === 'selection-pixels' && activeBoardId === entry.boardId) {
+        setSelection(entry.afterSelection);
       }
     }
     undoTimeline.push(entry);
@@ -661,6 +1058,10 @@
   }
 
   function requestClear(): void {
+    if (buffer.isLocked || buffer.isAlphaLocked) {
+      notify(buffer.isLocked ? 'Активный слой заблокирован.' : 'Отключите Alpha Lock, чтобы очистить слой.', 'error');
+      return;
+    }
     if (!buffer.data.some((value) => value !== 0)) {
       notify('Холст уже пуст.');
       return;
@@ -676,8 +1077,468 @@
     activeToolId = id;
   }
 
+  function getTotalLayerPixels(): number {
+    return boards.reduce(
+      (total, board) => total + board.layers.reduce((count, layer) => count + layer.buffer.width * layer.buffer.height, 0),
+      0,
+    );
+  }
+
+  function commitLayerStack(
+    boardId: string,
+    layers: RasterLayer[],
+    nextActiveLayerId: string,
+    beforeSelection: SelectionMask | null = selectionMask,
+    afterSelection: SelectionMask | null = selectionMask,
+    groups?: LayerGroup[],
+  ): void {
+    const board = boards.find((entry) => entry.id === boardId);
+    if (!board) return;
+    const afterLayers = [
+      ...layers.filter((layer) => layer.role === 'background'),
+      ...layers.filter((layer) => layer.role !== 'background'),
+    ];
+    const afterGroups = groups ?? board.groups;
+    if (
+      afterLayers.length === board.layers.length &&
+      afterLayers.every((layer, index) => layer === board.layers[index]) &&
+      afterGroups.length === board.groups.length &&
+      afterGroups.every((group, index) => group === board.groups[index]) &&
+      nextActiveLayerId === board.activeLayerId &&
+      beforeSelection === afterSelection
+    ) return;
+    const action: Extract<UndoEntry, { kind: 'layer-stack' }> = {
+      kind: 'layer-stack',
+      boardId,
+      beforeLayers: board.layers,
+      afterLayers,
+      beforeGroups: board.groups,
+      afterGroups,
+      beforeActiveLayerId: board.activeLayerId,
+      afterActiveLayerId: nextActiveLayerId,
+      beforeSelection,
+      afterSelection,
+    };
+    replaceLayerStack(boardId, afterLayers, nextActiveLayerId, afterGroups);
+    pushUndoEntry(action);
+    scheduleAutosave();
+  }
+
+  function selectLayer(id: string): void {
+    const board = boards.find((entry) => entry.id === activeBoardId);
+    if (!board || id === board.activeLayerId || !board.layers.some((layer) => layer.id === id)) return;
+    const key = getHistoryKey(activeBoardId, board.layers.find((layer) => layer.id === id)!);
+    if (!histories.has(key)) histories.set(key, new History());
+    commitLayerStack(activeBoardId, board.layers, id);
+  }
+
+  function addLayer(): void {
+    const board = boards.find((entry) => entry.id === activeBoardId)!;
+    if (board.layers.length >= MAX_PROJECT_LAYERS) {
+      notify(`На холсте может быть не больше ${MAX_PROJECT_LAYERS} слоёв.`, 'error');
+      return;
+    }
+    const totalPixels = getTotalLayerPixels();
+    if (totalPixels + buffer.width * buffer.height > MAX_PROJECT_TOTAL_PIXELS) {
+      notify('Превышен лимит общего объёма пиксельных данных проекта.', 'error');
+      return;
+    }
+    const id = `${activeBoardId}-layer-${Date.now().toString(36)}-${layerSequence++}`;
+    const layer = createRasterLayer(id, `Слой ${board.layers.length + 1}`, buffer.width, buffer.height);
+    const layers = [...board.layers, layer];
+    histories.set(getHistoryKey(activeBoardId, layer), new History());
+    commitLayerStack(activeBoardId, layers, id);
+  }
+
+  function addLayerGroup(): void {
+    const board = boards.find((entry) => entry.id === activeBoardId)!;
+    if (board.groups.length >= MAX_PROJECT_LAYERS) {
+      notify(`На холсте может быть не больше ${MAX_PROJECT_LAYERS} групп.`, 'error');
+      return;
+    }
+    const allocatedGroupPixels = boards.reduce(
+      (total, entry) => total + entry.groups.length * entry.buffer.width * entry.buffer.height,
+      0,
+    );
+    if (allocatedGroupPixels + buffer.width * buffer.height > MAX_GROUP_COMPOSITE_PIXELS) {
+      notify('Превышен лимит памяти для композиции групп. Уменьшите холст или удалите группы.', 'error');
+      return;
+    }
+    const activeLayer = board.layers.find((layer) => layer.id === board.activeLayerId)!;
+    const id = `${activeBoardId}-group-${Date.now().toString(36)}-${layerSequence++}`;
+    let number = board.groups.length + 1;
+    while (board.groups.some((group) => group.name === `Группа ${number}`)) number++;
+    const group = createLayerGroup(id, `Группа ${number}`, activeLayer.groupId ?? null);
+    const groups = [...board.groups, group];
+    const layers = board.layers.map((layer) => layer.id === activeLayer.id ? { ...layer, groupId: id } : layer);
+    commitLayerStack(activeBoardId, layers, board.activeLayerId, selectionMask, selectionMask, groups);
+  }
+
+  function updateGroup(id: string, update: LayerGroupUpdate): void {
+    const board = boards.find((entry) => entry.id === activeBoardId)!;
+    try {
+      const groups = board.groups.map((group) => group.id === id ? updateLayerGroup(group, update) : group);
+      if (groups.every((group, index) => group === board.groups[index])) return;
+      commitLayerStack(activeBoardId, board.layers, board.activeLayerId, selectionMask, selectionMask, groups);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : String(error), 'error');
+    }
+  }
+
+  function deleteGroup(id: string): void {
+    const board = boards.find((entry) => entry.id === activeBoardId)!;
+    const group = board.groups.find((entry) => entry.id === id);
+    if (!group) return;
+    const groups = board.groups
+      .filter((entry) => entry.id !== id)
+      .map((entry) => entry.parentGroupId === id ? { ...entry, parentGroupId: group.parentGroupId } : entry);
+    const layers = board.layers.map((layer) => layer.groupId === id
+      ? { ...layer, groupId: group.parentGroupId }
+      : layer);
+    commitLayerStack(activeBoardId, layers, board.activeLayerId, selectionMask, selectionMask, groups);
+  }
+
+  function addSpecialLayer(role: 'background' | 'reference'): void {
+    const board = boards.find((entry) => entry.id === activeBoardId)!;
+    if (board.layers.length >= MAX_PROJECT_LAYERS) {
+      notify(`На холсте может быть не больше ${MAX_PROJECT_LAYERS} слоёв.`, 'error');
+      return;
+    }
+    if (getTotalLayerPixels() + buffer.width * buffer.height > MAX_PROJECT_TOTAL_PIXELS) {
+      notify('Превышен лимит общего объёма пиксельных данных проекта.', 'error');
+      return;
+    }
+    const id = `${activeBoardId}-${role}-${Date.now().toString(36)}-${layerSequence++}`;
+    let pixels: Uint8ClampedArray | undefined;
+    if (role === 'reference') {
+      pixels = board.buffer.data.slice();
+    } else {
+      const color = { r: 255, g: 255, b: 255, a: 255 };
+      pixels = new Uint8ClampedArray(buffer.width * buffer.height * 4);
+      for (let offset = 0; offset < pixels.length; offset += 4) pixels.set([color.r, color.g, color.b, color.a], offset);
+    }
+    const layer = updateRasterLayer(
+      createRasterLayer(id, role === 'background' ? 'Фон' : 'Референс', buffer.width, buffer.height, pixels),
+      { role },
+    );
+    const layers = role === 'background' ? [layer, ...board.layers] : [...board.layers, layer];
+    histories.set(getHistoryKey(activeBoardId, layer), new History());
+    commitLayerStack(activeBoardId, layers, layer.id);
+  }
+
+  function duplicateLayer(id: string): void {
+    const board = boards.find((entry) => entry.id === activeBoardId)!;
+    const source = board.layers.find((layer) => layer.id === id);
+    if (!source) return;
+    if (board.layers.length >= MAX_PROJECT_LAYERS) {
+      notify(`На холсте может быть не больше ${MAX_PROJECT_LAYERS} слоёв.`, 'error');
+      return;
+    }
+    if (getTotalLayerPixels() + buffer.width * buffer.height > MAX_PROJECT_TOTAL_PIXELS) {
+      notify('Превышен лимит общего объёма пиксельных данных проекта.', 'error');
+      return;
+    }
+    const idCopy = `${activeBoardId}-layer-${Date.now().toString(36)}-${layerSequence++}`;
+    const copied = updateRasterLayer(
+      createRasterLayer(idCopy, `${source.name} — копия`, source.buffer.width, source.buffer.height, source.buffer.data.slice()),
+      {
+        visible: source.visible,
+        locked: false,
+        opacity: source.opacity,
+        blendMode: source.blendMode,
+        alphaLock: source.alphaLock,
+        clippingMask: source.clippingMask,
+        role: source.role ?? 'paint',
+        effects: source.effects,
+      },
+    );
+    const position = board.layers.findIndex((layer) => layer.id === id);
+    const layers = [...board.layers.slice(0, position + 1), copied, ...board.layers.slice(position + 1)];
+    histories.set(getHistoryKey(activeBoardId, copied), new History());
+    commitLayerStack(activeBoardId, layers, copied.id);
+  }
+
+  function deleteLayer(id: string): void {
+    const board = boards.find((entry) => entry.id === activeBoardId)!;
+    if (board.layers.length <= 1) {
+      notify('На холсте должен остаться хотя бы один слой.', 'error');
+      return;
+    }
+    const index = board.layers.findIndex((layer) => layer.id === id);
+    if (index < 0) return;
+    const layers = board.layers.filter((layer) => layer.id !== id);
+    const nextActive = id === board.activeLayerId
+      ? layers[Math.min(index, layers.length - 1)]!.id
+      : board.activeLayerId;
+    commitLayerStack(activeBoardId, layers, nextActive);
+  }
+
+  function moveLayer(id: string, direction: -1 | 1): void {
+    const board = boards.find((entry) => entry.id === activeBoardId)!;
+    const index = board.layers.findIndex((layer) => layer.id === id);
+    const destination = index + direction;
+    if (index < 0 || destination < 0 || destination >= board.layers.length) return;
+    const layers = [...board.layers];
+    [layers[index], layers[destination]] = [layers[destination]!, layers[index]!];
+    commitLayerStack(activeBoardId, layers, board.activeLayerId);
+  }
+
+  function reorderLayers(sourceId: string, targetId: string): void {
+    const board = boards.find((entry) => entry.id === activeBoardId)!;
+    const sourceIndex = board.layers.findIndex((layer) => layer.id === sourceId);
+    const targetIndex = board.layers.findIndex((layer) => layer.id === targetId);
+    if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) return;
+    const layers = [...board.layers];
+    const [source] = layers.splice(sourceIndex, 1);
+    layers.splice(targetIndex, 0, source!);
+    commitLayerStack(activeBoardId, layers, board.activeLayerId);
+  }
+
+  function updateLayer(id: string, update: LayerUpdate): void {
+    const board = boards.find((entry) => entry.id === activeBoardId)!;
+    try {
+      const layers = board.layers.map((layer) => layer.id === id
+        ? updateRasterLayer(layer, update.role === 'background' ? { ...update, groupId: null } : update)
+        : layer);
+      if (layers.every((layer, index) => layer === board.layers[index])) return;
+      commitLayerStack(activeBoardId, layers, board.activeLayerId);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : String(error), 'error');
+    }
+  }
+
+  function getLayersFromSelection(): void {
+    if (!selectionMask) return;
+    const selectionSource = drawingSettings.sampleMerged ? activeBoard.buffer : buffer;
+    const clipboard = copySelection(selectionSource, selectionMask);
+    if (!clipboard) return;
+    const board = boards.find((entry) => entry.id === activeBoardId)!;
+    if (board.layers.length >= MAX_PROJECT_LAYERS) {
+      notify(`На холсте может быть не больше ${MAX_PROJECT_LAYERS} слоёв.`, 'error');
+      return;
+    }
+    const totalPixels = getTotalLayerPixels();
+    if (totalPixels + buffer.width * buffer.height > MAX_PROJECT_TOTAL_PIXELS) {
+      notify('Превышен лимит общего объёма пиксельных данных проекта.', 'error');
+      return;
+    }
+    const pixels = new Uint8ClampedArray(buffer.width * buffer.height * 4);
+    const bounds = selectionBounds(selectionMask);
+    if (!bounds) return;
+    for (let y = 0; y < clipboard.height; y++) {
+      for (let x = 0; x < clipboard.width; x++) {
+        const source = (y * clipboard.width + x) * 4;
+        const target = ((bounds.y + y) * buffer.width + bounds.x + x) * 4;
+        if (clipboard.mask[y * clipboard.width + x]) pixels.set(clipboard.pixels.subarray(source, source + 4), target);
+      }
+    }
+    const id = `${activeBoardId}-layer-${Date.now().toString(36)}-${layerSequence++}`;
+    const created = createRasterLayer(id, `Выделение ${board.layers.length + 1}`, buffer.width, buffer.height, pixels);
+    histories.set(getHistoryKey(activeBoardId, created), new History());
+    commitLayerStack(activeBoardId, [...board.layers, created], id);
+  }
+
+  function setSelection(next: SelectionMask | null): void {
+    if (next && (next.width !== buffer.width || next.height !== buffer.height)) {
+      throw new RangeError('Размер выделения должен совпадать с размером холста.');
+    }
+    selectionPreview = null;
+    selectionMask = next;
+    buffer.setClipMask(next?.data ?? null);
+    canvasApi?.requestRender();
+  }
+
+  function editSelectedPixels(edit: () => void): void {
+    if (buffer.isLocked) {
+      notify('Активный слой заблокирован.', 'error');
+      return;
+    }
+    const beforeSelection = selectionMask;
+    const historyKey = getHistoryKey(activeBoardId, getActiveLayer());
+    const previousClip = buffer.getClipMask();
+    history.begin(buffer);
+    buffer.setClipMask(null);
+    try {
+      edit();
+      buffer.setClipMask(selectionMask?.data ?? null);
+      if (history.commit(buffer)) {
+        pushUndoEntry({
+          kind: 'selection-pixels',
+          boardId: activeBoardId,
+          historyKey,
+          beforeSelection,
+          afterSelection: selectionMask,
+        });
+        scheduleAutosave();
+      } else {
+        syncHistory();
+      }
+      refreshComposite(activeBoardId, getActiveLayer());
+      canvasApi?.requestRender();
+    } catch (error) {
+      buffer.setClipMask(previousClip);
+      history.rollback(buffer);
+      throw error;
+    }
+  }
+
+  function transformSelection(transform: (clipboard: PixelClipboard) => PixelClipboard): void {
+    if (!selectionMask) return;
+    const bounds = selectionBounds(selectionMask);
+    const clipboard = copySelection(buffer, selectionMask);
+    if (!bounds || !clipboard) return;
+    const transformed = transform(clipboard);
+    const x = Math.round(bounds.x + (bounds.width - transformed.width) / 2);
+    const y = Math.round(bounds.y + (bounds.height - transformed.height) / 2);
+    const preview = new PixelBuffer(buffer.width, buffer.height, buffer.data.slice());
+    clearSelection(preview, selectionMask);
+    const previewSelection = pasteClipboard(preview, transformed, x, y);
+    preview.markAllDirty();
+    selectionPreview = { clipboard: transformed, x, y, selection: previewSelection, preview };
+    canvasApi?.requestRender();
+  }
+
+  function confirmSelectionTransform(): void {
+    const pending = selectionPreview;
+    if (!pending || !selectionMask) return;
+    editSelectedPixels(() => {
+      clearSelection(buffer, selectionMask!);
+      setSelection(pasteClipboard(buffer, pending.clipboard, pending.x, pending.y));
+    });
+    selectionPreview = null;
+  }
+
+  function cancelSelectionTransform(): void {
+    selectionPreview = null;
+    canvasApi?.requestRender();
+  }
+
+  function runSelectionAction(action: SelectionAction): void {
+    if (selectionPreview) cancelSelectionTransform();
+    try {
+      switch (action) {
+        case 'select-all':
+          setSelection(createRectSelection(buffer.width, buffer.height, 0, 0, buffer.width - 1, buffer.height - 1));
+          return;
+        case 'select-opaque':
+          setSelection(createOpaqueSelection(drawingSettings.sampleMerged ? activeBoard.buffer : buffer));
+          return;
+        case 'invert':
+          if (selectionMask) setSelection(invertSelection(selectionMask));
+          return;
+        case 'deselect':
+          setSelection(null);
+          return;
+        case 'copy':
+          selectionClipboard = selectionMask
+            ? copySelection(drawingSettings.sampleMerged ? activeBoard.buffer : buffer, selectionMask)
+            : null;
+          if (!selectionClipboard) notify('В выделении нет пикселей для копирования.');
+          return;
+        case 'cut':
+          if (!selectionMask) return;
+          selectionClipboard = copySelection(buffer, selectionMask);
+          if (selectionClipboard) editSelectedPixels(() => clearSelection(buffer, selectionMask!));
+          return;
+        case 'paste':
+          if (!selectionClipboard) return;
+          editSelectedPixels(() => {
+            const x = Math.floor((buffer.width - selectionClipboard!.width) / 2);
+            const y = Math.floor((buffer.height - selectionClipboard!.height) / 2);
+            setSelection(pasteClipboard(buffer, selectionClipboard!, x, y));
+          });
+          return;
+        case 'clear':
+          if (selectionMask) editSelectedPixels(() => clearSelection(buffer, selectionMask!));
+          return;
+        case 'crop': {
+          if (!selectionMask) return;
+          const bounds = selectionBounds(selectionMask);
+          if (!bounds) {
+            notify('Нельзя обрезать холст: выделение пустое.', 'error');
+            return;
+          }
+          const currentBoard = boards.find((board) => board.id === activeBoardId)!;
+          const beforeLayers = currentBoard.layers;
+          const cropLayerBuffer = (source: PixelBuffer): PixelBuffer => {
+            const cropped = new PixelBuffer(bounds.width, bounds.height);
+            for (let y = 0; y < bounds.height; y++) {
+              const sourceStart = ((bounds.y + y) * source.width + bounds.x) * 4;
+              const targetStart = y * bounds.width * 4;
+              cropped.data.set(source.data.subarray(sourceStart, sourceStart + bounds.width * 4), targetStart);
+            }
+            cropped.markAllDirty();
+            return cropped;
+          };
+          const afterLayers = currentBoard.layers.map((layer) =>
+            ({ ...layer, buffer: cropLayerBuffer(layer.buffer) }),
+          );
+          const previousSelection = selectionMask;
+          selectionMask = null;
+          selectionPreview = null;
+          replaceLayerStack(activeBoardId, afterLayers, activeLayerId);
+          pushUndoEntry({
+            kind: 'layer-stack',
+            boardId: activeBoardId,
+            beforeLayers,
+            afterLayers,
+            beforeGroups: currentBoard.groups,
+            afterGroups: currentBoard.groups,
+            beforeActiveLayerId: activeLayerId,
+            afterActiveLayerId: activeLayerId,
+            beforeSelection: previousSelection,
+            afterSelection: null,
+          });
+          cursor = null;
+          scheduleAutosave();
+          canvasApi?.requestRender();
+          return;
+        }
+        case 'move-left':
+        case 'move-right':
+        case 'move-up':
+        case 'move-down': {
+          if (!selectionMask) return;
+          const dx = action === 'move-left' ? -1 : action === 'move-right' ? 1 : 0;
+          const dy = action === 'move-up' ? -1 : action === 'move-down' ? 1 : 0;
+          editSelectedPixels(() => setSelection(moveSelection(buffer, selectionMask!, dx, dy)));
+          return;
+        }
+        case 'flip-horizontal':
+          transformSelection((clipboard) => flipClipboard(clipboard, true));
+          return;
+        case 'flip-vertical':
+          transformSelection((clipboard) => flipClipboard(clipboard, false));
+          return;
+        case 'rotate-left':
+          transformSelection((clipboard) => rotateClipboard(clipboard, -90));
+          return;
+        case 'rotate-right':
+          transformSelection((clipboard) => rotateClipboard(clipboard, 90));
+          return;
+        case 'scale-up':
+          transformSelection((clipboard) => integerScaleClipboard(clipboard, 2));
+          return;
+        case 'scale-down':
+          transformSelection((clipboard) => scaleClipboard(
+            clipboard,
+            Math.max(1, Math.floor(clipboard.width / 2)),
+            Math.max(1, Math.floor(clipboard.height / 2)),
+          ));
+      }
+    } catch (error) {
+      notify(`Не удалось выполнить операцию выделения: ${error instanceof Error ? error.message : String(error)}`, 'error');
+    }
+  }
+
   function setBrushSize(size: number): void {
     brushSize = clampBrushSize(size);
+    selectedBrushId = '';
+  }
+
+  function setBrushOpacity(opacity: number): void {
+    if (!Number.isFinite(opacity)) return;
+    brushOpacity = Math.min(100, Math.max(0, Math.round(opacity)));
   }
 
   /** Все изменения цвета идут через эту функцию, поэтому правило палитры нельзя обойти. */
@@ -808,7 +1669,11 @@
   }
 
   async function exportImage(): Promise<void> {
-    const { width, height } = buffer;
+    const { width, height } = activeBoard.buffer;
+    const exportLayers = activeBoard.layers.filter((layer) => layer.role !== 'reference');
+    const exportBuffer = exportLayers.length
+      ? compositeLayers(width, height, exportLayers, undefined, undefined, activeBoard.groups)
+      : new PixelBuffer(width, height);
     const extension = exportFormat === 'jpeg' ? 'jpg' : exportFormat;
     const filename = `pixel-art-${width}x${height}@${exportScale}x.${extension}`;
     const mimeType = exportFormat === 'jpeg' ? 'image/jpeg' : `image/${exportFormat}`;
@@ -818,8 +1683,8 @@
     try {
       const blob =
         exportFormat === 'png'
-          ? await exportPngBlob(buffer, exportScale)
-          : await exportRasterBlob(buffer, exportScale, exportFormat, canvasBackground);
+          ? await exportPngBlob(exportBuffer, exportScale)
+          : await exportRasterBlob(exportBuffer, exportScale, exportFormat, canvasBackground);
       if (!(await saveOutput(blob, filename, destination))) return;
       notify(
         `${exportFormat === 'jpeg' ? 'JPEG' : exportFormat.toUpperCase()} сохранён: ${width * exportScale}×${height * exportScale}.`,
@@ -831,26 +1696,28 @@
 
   /** Подставляет в редактор загруженный проект; история при этом начинается заново. */
   function applyProject(project: ProjectData): void {
+    buffer.setClipMask(null);
+    selectionMask = null;
+    selectionPreview = null;
     boards = project.canvases
-      ? project.canvases.map((canvas) => ({
-          id: canvas.id,
-          x: canvas.x,
-          y: canvas.y,
-          buffer: new PixelBuffer(canvas.width, canvas.height, canvas.pixels),
-        }))
-      : [{
-          id: project.activeCanvasId ?? 'canvas-1',
-          x: 0,
-          y: 0,
-          buffer: new PixelBuffer(project.width, project.height, project.pixels),
-        }];
+      ? project.canvases.map((canvas) => makeArtboard(
+          canvas.id, canvas.x, canvas.y, canvas.width, canvas.height, canvas.pixels, canvas.layers, canvas.activeLayerId,
+        ))
+      : [makeArtboard(
+          project.activeCanvasId ?? 'canvas-1', 0, 0, project.width, project.height, project.pixels,
+        )];
     activeBoardId = project.activeCanvasId ?? boards[0]!.id;
-    buffer = boards.find((board) => board.id === activeBoardId)!.buffer;
+    const activeBoard = boards.find((board) => board.id === activeBoardId)!;
+    activeLayerId = activeBoard.activeLayerId;
+    buffer = activeBoard.layers.find((layer) => layer.id === activeLayerId)!.buffer;
+    buffer.setClipMask(null);
     histories.clear();
-    for (const board of boards) histories.set(board.id, new History());
+    for (const board of boards) {
+      for (const layer of board.layers) histories.set(getHistoryKey(board.id, layer), new History());
+    }
     undoTimeline.length = 0;
     redoTimeline.length = 0;
-    history = histories.get(activeBoardId)!;
+    history = histories.get(getHistoryKey(activeBoardId, activeBoard.layers.find((layer) => layer.id === activeLayerId)!))!;
     paletteId = project.paletteId;
     freeColor = project.freeColor;
     primary = project.primary;
@@ -866,8 +1733,10 @@
   function requestResize(width: number, height: number): void {
     if (!isValidCanvasSize(width, height)) return;
     if (width === buffer.width && height === buffer.height) return;
-    const totalPixels = boards.reduce((total, board) => total + board.buffer.width * board.buffer.height, 0);
-    if (totalPixels - buffer.width * buffer.height + width * height > MAX_PROJECT_TOTAL_PIXELS) {
+    const activeBoard = boards.find((board) => board.id === activeBoardId)!;
+    const currentArea = activeBoard.layers.reduce((sum, layer) => sum + layer.buffer.width * layer.buffer.height, 0);
+    const totalPixels = getTotalLayerPixels();
+    if (totalPixels - currentArea + width * height * activeBoard.layers.length > MAX_PROJECT_TOTAL_PIXELS) {
       notify(
         `Общая площадь холстов не может превышать ${MAX_PROJECT_TOTAL_PIXELS.toLocaleString('ru-RU')} пикселей.`,
         'error',
@@ -885,17 +1754,35 @@
     if (action.kind === 'clear') {
       history.begin(buffer);
       buffer.clear();
-      if (history.commit(buffer)) pushUndoEntry({ kind: 'pixels', boardId: activeBoardId });
+      if (history.commit(buffer)) pushUndoEntry({
+        kind: 'pixels',
+        boardId: activeBoardId,
+        historyKey: getHistoryKey(activeBoardId, getActiveLayer()),
+      });
       else syncHistory();
+      refreshComposite(activeBoardId, getActiveLayer());
       canvasApi?.requestRender();
       scheduleAutosave();
       notify('Холст очищен. Действие можно отменить сочетанием Ctrl+Z.');
     } else if (action.kind === 'resize') {
-      // Размер меняется как обычный шаг истории: его можно отменить, обрезанное вернётся
-      const next = buffer.resized(action.width, action.height);
-      history.recordResize(buffer, next);
-      setActiveBuffer(next);
-      pushUndoEntry({ kind: 'pixels', boardId: activeBoardId });
+      const currentBoard = boards.find((board) => board.id === activeBoardId)!;
+      const beforeLayers = currentBoard.layers;
+      const afterLayers = currentBoard.layers.map((layer) =>
+        ({ ...layer, buffer: layer.buffer.resized(action.width, action.height) }),
+      );
+      selectionMask = null;
+      selectionPreview = null;
+      replaceLayerStack(activeBoardId, afterLayers, activeLayerId);
+      pushUndoEntry({
+        kind: 'layer-stack',
+        boardId: activeBoardId,
+        beforeLayers,
+        afterLayers,
+        beforeGroups: currentBoard.groups,
+        afterGroups: currentBoard.groups,
+        beforeActiveLayerId: activeLayerId,
+        afterActiveLayerId: activeLayerId,
+      });
       cursor = null;
       scheduleAutosave();
     } else {
@@ -958,6 +1845,11 @@
   function onKeyDown(e: KeyboardEvent): void {
     if (pending || helpOpen || settingsOpen || isTypingTarget(e.target)) return;
 
+    if (e.altKey) {
+      temporaryPicker = true;
+      return;
+    }
+
     if ((e.ctrlKey || e.metaKey) && !e.altKey) {
       if (e.code === 'KeyZ') {
         e.preventDefault();
@@ -969,6 +1861,15 @@
       } else if (e.code === 'KeyS') {
         e.preventDefault();
         if (!e.repeat) saveProject();
+      } else if (e.code === 'KeyC') {
+        e.preventDefault();
+        runSelectionAction('copy');
+      } else if (e.code === 'KeyX') {
+        e.preventDefault();
+        runSelectionAction('cut');
+      } else if (e.code === 'KeyV') {
+        e.preventDefault();
+        runSelectionAction('paste');
       }
       return;
     }
@@ -1023,6 +1924,7 @@
   }
 
   function onKeyUp(e: KeyboardEvent): void {
+    if (!e.altKey) temporaryPicker = false;
     if (e.code !== 'Space') return;
     spaceHeld = false;
     if (!pending && !helpOpen && !settingsOpen && !isTypingTarget(e.target)) e.preventDefault();
@@ -1030,9 +1932,22 @@
 
   function onWindowBlur(): void {
     spaceHeld = false;
+    temporaryPicker = false;
+  }
+
+  if (storage) {
+    try {
+      const savedBrushes = storage.getItem(BRUSH_LIBRARY_KEY);
+      if (savedBrushes) brushLibrary = parseBrushLibrary(savedBrushes);
+    } catch (error) {
+      brushLibraryError = `Библиотека кистей повреждена и не загружена: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  } else {
+    brushLibraryError = 'Библиотека кистей недоступна: браузер не разрешил доступ к локальному хранилищу.';
   }
 
   if (preferences.error) notify(preferences.error, 'error');
+  if (brushLibraryError) notify(brushLibraryError, 'error');
 </script>
 
 <svelte:window onkeydown={onKeyDown} onkeyup={onKeyUp} onblur={onWindowBlur} onpagehide={flushAutosave} />
@@ -1083,9 +1998,48 @@
       tools={TOOLS}
       {activeToolId}
       {brushSize}
+      {brushShape}
+      {brushOpacity}
+      settings={drawingSettings}
+      brushes={brushLibrary}
+      {selectedBrushId}
+      {selectionMode}
+      {selectionOperation}
+      selectionAvailable={selectionMask !== null}
+      clipboardAvailable={selectionClipboard !== null}
+      layers={activeLayers}
+      groups={activeBoard.groups}
+      {activeLayerId}
+      hasSelection={selectionMask !== null}
       onselect={selectTool}
       onbrush={setBrushSize}
+      onbrushshape={setBrushShape}
+      onbrushopacity={setBrushOpacity}
+      onsettings={updateDrawingSettings}
+      onbrushsave={saveBrush}
+      onbrushselect={selectBrush}
+      onbrushdelete={removeBrush}
+      onbrushupdate={updateBrush}
+      onbrushimport={importBrushLibrary}
+      onbrusherror={(message) => notify(message, 'error')}
+      onbrushexport={(brush) => serializeBrushLibrary([brush])}
       onaddboard={addBoard}
+      onselectionmode={(mode) => (selectionMode = mode)}
+      onselectionoperation={(operation) => (selectionOperation = operation)}
+      onselectionaction={runSelectionAction}
+      onlayerselect={selectLayer}
+      onlayeradd={addLayer}
+      onaddgroup={addLayerGroup}
+      ongroupupdate={updateGroup}
+      ongroupdelete={deleteGroup}
+      onlayerduplicate={duplicateLayer}
+      onlayerdelete={deleteLayer}
+      onlayermove={moveLayer}
+      onlayerreorder={reorderLayers}
+      onlayerupdate={updateLayer}
+      onaddbackground={() => addSpecialLayer('background')}
+      onaddreference={() => addSpecialLayer('reference')}
+      oncreatefromselection={getLayersFromSelection}
     />
 
     <section class="workspace" aria-label="Холст">
@@ -1104,12 +2058,26 @@
         {primary}
         {secondary}
         {brushSize}
+        {brushShape}
+        {brushOpacity}
+        brushDefinition={brushLibrary.find((entry) => entry.id === selectedBrushId) ?? null}
+        settings={drawingSettings}
+        {temporaryPicker}
+        {selectionMask}
+        previewSelection={selectionPreview?.selection ?? null}
+        {selectionMode}
+        {selectionOperation}
+        previewBuffer={selectionPreview?.preview ?? null}
         onpickcolor={setColor}
         onusecolor={rememberColor}
         onstrokebegin={beginStroke}
         onstrokeend={endStroke}
+        onrender={() => refreshComposite(activeBoardId, getActiveLayer())}
         onselectboard={selectBoard}
         onmoveboard={moveBoard}
+        onselection={setSelection}
+        onconfirmtransform={confirmSelectionTransform}
+        oncanceltransform={cancelSelectionTransform}
       />
     </section>
 

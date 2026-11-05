@@ -1,0 +1,83 @@
+{
+  "name": "pixel-editor",
+  "productName": "Pixel Editor",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "desktop:dev": "concurrently -k -s first \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron .\"",
+    "build:icon": "node scripts/generate-icon.cjs",
+    "dist:win": "npm run check && npm test && npm run build:icon && npm run build && electron-builder --win nsis portable",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "check:e2e": "tsc --noEmit -p tsconfig.e2e.json",
+    "bench": "tsx scripts/bench.ts"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.14.0",
+    "@playwright/test": "^1.64.1",
+    "@sveltejs/vite-plugin-svelte": "^5.0.3",
+    "@tsconfig/svelte": "^5.0.4",
+    "@types/node": "^26.6.6",
+    "concurrently": "^10.0.6",
+    "electron": "^45.2.3",
+    "electron-builder": "^26.18.1",
+    "fake-indexeddb": "^6.2.7",
+    "jsdom": "^26.1.0",
+    "svelte": "^5.20.0",
+    "svelte-check": "^4.1.4",
+    "tslib": "^2.8.1",
+    "tsx": "^4.20.5",
+    "typescript": "~5.6.3",
+    "vite": "^6.0.0",
+    "vitest": "^4.1.12",
+    "wait-on": "^9.5.1"
+  },
+  "build": {
+    "appId": "com.pixelatelier.editor",
+    "productName": "Pixel Editor",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "win": {
+      "icon": "electron/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Pixel Editor"
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-portable.${ext}"
+    }
+  }
+}

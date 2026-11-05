@@ -1,0 +1,15 @@
+node_modules/
+dist/
+release/
+pixel/
+test-results/
+playwright-report/
+playwright/.cache/
+*.log
+.env
+.env.*
+!.env.example
+2026-11-05_15-42-07.png
+photo_2026-11-05_00-01-05.jpg
+photo_2026-11-05_00-04-19.jpg
+photo_2026-11-05_00-04-21.jpg

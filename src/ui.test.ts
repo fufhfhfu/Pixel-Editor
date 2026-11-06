@@ -6,6 +6,7 @@ import { AutosaveRepository } from './core/autosave';
 import { AUTOSAVE_KEY } from './core/storage';
 import { parseProject, type ProjectData } from './core/project';
 import { computeFloodFillOutput, type FloodFillWorkerRequest } from './core/tools/floodFillWorker';
+import { WELCOME_SEEN_KEY } from './core/feedbackNotes';
 
 /** Заглушки DOM-возможностей, отсутствующих в jsdom. */
 interface PutCall {
@@ -153,6 +154,7 @@ beforeEach(async () => {
   rasterDrawCalls.length = 0;
   desktopSaveFile.mockClear();
   localStorage.clear();
+  localStorage.setItem(WELCOME_SEEN_KEY, 'true');
   Object.defineProperty(window, 'pixelEditorDesktop', {
     configurable: true,
     value: { saveFile: desktopSaveFile },
@@ -182,6 +184,65 @@ describe('приложение целиком (jsdom)', () => {
     expect(Array.from((document.querySelector('#canvas-preset') as HTMLSelectElement).options).map((option) => option.value))
       .toEqual(['8x8', '16x16', '32x32', '64x64', '128x128', '256x256', '512x512', '1024x1024']);
     expect((document.querySelector('.board') as HTMLElement).style.backgroundColor).toBe('rgb(255, 255, 255)');
+  });
+
+  it('масштабирует холст вокруг точки под курсором при прокрутке колеса', async () => {
+    const zoomAnchor = screenOf(5, 7);
+
+    viewport().dispatchEvent(new WheelEvent('wheel', {
+      bubbles: true,
+      cancelable: true,
+      clientX: zoomAnchor.x,
+      clientY: zoomAnchor.y,
+      deltaY: -100,
+    }));
+    await tick();
+
+    const anchorAfter = screenOf(5, 7);
+    expect(anchorAfter.x).toBeCloseTo(zoomAnchor.x);
+    expect(anchorAfter.y).toBeCloseTo(zoomAnchor.y);
+  });
+
+  it('позволяет скрыть правую панель и вернуть её с края рабочей области', async () => {
+    expect(document.querySelector('.palette-dock')).toBeTruthy();
+    document.querySelector<HTMLButtonElement>('[aria-label="Скрыть правую панель"]')!.click();
+    await tick();
+
+    expect(document.querySelector('.palette-dock')).toBeNull();
+    document.querySelector<HTMLButtonElement>('[aria-label="Показать правую панель"]')!.click();
+    await tick();
+
+    expect(document.querySelector('.palette-dock')).toBeTruthy();
+  });
+
+  it('не дублирует команды отмены, масштабирования и экспорта в правой панели', async () => {
+    const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>('.panel-tabs button'));
+    const selectTab = async (label: string) => {
+      const tab = tabs.find((entry) => entry.textContent?.trim() === label);
+      expect(tab).toBeTruthy();
+      tab!.click();
+      await tick();
+    };
+
+    await selectTab('History');
+    expect(document.querySelectorAll<HTMLButtonElement>('[aria-label="Отменить"]')).toHaveLength(1);
+    expect(document.querySelectorAll<HTMLButtonElement>('[aria-label="Повторить"]')).toHaveLength(1);
+
+    await selectTab('Navigator');
+    expect(document.querySelectorAll<HTMLButtonElement>('button[title="Центрировать активный холст"]')).toHaveLength(1);
+    expect(document.querySelectorAll<HTMLButtonElement>('[aria-label="Увеличить"]')).toHaveLength(1);
+    expect(document.querySelectorAll<HTMLButtonElement>('[aria-label="Уменьшить"]')).toHaveLength(1);
+    expect(document.querySelectorAll<HTMLButtonElement>('button[title="Показать активный холст в масштабе 100%"]')).toHaveLength(1);
+    expect(document.querySelectorAll<HTMLButtonElement>('button[title="Вписать холст в окно (F)"]')).toHaveLength(1);
+    expect(document.querySelectorAll<HTMLButtonElement>('button[title="Открыть активный холст в отдельном окне предпросмотра"]')).toHaveLength(1);
+
+    await selectTab('Export');
+    expect(Array.from(document.querySelectorAll<HTMLButtonElement>('.panel-content button'))
+      .some((button) => button.textContent?.trim() === 'Экспортировать')).toBe(false);
+    document.querySelector<HTMLButtonElement>('[data-menu="Файл"]')!.click();
+    await tick();
+    expect(Array.from(document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'))
+      .some((button) => button.textContent?.includes('Экспорт изображения'))).toBe(true);
   });
 
   it('упрощает левую панель и оставляет режимы выделения в меню «Правка»', async () => {
@@ -636,7 +697,7 @@ describe('приложение целиком (jsdom)', () => {
 
     const secondBoardPoint = screenOf(5, 5, 1);
     const zoom = parseFloat(boards[1].style.width) / 32;
-    expect(boards[1].style.left).toBe(`${56 * zoom}px`);
+    expect(boards[1].style.left).toBe(`${40 * zoom}px`);
     const originalPositions = boards.map((board) => ({ left: board.style.left, top: board.style.top }));
     const start = secondBoardPoint;
     pointer('pointerdown', start, { button: 2, ctrlKey: true });
@@ -646,7 +707,7 @@ describe('приложение целиком (jsdom)', () => {
     await tick();
     expect(boards[0]!.style.left).toBe(originalPositions[0]!.left);
     expect(boards[0]!.style.top).toBe(originalPositions[0]!.top);
-    expect(boards[1]!.style.left).toBe(`${61 * zoom}px`);
+    expect(boards[1]!.style.left).toBe(`${45 * zoom}px`);
     expect(boards[1]!.style.top).toBe(`${3 * zoom}px`);
 
     key('KeyZ', { ctrlKey: true });
@@ -673,7 +734,7 @@ describe('приложение целиком (jsdom)', () => {
 
     const movedBoard = document.querySelectorAll<HTMLElement>('.board')[1];
     expect(movedBoard.classList.contains('selected')).toBe(true);
-    expect(movedBoard.style.left).toBe(`${61 * zoom}px`);
+    expect(movedBoard.style.left).toBe(`${45 * zoom}px`);
     expect(movedBoard.style.top).toBe(`${3 * zoom}px`);
     expect(boards[0]!.style.left).toBe(`${5 * zoom}px`);
     expect(boards[0]!.style.top).toBe(`${3 * zoom}px`);
@@ -690,7 +751,7 @@ describe('приложение целиком (jsdom)', () => {
     expect(boards[1]!.style.top).toBe(originalPositions[1]!.top);
     key('KeyY', { ctrlKey: true });
     await tick();
-    expect(document.querySelectorAll<HTMLElement>('.board')[1].style.left).toBe(`${61 * zoom}px`);
+    expect(document.querySelectorAll<HTMLElement>('.board')[1].style.left).toBe(`${45 * zoom}px`);
 
   });
 
@@ -725,6 +786,41 @@ describe('приложение целиком (jsdom)', () => {
     ]);
   });
 
+  it('requires selecting an unselected board before it can be moved', async () => {
+    (document.querySelector('.add-board') as HTMLButtonElement).click();
+    await tick();
+    await frame();
+
+    const boards = [...document.querySelectorAll<HTMLElement>('.board')];
+    const first = boards[0]!;
+    const originalPosition = { left: first.style.left, top: first.style.top };
+    const secondPosition = { left: boards[1]!.style.left, top: boards[1]!.style.top };
+    const zoom = parseFloat(first.style.width) / 32;
+    const start = screenOf(5, 5, 0);
+    const target = { x: start.x + zoom * 5, y: start.y + zoom * 3 };
+
+    pointer('pointerdown', start, { button: 2, ctrlKey: true });
+    pointer('pointermove', target, { button: -1, ctrlKey: true });
+    pointer('pointerup', target, { button: 2, ctrlKey: true });
+    await tick();
+
+    expect(first.style.left).toBe(originalPosition.left);
+    expect(first.style.top).toBe(originalPosition.top);
+    expect(first.classList.contains('selected')).toBe(true);
+
+    const selectedStart = screenOf(5, 5, 0);
+    const selectedTarget = { x: selectedStart.x + zoom * 5, y: selectedStart.y + zoom * 3 };
+    pointer('pointerdown', selectedStart, { button: 2, ctrlKey: true });
+    pointer('pointermove', selectedTarget, { button: -1, ctrlKey: true });
+    pointer('pointerup', selectedTarget, { button: 2, ctrlKey: true });
+    await tick();
+
+    expect(first.style.left).toBe(`${5 * zoom}px`);
+    expect(first.style.top).toBe(`${3 * zoom}px`);
+    expect(boards[1]!.style.left).toBe(secondPosition.left);
+    expect(boards[1]!.style.top).toBe(secondPosition.top);
+  });
+
   it('snaps a dragged board to neighboring edges and shows blue corner alignment guides', async () => {
     (document.querySelector('.add-board') as HTMLButtonElement).click();
     await tick();
@@ -732,7 +828,7 @@ describe('приложение целиком (jsdom)', () => {
     const boards = [...document.querySelectorAll<HTMLElement>('.board')];
     const zoom = parseFloat(boards[1].style.width) / 32;
     const start = screenOf(5, 5, 1);
-    const nearAlignedEdge = { x: start.x - 23 * zoom, y: start.y };
+    const nearAlignedEdge = { x: start.x - 7 * zoom, y: start.y };
 
     pointer('pointerdown', start, { button: 2, ctrlKey: true });
     pointer('pointermove', nearAlignedEdge, { button: -1, ctrlKey: true });

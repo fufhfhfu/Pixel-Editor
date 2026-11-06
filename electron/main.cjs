@@ -2,6 +2,7 @@ const { app, BrowserWindow, dialog, ipcMain, Menu, shell } = require('electron')
 const path = require('node:path');
 const { writeFile } = require('node:fs/promises');
 const { pathToFileURL } = require('node:url');
+const { createFeedbackNotesStore } = require('./feedbackNotes.cjs');
 
 const DEV_SERVER_URL = 'http://127.0.0.1:5173';
 const MAX_SAVE_BYTES = 128 * 1024 * 1024;
@@ -13,6 +14,13 @@ const FILE_TYPES = {
 };
 
 let mainWindow;
+let feedbackNotesStore;
+
+function assertMainWindowSender(event) {
+  if (!mainWindow || event.sender !== mainWindow.webContents) {
+    throw new Error('Запрос заметок поступил из неизвестного окна.');
+  }
+}
 
 function isAllowedPage(url) {
   if (app.isPackaged) return url === pathToFileURL(path.join(__dirname, '..', 'dist', 'index.html')).href;
@@ -131,7 +139,23 @@ ipcMain.handle('pixel-editor:save-file', async (event, request) => {
   return 'saved';
 });
 
+ipcMain.handle('pixel-editor:feedback-notes:list', (event) => {
+  assertMainWindowSender(event);
+  return feedbackNotesStore.list();
+});
+
+ipcMain.handle('pixel-editor:feedback-notes:create', (event, draft) => {
+  assertMainWindowSender(event);
+  return feedbackNotesStore.create(draft);
+});
+
+ipcMain.handle('pixel-editor:feedback-notes:update', (event, number, draft) => {
+  assertMainWindowSender(event);
+  return feedbackNotesStore.update(number, draft);
+});
+
 app.whenReady().then(() => {
+  feedbackNotesStore = createFeedbackNotesStore(app.getPath('userData'));
   Menu.setApplicationMenu(null);
   createWindow();
 

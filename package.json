@@ -13,10 +13,12 @@
     "dist:win": "npm run check && npm test && npm run build:icon && npm run build:renderer && electron-builder --win nsis portable",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
+    "test:e2e": "npm run build:renderer && playwright test",
     "test:watch": "vitest",
     "bench": "tsx scripts/bench.ts"
   },
   "devDependencies": {
+    "@playwright/test": "^1.65.0",
     "@sveltejs/vite-plugin-svelte": "^5.0.3",
     "@tsconfig/svelte": "^5.0.4",
     "@types/node": "^26.6.6",

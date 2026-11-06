@@ -7,10 +7,11 @@
     tools: readonly Tool[];
     shortcuts: ShortcutMap;
     returnFocusTo: HTMLElement | null;
+    onnotes: () => void;
     onclose: () => void;
   }
 
-  let { tools, shortcuts, returnFocusTo, onclose }: Props = $props();
+  let { tools, shortcuts, returnFocusTo, onnotes, onclose }: Props = $props();
 
   let closeButton: HTMLButtonElement | undefined = $state();
 
@@ -74,7 +75,10 @@
   <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="help-title" use:trapFocus={returnFocusTo}>
     <header>
       <h2 id="help-title">Горячие клавиши</h2>
-      <button type="button" class="btn" bind:this={closeButton} onclick={onclose}>Закрыть</button>
+      <div class="header-actions">
+        <button type="button" class="btn" onclick={onnotes}>Заметки обратной связи</button>
+        <button type="button" class="btn" bind:this={closeButton} onclick={onclose}>Закрыть</button>
+      </div>
     </header>
 
     <div class="columns">
@@ -150,6 +154,13 @@
     justify-content: space-between;
     gap: 12px;
     margin-bottom: 8px;
+  }
+
+  .header-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
   }
 
   h2 {

@@ -21,6 +21,7 @@
     onexport: () => void;
     onformat: (format: ExportFormat) => void;
     onscale: (scale: ExportScale) => void;
+    onwelcome: (trigger: HTMLElement) => void;
     onhelp: (trigger: HTMLElement) => void;
     onsettings: (trigger: HTMLElement) => void;
   }
@@ -44,6 +45,7 @@
     onexport,
     onformat,
     onscale,
+    onwelcome,
     onhelp,
     onsettings,
   }: Props = $props();
@@ -182,6 +184,13 @@
   <div class="spacer"></div>
 
   <div class="group">
+    <button
+      type="button"
+      class="btn icon"
+      title="Открыть приветствие"
+      aria-label="Приветствие"
+      onclick={(event) => onwelcome(event.currentTarget)}
+    >i</button>
     <button
       type="button"
       class="btn icon"

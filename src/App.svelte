@@ -3,6 +3,8 @@
   import Canvas, { type ViewportGuide } from './components/Canvas.svelte';
   import ConfirmDialog from './components/ConfirmDialog.svelte';
   import HelpDialog from './components/HelpDialog.svelte';
+  import FeedbackNotesDialog from './components/FeedbackNotesDialog.svelte';
+  import WelcomeDialog from './components/WelcomeDialog.svelte';
   import SettingsDialog from './components/SettingsDialog.svelte';
   import ReferencesPanel from './components/ReferencesPanel.svelte';
   import TilemapEditor from './components/TilemapEditor.svelte';
@@ -141,6 +143,7 @@
     type SelectionOperation,
   } from './core/selection';
   import { getAppStorage, type SaveStatus } from './core/storage';
+  import { WELCOME_SEEN_KEY } from './core/feedbackNotes';
   import type { StrokeOutcome } from './core/stroke';
   import {
     MAX_BRUSH_SIZE,
@@ -336,6 +339,13 @@
   const START_SECONDARY: RGBA = { r: 255, g: 241, b: 232, a: 255 };
 
   const storage = getAppStorage();
+  function shouldShowWelcome(): boolean {
+    try {
+      return storage?.getItem(WELCOME_SEEN_KEY) !== 'true';
+    } catch {
+      return true;
+    }
+  }
   const preferences = loadEditorPreferences(storage);
   const savedShortcuts = loadShortcutMap(storage);
   const savedWorkspace = loadWorkspaceLayout(storage);
@@ -518,6 +528,10 @@
   let customSizes = $state.raw<CanvasSize[]>(preferences.customSizes);
   let spaceHeld = $state(false);
   let pending = $state.raw<PendingAction | null>(null);
+  let welcomeOpen = $state(shouldShowWelcome());
+  let welcomeTrigger = $state<HTMLElement | null>(null);
+  let feedbackNotesOpen = $state(false);
+  let feedbackNotesTrigger = $state<HTMLElement | null>(null);
   let helpOpen = $state(false);
   let helpTrigger = $state<HTMLElement | null>(null);
   let settingsOpen = $state(false);
@@ -652,6 +666,33 @@
     clearTimeout(noticeTimer);
     notice = { text, kind };
     noticeTimer = setTimeout(dismissNotice, NOTICE_DURATION_MS);
+  }
+
+  function showWelcome(trigger: HTMLElement | null = null): void {
+    welcomeTrigger = trigger?.isConnected
+      ? trigger
+      : document.querySelector<HTMLElement>('[aria-label="Приветствие"]');
+    welcomeOpen = true;
+  }
+
+  function showFeedbackNotes(trigger: HTMLElement | null = null): void {
+    feedbackNotesTrigger = trigger?.isConnected
+      ? trigger
+      : document.querySelector<HTMLElement>('[aria-label="Горячие клавиши"]');
+    feedbackNotesOpen = true;
+  }
+
+  function acknowledgeWelcome(): void {
+    try {
+      if (!storage) throw new Error('Локальное хранилище недоступно.');
+      storage.setItem(WELCOME_SEEN_KEY, 'true');
+      welcomeOpen = false;
+    } catch (error) {
+      notify(
+        `Не удалось сохранить факт ознакомления: ${error instanceof Error ? error.message : String(error)}`,
+        'error',
+      );
+    }
   }
 
   function scheduleWorkspaceSave(): void {
@@ -908,6 +949,8 @@
         helpTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
         helpOpen = true;
         break;
+      case 'feedback-notes': showFeedbackNotes(); break;
+      case 'welcome': showWelcome(); break;
       default: {
         const action = ([
           'invert', 'deselect', 'copy', 'cut', 'paste', 'clear', 'crop',
@@ -1007,6 +1050,8 @@
     ] },
     { label: 'Справка', items: [
       { label: 'Горячие клавиши', command: 'help' },
+      { label: 'Заметки обратной связи', command: 'feedback-notes' },
+      { label: 'Приветствие', command: 'welcome' },
       { label: 'Настройки', command: 'settings' },
     ] },
   ]);
@@ -1280,7 +1325,7 @@
   }
 
   function findBoardPosition(width: number, height: number, origin: Artboard): { x: number; y: number } | null {
-    const gap = 24;
+    const gap = 8;
     for (let radius = 1; radius <= boards.length + 1; radius++) {
       const candidates: Array<{ x: number; y: number; distance: number }> = [];
       for (let row = -radius; row <= radius; row++) {
@@ -2883,7 +2928,7 @@
   }
 
   function onKeyDown(e: KeyboardEvent): void {
-    if (fillInProgress || pending || helpOpen || settingsOpen || isTypingTarget(e.target)) return;
+    if (fillInProgress || pending || welcomeOpen || feedbackNotesOpen || helpOpen || settingsOpen || isTypingTarget(e.target)) return;
 
     if (e.repeat) return;
     const resolution = resolveShortcutEvent(shortcuts, pendingShortcutSequence, e);
@@ -2947,7 +2992,7 @@
     const action = getTemporaryActionForCode(shortcuts, e.code);
     if (action === 'temporary-picker') temporaryPicker = false;
     if (action === 'pan') spaceHeld = false;
-    if (action && !pending && !helpOpen && !settingsOpen && !isTypingTarget(e.target)) e.preventDefault();
+    if (action && !pending && !welcomeOpen && !feedbackNotesOpen && !helpOpen && !settingsOpen && !isTypingTarget(e.target)) e.preventDefault();
   }
 
   function onWindowBlur(): void {
@@ -3008,6 +3053,7 @@
       if (availableExportScales.includes(scale)) exportScale = scale;
     }}
     onsettings={(trigger) => openSettings('general', trigger)}
+    onwelcome={(trigger) => showWelcome(trigger)}
     onhelp={(trigger) => {
       helpTrigger = trigger;
       helpOpen = true;
@@ -3169,6 +3215,20 @@
         />
       {/if}
       {/if}
+      {#if !workspaceLayout.paletteVisible}
+        <button
+          type="button"
+          class="show-palette-button"
+          aria-label="Показать правую панель"
+          aria-controls="workspace-panel-content"
+          aria-expanded="false"
+          title="Показать правую панель"
+          onclick={() => toggleWorkspaceDock('palette')}
+        >
+          <span class="panel-chevron" aria-hidden="true"></span>
+          <span>Панели</span>
+        </button>
+      {/if}
     </section>
 
     {#if workspaceLayout.paletteVisible}
@@ -3181,14 +3241,27 @@
       onresize={(delta) => resizeWorkspace('palette', delta)}
     />
     <div class="dock palette-dock" style:width="{workspaceLayout.paletteWidth}px">
-      <nav class="panel-tabs" aria-label="Правая панель">
-        {#each workspacePanels as panel (panel.id)}
-          <button type="button" class:active={workspaceLayout.rightPanel === panel.id}
-            aria-pressed={workspaceLayout.rightPanel === panel.id}
-            aria-controls="workspace-panel-content"
-            onclick={() => selectWorkspacePanel(panel.id)}>{panel.label}</button>
-        {/each}
-      </nav>
+      <div class="panel-header">
+        <nav class="panel-tabs" aria-label="Правая панель">
+          {#each workspacePanels as panel (panel.id)}
+            <button type="button" class:active={workspaceLayout.rightPanel === panel.id}
+              aria-pressed={workspaceLayout.rightPanel === panel.id}
+              aria-controls="workspace-panel-content"
+              onclick={() => selectWorkspacePanel(panel.id)}>{panel.label}</button>
+          {/each}
+        </nav>
+        <button
+          type="button"
+          class="hide-palette-button"
+          aria-label="Скрыть правую панель"
+          aria-controls="workspace-panel-content"
+          aria-expanded="true"
+          title="Скрыть правую панель"
+          onclick={() => toggleWorkspaceDock('palette')}
+        >
+          <span class="panel-chevron" aria-hidden="true"></span>
+        </button>
+      </div>
       <div id="workspace-panel-content" class="panel-content" aria-label={workspacePanels.find((entry) => entry.id === workspaceLayout.rightPanel)?.label}>
         {#if workspaceLayout.rightPanel === 'colors' || workspaceLayout.rightPanel === 'palette'}
           <PalettePanel
@@ -3251,10 +3324,6 @@
         {:else if workspaceLayout.rightPanel === 'history'}
           <section class="inspector-section">
             <h2>История</h2>
-            <div class="inspector-actions">
-              <button type="button" disabled={!canUndo} onclick={undo}>Отменить</button>
-              <button type="button" disabled={!canRedo} onclick={redo}>Повторить</button>
-            </div>
             {#if historyEntries.length === 0}
               <p>Действий пока нет.</p>
             {:else}
@@ -3269,12 +3338,6 @@
           <section class="inspector-section">
             <h2>{workspaceLayout.rightPanel === 'navigator' ? 'Navigator' : 'Preview'}</h2>
             <p>{buffer.width} × {buffer.height} px · масштаб {Math.round(view.zoom * 100)}%</p>
-            <div class="inspector-actions">
-              <button type="button" onclick={fitCanvas}>Вписать</button>
-              <button type="button" onclick={() => canvasApi?.centerActiveBoard()}>Центр</button>
-              <button type="button" onclick={() => canvasApi?.actualSize()}>100%</button>
-              <button type="button" onclick={openPreviewWindow}>Открыть предпросмотр</button>
-            </div>
           </section>
         {:else if workspaceLayout.rightPanel === 'brush-settings'}
           <section class="inspector-section">
@@ -3364,7 +3427,6 @@
               </select>
             </label>
             <p>Итоговый размер: {buffer.width * exportScale} × {buffer.height * exportScale}</p>
-            <button type="button" onclick={() => void exportImage()}>Экспортировать</button>
           </section>
         {/if}
         {#if pendingShortcutSequence.length > 0}
@@ -3425,7 +3487,32 @@
 {/if}
 
 {#if helpOpen}
-  <HelpDialog tools={keyboardTools} {shortcuts} returnFocusTo={helpTrigger} onclose={() => (helpOpen = false)} />
+  <HelpDialog
+    tools={keyboardTools}
+    {shortcuts}
+    returnFocusTo={helpTrigger}
+    onnotes={() => {
+      helpOpen = false;
+      showFeedbackNotes(helpTrigger);
+    }}
+    onclose={() => (helpOpen = false)}
+  />
+{/if}
+
+{#if welcomeOpen}
+  <WelcomeDialog
+    returnFocusTo={welcomeTrigger}
+    onclose={() => (welcomeOpen = false)}
+    onacknowledge={acknowledgeWelcome}
+  />
+{/if}
+
+{#if feedbackNotesOpen}
+  <FeedbackNotesDialog
+    returnFocusTo={feedbackNotesTrigger}
+    onclose={() => (feedbackNotesOpen = false)}
+    onnotify={notify}
+  />
 {/if}
 
 {#if settingsOpen}
@@ -3548,6 +3635,15 @@
     min-height: 0;
   }
 
+  .panel-header {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    min-width: 0;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+  }
+
   .timeline-dock {
     min-width: 0;
     min-height: 0;
@@ -3562,11 +3658,11 @@
 
   .panel-tabs {
     display: flex;
-    flex: 0 0 auto;
+    flex: 1 1 auto;
+    min-width: 0;
     gap: 2px;
     overflow-x: auto;
     padding: 4px;
-    border-bottom: 1px solid var(--border);
     scrollbar-width: thin;
   }
 
@@ -3581,6 +3677,58 @@
     font-size: 11px;
     white-space: nowrap;
     cursor: pointer;
+  }
+
+  .hide-palette-button,
+  .show-palette-button {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    min-height: 30px;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--panel-2);
+    color: var(--text-dim);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+  }
+
+  .hide-palette-button {
+    margin: 0 4px;
+  }
+
+  .hide-palette-button:hover,
+  .show-palette-button:hover {
+    border-color: var(--button-border-hover);
+    background: var(--button-hover);
+    color: var(--text);
+  }
+
+  .panel-chevron {
+    width: 7px;
+    height: 7px;
+    border-top: 1.5px solid currentColor;
+    border-right: 1.5px solid currentColor;
+    transform: rotate(45deg);
+  }
+
+  .show-palette-button {
+    position: absolute;
+    z-index: 20;
+    top: 50%;
+    right: 0;
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+    box-shadow: 0 2px 8px #0004;
+    transform: translateY(-50%);
+  }
+
+  .show-palette-button .panel-chevron {
+    transform: rotate(-135deg);
   }
 
   .panel-tabs button.active {
@@ -3621,6 +3769,12 @@
   .inspector-actions { display: flex; flex-wrap: wrap; gap: 6px; }
   .history-list { display: grid; gap: 5px; margin: 0; padding-left: 20px; }
   .inspector-section :focus-visible, .panel-tabs :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
+  .hide-palette-button:focus-visible,
+  .show-palette-button:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 1px;
   }

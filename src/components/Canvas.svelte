@@ -467,6 +467,7 @@
   let movingBoardPositions: Array<{ id: string; x: number; y: number }> = [];
   let boardDragStarted = false;
   let boardWasSelected = false;
+  let boardWasInSelection = false;
   let selectedBoardIds = $state.raw<Set<string>>(new Set());
   let movingReference: {
     id: string;
@@ -663,7 +664,7 @@
 
   /** Меняет зум на steps уровней вокруг центра области просмотра (кнопки и клавиши +/−). */
   export function zoomBy(steps: number): void {
-    view = clampSceneView(zoomAt(view, steps, viewW / 2, viewH / 2));
+    view = zoomAt(view, steps, viewW / 2, viewH / 2);
     updateCursor();
   }
 
@@ -927,10 +928,8 @@
     wheelAcc = 0;
     const steps = Math.max(-MAX_WHEEL_STEPS, Math.min(MAX_WHEEL_STEPS, raw));
 
-    // deltaY < 0: прокрутка от себя — приближение
-    view = clampSceneView(
-      zoomAt(view, -steps, e.clientX - originX, e.clientY - originY),
-    );
+    // Удерживаем точку под курсором на месте, пока вокруг неё меняется масштаб.
+    view = zoomAt(view, -steps, e.clientX - originX, e.clientY - originY);
     lastClient = { x: e.clientX, y: e.clientY };
     updateCursor();
   }
@@ -1043,11 +1042,14 @@
     if (e.button === 2 && e.ctrlKey && board) {
       if (session.isActive) return;
       e.preventDefault();
+      boardWasInSelection = selectedBoardIds.has(board.id);
+      boardWasSelected = boardWasInSelection || board.id === activeBoardId;
       onselectboard(board.id);
-      boardWasSelected = selectedBoardIds.has(board.id);
-      movingBoardIds = boardWasSelected
+      movingBoardIds = boardWasInSelection
         ? [...selectedBoardIds]
-        : [board.id];
+        : boardWasSelected && selectedBoardIds.size > 0
+          ? [...selectedBoardIds, board.id]
+          : [board.id];
       movingBoardPositions = boards
         .filter((entry) => movingBoardIds.includes(entry.id))
         .map((entry) => ({ id: entry.id, x: entry.x, y: entry.y }));
@@ -1175,6 +1177,13 @@
       if (!boardDragStarted && Math.hypot(e.clientX - movingBoardStart.x, e.clientY - movingBoardStart.y) >= 4) {
         boardDragStarted = true;
         if (!boardWasSelected) selectedBoardIds = new Set([movingBoardId]);
+        else if (!boardWasInSelection) selectedBoardIds = new Set([...selectedBoardIds, movingBoardId]);
+      }
+      if (boardDragStarted && !boardWasSelected) {
+        dragPreview = [];
+        alignmentGuides = [];
+        updateCursor();
+        return;
       }
       if (boardDragStarted) {
         const dx = Math.round((e.clientX - movingBoardStart.x) / view.zoom);
@@ -1271,7 +1280,7 @@
       const didDrag = boardDragStarted;
       if (!didDrag) {
         const nextSelection = new Set(selectedBoardIds);
-        if (boardWasSelected) nextSelection.delete(movedId);
+        if (boardWasInSelection) nextSelection.delete(movedId);
         else nextSelection.add(movedId);
         selectedBoardIds = nextSelection;
       }
@@ -1281,6 +1290,7 @@
       movingBoardPositions = [];
       boardDragStarted = false;
       boardWasSelected = false;
+      boardWasInSelection = false;
       dragPreview = [];
       alignmentGuides = [];
       if (didDrag && previews.length === 1) {
@@ -1366,6 +1376,7 @@
       movingBoardPositions = [];
       boardDragStarted = false;
       boardWasSelected = false;
+      boardWasInSelection = false;
       dragPreview = [];
       alignmentGuides = [];
     }
@@ -1404,6 +1415,7 @@
       movingBoardPositions = [];
       boardDragStarted = false;
       boardWasSelected = false;
+      boardWasInSelection = false;
       dragPreview = [];
       alignmentGuides = [];
     }

@@ -4,6 +4,7 @@
   import type { RGBA } from '../core/state';
 
   interface Props {
+    panelWidth: number;
     palettes: readonly Palette[];
     palette: Palette;
     freeColor: boolean;
@@ -16,7 +17,7 @@
     onswap: () => void;
   }
 
-  let { palettes, palette, freeColor, primary, secondary, recent, onpalette, onfreecolor, onpick, onswap }: Props =
+  let { panelWidth, palettes, palette, freeColor, primary, secondary, recent, onpalette, onfreecolor, onpick, onswap }: Props =
     $props();
 
   function onPaletteChange(e: Event & { currentTarget: HTMLSelectElement }): void {
@@ -71,7 +72,7 @@
   ></button>
 {/snippet}
 
-<aside class="panel" aria-label="Палитра">
+<aside class="panel" aria-label="Палитра" style:--dock-width="{panelWidth}px">
   <section class="block">
     <div class="current">
       <div class="big secondary" style:background={rgbaToCss(secondary)} title="Дополнительный цвет (ПКМ)">
@@ -198,7 +199,8 @@
     display: flex;
     flex-direction: column;
     gap: 18px;
-    width: 236px;
+    width: var(--dock-width, 236px);
+    height: 100%;
     padding: 14px;
     overflow-y: auto;
     background: var(--panel);
@@ -420,6 +422,7 @@
       flex-wrap: wrap;
       align-items: flex-start;
       width: auto;
+      height: auto;
       max-height: 42vh;
       gap: 14px 24px;
       padding: 10px 14px;

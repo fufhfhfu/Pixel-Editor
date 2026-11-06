@@ -24,6 +24,7 @@
     | 'flip-horizontal' | 'flip-vertical' | 'rotate-left' | 'rotate-right' | 'scale-up' | 'scale-down';
 
   interface Props {
+    panelWidth: number;
     tools: readonly Tool[];
     activeToolId: ToolId;
     brushSize: number;
@@ -40,6 +41,7 @@
     groups: readonly LayerGroup[];
     activeLayerId: string;
     hasSelection: boolean;
+    showLayers?: boolean;
     onselect: (id: ToolId) => void;
     onbrush: (size: number) => void;
     onbrushshape: (shape: BrushShape) => void;
@@ -72,6 +74,7 @@
   }
 
   let {
+    panelWidth,
     tools,
     activeToolId,
     brushSize,
@@ -88,6 +91,7 @@
     groups,
     activeLayerId,
     hasSelection,
+    showLayers = true,
     onselect,
     onbrush,
     onbrushshape,
@@ -335,7 +339,7 @@
   </svg>
 {/snippet}
 
-<aside class="panel" aria-label="Инструменты">
+<aside class="panel" aria-label="Инструменты" style:--dock-width="{panelWidth}px">
   <button
     type="button"
     class="add-board"
@@ -620,6 +624,7 @@
       {/if}
     </div>
   </details>
+  {#if showLayers}
   <LayersPanel
     {layers}
     {groups}
@@ -639,6 +644,7 @@
     onupdate={onlayerupdate}
     oncreatefromselection={oncreatefromselection}
   />
+  {/if}
   <details class="brush-library">
     <summary>Выделение</summary>
     <div class="options-panel">
@@ -794,7 +800,8 @@
     flex-direction: column;
     align-items: center;
     gap: 10px;
-    width: 60px;
+    width: var(--dock-width, 60px);
+    height: 100%;
     min-height: 0;
     padding: 12px 0;
     overflow-x: hidden;
@@ -948,6 +955,7 @@
       flex-direction: row;
       justify-content: flex-start;
       width: auto;
+      height: auto;
       padding: 6px 12px;
       overflow-x: auto;
       overflow-y: hidden;

@@ -3,6 +3,7 @@
 
   interface Props {
     references: readonly ReferenceImage[];
+    docked?: boolean;
     selectedReferenceId: string | null;
     onimport: (file: File) => void;
     onselect: (id: string) => void;
@@ -14,7 +15,7 @@
     onclose: () => void;
   }
 
-  let { references, selectedReferenceId, onimport, onselect, onupdate, onremove, onclose }: Props = $props();
+  let { references, docked = false, selectedReferenceId, onimport, onselect, onupdate, onremove, onclose }: Props = $props();
   let fileInput: HTMLInputElement | undefined;
   const selected = $derived(references.find((reference) => reference.id === selectedReferenceId) ?? null);
 
@@ -34,7 +35,7 @@
   }
 </script>
 
-<aside class="references-panel" aria-label="Менеджер референсов">
+<aside class="references-panel" class:docked aria-label="Менеджер референсов">
   <header>
     <h2>Референсы</h2>
     <button type="button" class="icon-button" aria-label="Закрыть панель референсов" onclick={onclose}>×</button>
@@ -142,6 +143,18 @@
     border-radius: var(--radius);
     background: var(--panel);
     box-shadow: 0 8px 28px #0006;
+  }
+
+  .references-panel.docked {
+    position: relative;
+    inset: auto;
+    width: 100%;
+    height: 100%;
+    max-height: 100%;
+    box-sizing: border-box;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
   }
 
   header,

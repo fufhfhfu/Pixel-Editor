@@ -18,6 +18,7 @@
     snapToGrid: boolean;
     checkerboard: boolean;
     tiledMode: boolean;
+    tilemapMode: boolean;
     symmetryX: boolean;
     symmetryY: boolean;
     referencesOpen: boolean;
@@ -30,6 +31,7 @@
     onsnaptogrid: (enabled: boolean) => void;
     oncheckerboard: (enabled: boolean) => void;
     ontiledmode: (enabled: boolean) => void;
+    ontilemapmode: (enabled: boolean) => void;
     onsymmetryx: (enabled: boolean) => void;
     onsymmetryy: (enabled: boolean) => void;
     ontogglereferences: () => void;
@@ -55,6 +57,7 @@
     snapToGrid,
     checkerboard,
     tiledMode,
+    tilemapMode,
     symmetryX,
     symmetryY,
     referencesOpen,
@@ -67,6 +70,7 @@
     onsnaptogrid,
     oncheckerboard,
     ontiledmode,
+    ontilemapmode,
     onsymmetryx,
     onsymmetryy,
     ontogglereferences,
@@ -242,6 +246,8 @@
     <button type="button" class="btn icon" title="Уменьшить (−)" aria-label="Уменьшить" onclick={onzoomout}>−</button>
     <button type="button" class="btn icon" title="Увеличить (+)" aria-label="Увеличить" onclick={onzoomin}>+</button>
     <button type="button" class="btn" title="Показать активный холст в масштабе 100%" onclick={onactualsize}>100%</button>
+    <button type="button" class="btn" class:active={tilemapMode} aria-pressed={tilemapMode}
+      title="Открыть редактор Tilemap" onclick={() => ontilemapmode(!tilemapMode)}>Tilemap</button>
     <button type="button" class="btn" title="Вписать холст в окно (F)" onclick={onfit}>
       Вписать <span class="kbd">F</span>
     </button>

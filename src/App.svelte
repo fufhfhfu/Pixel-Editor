@@ -5,12 +5,18 @@
   import HelpDialog from './components/HelpDialog.svelte';
   import SettingsDialog from './components/SettingsDialog.svelte';
   import ReferencesPanel from './components/ReferencesPanel.svelte';
+  import TilemapEditor from './components/TilemapEditor.svelte';
   import PalettePanel from './components/PalettePanel.svelte';
   import ProjectBar from './components/ProjectBar.svelte';
   import StatusBar from './components/StatusBar.svelte';
   import Toast from './components/Toast.svelte';
   import ToolPanel from './components/ToolPanel.svelte';
   import Toolbar from './components/Toolbar.svelte';
+  import DockSplitter from './components/DockSplitter.svelte';
+  import WorkspaceControls from './components/WorkspaceControls.svelte';
+  import TimelinePanel from './components/TimelinePanel.svelte';
+  import EditorMenuBar, { type EditorMenuGroup } from './components/EditorMenuBar.svelte';
+  import LayersPanel from './components/LayersPanel.svelte';
   import {
     DEFAULT_EXPORT_SCALE,
     downloadBlob,
@@ -18,6 +24,9 @@
     exportRasterBlob,
     getAvailableExportScales,
     isExportScale,
+    isExportFormat,
+    EXPORT_FORMATS,
+    EXPORT_SCALES,
     type ExportFormat,
     type ExportScale,
   } from './core/export';
@@ -31,6 +40,15 @@
     type ReferenceImage,
   } from './core/reference';
   import { History } from './core/history';
+  import {
+    advanceAnimation,
+    createAnimationFrame,
+    duplicateAnimationFrame,
+    insertAnimationFrame,
+    removeAnimationFrame,
+    updateFrameDuration,
+    type AnimationFrame,
+  } from './core/animation';
   import {
     DEFAULT_PALETTE_ID,
     PALETTES,
@@ -47,6 +65,7 @@
     MAX_PROJECT_CANVAS_COORDINATE,
     MAX_PROJECT_LAYERS,
     MAX_PROJECT_TOTAL_PIXELS,
+    MAX_PROJECT_ANIMATION_PIXELS,
     ProjectFormatError,
     parseProject,
     serializeProject,
@@ -63,6 +82,7 @@
     saveCustomSizes,
     saveThemePreference,
     currentSizeIsBuiltIn,
+    GRID_SPACINGS,
     MAX_CUSTOM_SIZES,
     type CanvasSize,
     type GridMode,
@@ -128,6 +148,17 @@
     type ToolId,
   } from './core/tools';
   import type { PixelPos, ViewState } from './core/viewport';
+  import type { TilemapData } from './core/tilemap';
+  import {
+    getWorkspacePreset,
+    loadWorkspaceLayout,
+    resizeWorkspaceDock,
+    saveWorkspaceLayout,
+    type DockId,
+    type WorkspaceId,
+    type WorkspacePanelId,
+    type WorkspaceLayout,
+  } from './core/workspace';
   import type { SelectionAction } from './components/ToolPanel.svelte';
 
   interface Props {
@@ -241,6 +272,12 @@
   type UndoEntry =
     | { kind: 'pixels'; boardId: string; historyKey: string }
     | {
+        kind: 'tilemap';
+        before: TilemapData | null;
+        after: TilemapData;
+        groupId: string | null;
+      }
+    | {
         kind: 'selection-pixels';
         boardId: string;
         historyKey: string;
@@ -258,6 +295,12 @@
         afterActiveLayerId: string;
         beforeSelection?: SelectionMask | null;
         afterSelection?: SelectionMask | null;
+        beforeAnimationFrames?: AnimationFrame[];
+        afterAnimationFrames?: AnimationFrame[];
+        beforeAnimationFramesByLayer?: Map<string, AnimationFrame[]>;
+        afterAnimationFramesByLayer?: Map<string, AnimationFrame[]>;
+        beforeActiveFrameIndex?: number;
+        afterActiveFrameIndex?: number;
       }
     | { kind: 'references'; before: ReferenceImage[]; after: ReferenceImage[] }
     | { kind: 'board'; action: BoardAction };
@@ -272,9 +315,15 @@
 
   const storage = getBrowserStorage();
   const preferences = loadEditorPreferences(storage);
+  const savedWorkspace = loadWorkspaceLayout(storage);
   const start = untrack(() => initialProject);
   const startupStorageMode = untrack(() => initialStorageMode);
   const startPalette = getPalette(start?.paletteId ?? DEFAULT_PALETTE_ID);
+  const animationFramesByLayer = new Map<string, AnimationFrame[]>();
+
+  function getAnimationLayerKey(boardId: string, layerId: string): string {
+    return `${boardId}:${layerId}`;
+  }
 
   function makeArtboard(
     id: string,
@@ -316,7 +365,7 @@
     return { id, x, y, layers, groups, groupBuffers, activeLayerId, buffer: composite };
   }
 
-  const initialBoards: Artboard[] = start?.canvases
+  let initialBoards: Artboard[] = start?.canvases
     ? start.canvases.map((canvas) => makeArtboard(
         canvas.id, canvas.x, canvas.y, canvas.width, canvas.height, canvas.pixels, canvas.layers, canvas.activeLayerId,
         canvas.groups,
@@ -329,7 +378,66 @@
         start?.height ?? DEFAULT_GRID_SIZE,
         start?.pixels ?? new Uint8ClampedArray(DEFAULT_GRID_SIZE * DEFAULT_GRID_SIZE * 4),
       )];
+  const initialActiveBoardId = start?.activeCanvasId ?? initialBoards[0]!.id;
+  const initialActiveBoardBeforeAnimation = initialBoards.find((board) => board.id === initialActiveBoardId)!;
+  const initialActiveLayerBeforeAnimation = initialActiveBoardBeforeAnimation.layers
+    .find((layer) => layer.id === initialActiveBoardBeforeAnimation.activeLayerId)!;
+  for (const canvas of start?.canvases ?? []) {
+    for (const sourceLayer of canvas.layers ?? []) {
+      if (!sourceLayer.animationFrames) continue;
+      animationFramesByLayer.set(
+        getAnimationLayerKey(canvas.id, sourceLayer.id),
+        sourceLayer.animationFrames.map((frame) =>
+          createAnimationFrame(frame.id, canvas.width, canvas.height, frame.pixels, frame.durationMs)),
+      );
+    }
+  }
+  const initialAnimationLayerKey = getAnimationLayerKey(
+    initialActiveBoardId,
+    initialActiveLayerBeforeAnimation.id,
+  );
+  let initialAnimationFrames = animationFramesByLayer.get(initialAnimationLayerKey) ??
+    start?.animationFrames?.map((frame) =>
+      createAnimationFrame(frame.id, start.width, start.height, frame.pixels, frame.durationMs),
+    ) ?? [];
+  if (initialAnimationFrames.length === 0) {
+    initialAnimationFrames = [{
+      id: 'frame-1',
+      durationMs: 100,
+      buffer: initialActiveLayerBeforeAnimation.buffer,
+    }];
+  }
+  animationFramesByLayer.set(initialAnimationLayerKey, initialAnimationFrames);
+  const firstAnimationBuffer = initialAnimationFrames[0]!.buffer;
+  initialBoards = initialBoards.map((board) => {
+    if (board.id !== initialActiveBoardId) return board;
+    const layers = board.layers.map((layer) => layer.id === board.activeLayerId
+      ? { ...layer, buffer: firstAnimationBuffer }
+      : layer);
+    firstAnimationBuffer.setLocked(initialActiveLayerBeforeAnimation.locked);
+    firstAnimationBuffer.setAlphaLock(initialActiveLayerBeforeAnimation.alphaLock);
+    const groupBuffers = new Map<string, PixelBuffer>();
+    const composite = compositeLayers(
+      firstAnimationBuffer.width,
+      firstAnimationBuffer.height,
+      layers,
+      undefined,
+      undefined,
+      board.groups,
+      groupBuffers,
+    );
+    for (const layer of layers) layer.buffer.takeDirty();
+    return { ...board, layers, groupBuffers, buffer: composite };
+  });
+  const initialActiveBoard = initialBoards.find((board) => board.id === initialActiveBoardId)!;
+  const initialActiveLayer = initialActiveBoard.layers.find((layer) => layer.id === initialActiveBoard.activeLayerId)!;
   const bufferHistoryIds = new WeakMap<PixelBuffer, number>();
+  const frameByHistoryKey = new Map<string, string>();
+  const frameBufferIds = new WeakMap<PixelBuffer, string>();
+  for (const frames of animationFramesByLayer.values()) {
+    for (const frame of frames) frameBufferIds.set(frame.buffer, frame.id);
+  }
+  for (const frame of initialAnimationFrames) frameBufferIds.set(frame.buffer, frame.id);
   let nextBufferHistoryId = 1;
   function getHistoryKey(boardId: string, layer: RasterLayer): string {
     let historyId = bufferHistoryIds.get(layer.buffer);
@@ -337,22 +445,34 @@
       historyId = nextBufferHistoryId++;
       bufferHistoryIds.set(layer.buffer, historyId);
     }
-    return `${boardId}:${historyId}`;
+    const key = `${boardId}:${historyId}`;
+    const frameId = frameBufferIds.get(layer.buffer);
+    if (frameId) frameByHistoryKey.set(key, frameId);
+    return key;
   }
   const histories = new Map(initialBoards.flatMap((board) =>
     board.layers.map((layer) => [getHistoryKey(board.id, layer), new History()] as const),
   ));
   const undoTimeline: UndoEntry[] = [];
   const redoTimeline: UndoEntry[] = [];
-  const initialActiveBoardId = start?.activeCanvasId ?? initialBoards[0]!.id;
-  const initialActiveBoard = initialBoards.find((board) => board.id === initialActiveBoardId)!;
-  const initialActiveLayer = initialActiveBoard.layers.find((layer) => layer.id === initialActiveBoard.activeLayerId)!;
+  let historyRevision = $state(0);
+  const MAX_TILEMAP_HISTORY_ENTRIES = 100;
+  const MAX_TILEMAP_HISTORY_BYTES = 64 * 1024 * 1024;
   let history = histories.get(getHistoryKey(initialActiveBoardId, initialActiveLayer))!;
   let boards = $state.raw<Artboard[]>(initialBoards);
   let activeBoardId = $state(initialActiveBoardId);
   let activeLayerId = $state(initialActiveBoard.activeLayerId);
   let buffer = $state.raw(initialActiveBoard.layers.find((layer) => layer.id === activeLayerId)!.buffer);
+  let animationFrames = $state.raw<AnimationFrame[]>(initialAnimationFrames);
+  let activeFrameIndex = $state(0);
+  let animationPlaying = $state(false);
+  let animationTimer: ReturnType<typeof setInterval> | undefined;
+  let animationLastTick = 0;
+  let animationElapsed = 0;
   let references = $state.raw<ReferenceImage[]>(start?.references?.map((reference) => ({ ...reference })) ?? []);
+  let tilemap = $state.raw<TilemapData | null>(start?.tilemap ?? null);
+  let tilemapMode = $state(false);
+  let workspaceLayout = $state.raw<WorkspaceLayout>(savedWorkspace.layout);
   let selectedReferenceId = $state<string | null>(start?.references?.[0]?.id ?? null);
   let referencesOpen = $state(false);
   let includeReferencesInExport = $state(false);
@@ -401,6 +521,8 @@
   let brushOpacity = $state(100);
   const BRUSH_LIBRARY_KEY = 'pixel-editor:brush-library';
   let brushLibrary = $state.raw<BrushDefinition[]>([]);
+  let brushPanelName = $state('Моя кисть');
+  let brushPanelType = $state<BrushType>('pencil');
   let selectedBrushId = $state('');
   let brushLibraryError: string | null = null;
   let temporaryPicker = $state(false);
@@ -457,6 +579,7 @@
 
   let autosaveTimer: ReturnType<typeof setTimeout> | undefined;
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+  let workspaceSaveTimer: ReturnType<typeof setTimeout> | undefined;
   let autosaveFailureReported = false;
   let autosaveArmed = false;
   let autosaveRevision = 0;
@@ -464,6 +587,14 @@
   const activeTool = $derived(getTool(activeToolId));
   const activeBoard = $derived(boards.find((board) => board.id === activeBoardId) ?? boards[0]!);
   const activeLayers = $derived(activeBoard.layers);
+  const historyEntries = $derived(undoTimeline.slice(-10).reverse().map((entry) => {
+    void historyRevision;
+    if (entry.kind === 'pixels' || entry.kind === 'selection-pixels') return 'Изменение пикселей';
+    if (entry.kind === 'tilemap') return 'Изменение Tilemap';
+    if (entry.kind === 'layer-stack') return 'Изменение слоёв';
+    if (entry.kind === 'references') return 'Изменение референсов';
+    return entry.action.kind === 'add' ? 'Добавление холста' : 'Перемещение холстов';
+  }));
   const palette = $derived(getPalette(paletteId));
   // В режиме палитры показываем только недавние цвета, которые в ней есть
   const visibleRecent = $derived(freeColor ? recent : filterToPalette(recent, palette));
@@ -485,6 +616,315 @@
     noticeTimer = setTimeout(dismissNotice, NOTICE_DURATION_MS);
   }
 
+  function scheduleWorkspaceSave(): void {
+    clearTimeout(workspaceSaveTimer);
+    workspaceSaveTimer = setTimeout(() => {
+      workspaceSaveTimer = undefined;
+      if (!saveWorkspaceLayout(storage, workspaceLayout)) {
+        notify('Рабочее пространство применено, но сохранить его настройки не удалось.', 'error');
+      }
+    }, 200);
+  }
+
+  function selectWorkspace(id: WorkspaceId): void {
+    workspaceLayout = getWorkspacePreset(id);
+    tilemapMode = id === 'tileset';
+    scheduleWorkspaceSave();
+  }
+
+  function selectAnimationFrame(index: number, persist = true): void {
+    const frame = animationFrames[index];
+    if (!frame || animationFrames[activeFrameIndex]?.id === frame.id) return;
+    const board = boards.find((entry) => entry.id === activeBoardId);
+    const layer = board?.layers.find((entry) => entry.id === activeLayerId);
+    if (!board || !layer || frame.buffer.width !== buffer.width || frame.buffer.height !== buffer.height) {
+      notify('Не удалось переключить кадр: размер кадра не совпадает с активным холстом.', 'error');
+      return;
+    }
+    frameBufferIds.set(frame.buffer, frame.id);
+    replaceLayerStack(activeBoardId, board.layers.map((entry) =>
+      entry.id === activeLayerId ? { ...entry, buffer: frame.buffer } : entry), activeLayerId);
+    activeFrameIndex = index;
+    cursor = null;
+    if (persist) scheduleAutosave();
+  }
+
+  function getAnimationFramesForLayer(boardId: string, layer: RasterLayer): AnimationFrame[] {
+    const key = getAnimationLayerKey(boardId, layer.id);
+    const saved = animationFramesByLayer.get(key);
+    if (saved) return saved;
+    const frame: AnimationFrame = {
+      id: frameBufferIds.get(layer.buffer) ?? `frame-${Date.now().toString(36)}`,
+      durationMs: 100,
+      buffer: layer.buffer,
+    };
+    frameBufferIds.set(frame.buffer, frame.id);
+    const frames = [frame];
+    animationFramesByLayer.set(key, frames);
+    return frames;
+  }
+
+  function setCurrentAnimationFrames(frames: AnimationFrame[], index = activeFrameIndex): void {
+    animationFrames = frames;
+    animationFramesByLayer.set(getAnimationLayerKey(activeBoardId, activeLayerId), frames);
+    for (const frame of frames) frameBufferIds.set(frame.buffer, frame.id);
+    activeFrameIndex = Math.max(0, Math.min(index, frames.length - 1));
+  }
+
+  function stopAnimationPlayback(): void {
+    clearInterval(animationTimer);
+    animationTimer = undefined;
+    animationPlaying = false;
+  }
+
+  function addAnimationFrame(): void {
+    if (
+      animationFrames.length >= 256 ||
+      (animationFrames.length + 1) * buffer.width * buffer.height > MAX_PROJECT_ANIMATION_PIXELS
+    ) {
+      notify('Достигнут допустимый лимит количества или общего размера кадров анимации.', 'error');
+      return;
+    }
+    const id = `frame-${Date.now().toString(36)}-${animationFrames.length + 1}`;
+    const frame = createAnimationFrame(id, buffer.width, buffer.height);
+    frameBufferIds.set(frame.buffer, frame.id);
+    setCurrentAnimationFrames(insertAnimationFrame(animationFrames, frame, activeFrameIndex + 1));
+    selectAnimationFrame(activeFrameIndex + 1);
+  }
+
+  function duplicateAnimationFrameAtCurrent(): void {
+    if (
+      animationFrames.length >= 256 ||
+      (animationFrames.length + 1) * buffer.width * buffer.height > MAX_PROJECT_ANIMATION_PIXELS
+    ) {
+      notify('Достигнут допустимый лимит количества или общего размера кадров анимации.', 'error');
+      return;
+    }
+    const current = animationFrames[activeFrameIndex];
+    if (!current) return;
+    const frame = duplicateAnimationFrame(
+      current,
+      `frame-${Date.now().toString(36)}-${animationFrames.length + 1}`,
+    );
+    frameBufferIds.set(frame.buffer, frame.id);
+    setCurrentAnimationFrames(insertAnimationFrame(animationFrames, frame, activeFrameIndex + 1));
+    selectAnimationFrame(activeFrameIndex + 1);
+  }
+
+  function removeAnimationFrameAtCurrent(): void {
+    if (animationFrames.length <= 1) return;
+    const removed = animationFrames[activeFrameIndex];
+    if (!removed) return;
+    const nextIndex = Math.min(activeFrameIndex, animationFrames.length - 2);
+    const remaining = removeAnimationFrame(animationFrames, activeFrameIndex);
+    setCurrentAnimationFrames(remaining, -1);
+    activeFrameIndex = -1;
+    selectAnimationFrame(nextIndex);
+    const obsoleteHistoryKeys = new Set(
+      [...frameByHistoryKey].filter(([, frameId]) => frameId === removed.id).map(([key]) => key),
+    );
+    for (const timeline of [undoTimeline, redoTimeline]) {
+      for (let index = timeline.length - 1; index >= 0; index--) {
+        const entry = timeline[index]!;
+        if ('historyKey' in entry && obsoleteHistoryKeys.has(entry.historyKey)) timeline.splice(index, 1);
+      }
+    }
+    for (const key of obsoleteHistoryKeys) {
+      frameByHistoryKey.delete(key);
+      histories.delete(key);
+    }
+    syncHistory();
+  }
+
+  function setAnimationFrameDuration(index: number, durationMs: number): void {
+    const frame = animationFrames[index];
+    if (!frame) return;
+    try {
+      setCurrentAnimationFrames(animationFrames.map((entry, frameIndex) =>
+        frameIndex === index ? updateFrameDuration(entry, durationMs) : entry));
+      animationElapsed = 0;
+      scheduleAutosave();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Не удалось изменить длительность кадра.', 'error');
+    }
+  }
+
+  function toggleAnimationPlayback(): void {
+    animationPlaying = !animationPlaying;
+    clearInterval(animationTimer);
+    animationTimer = undefined;
+    animationElapsed = 0;
+    if (!animationPlaying) return;
+    animationLastTick = performance.now();
+    animationTimer = setInterval(() => {
+      const now = performance.now();
+      const elapsed = Math.max(0, now - animationLastTick);
+      animationLastTick = now;
+      const position = advanceAnimation(
+        animationFrames,
+        { frameIndex: activeFrameIndex, elapsedInFrameMs: animationElapsed },
+        elapsed,
+      );
+      animationElapsed = position.elapsedInFrameMs;
+      if (position.frameIndex !== activeFrameIndex) selectAnimationFrame(position.frameIndex, false);
+    }, 16);
+  }
+
+  function toggleWorkspaceDock(dock: DockId): void {
+    if (dock === 'tools') {
+      workspaceLayout = { ...workspaceLayout, toolsVisible: !workspaceLayout.toolsVisible };
+    } else if (dock === 'palette') {
+      workspaceLayout = { ...workspaceLayout, paletteVisible: !workspaceLayout.paletteVisible };
+    } else {
+      workspaceLayout = { ...workspaceLayout, timelineVisible: !workspaceLayout.timelineVisible };
+    }
+    scheduleWorkspaceSave();
+  }
+
+  function resizeWorkspace(dock: DockId, delta: number): void {
+    const next = resizeWorkspaceDock(workspaceLayout, dock, delta);
+    if (next === workspaceLayout) return;
+    workspaceLayout = next;
+    scheduleWorkspaceSave();
+  }
+
+  const workspacePanels: readonly { id: WorkspacePanelId; label: string }[] = [
+    { id: 'colors', label: 'Colors' },
+    { id: 'palette', label: 'Palette' },
+    { id: 'layers', label: 'Layers' },
+    { id: 'properties', label: 'Properties' },
+    { id: 'brush-settings', label: 'Brush Settings' },
+    { id: 'reference', label: 'Reference' },
+    { id: 'history', label: 'History' },
+    { id: 'navigator', label: 'Navigator' },
+    { id: 'preview', label: 'Preview' },
+    { id: 'brush-library', label: 'Brush Library' },
+    { id: 'grid-settings', label: 'Grid Settings' },
+    { id: 'export', label: 'Export' },
+  ];
+
+  function selectWorkspacePanel(id: WorkspacePanelId): void {
+    workspaceLayout = { ...workspaceLayout, rightPanel: id };
+    scheduleWorkspaceSave();
+  }
+
+  function handleEditorCommand(command: string): void {
+    if (command.startsWith('tool:')) {
+      const toolId = command.slice(5);
+      const tool = TOOLS.find((entry) => entry.id === toolId);
+      if (tool) selectTool(tool.id);
+      return;
+    }
+    if (command.startsWith('panel:')) {
+      const panel = workspacePanels.find((entry) => entry.id === command.slice(6));
+      if (panel) selectWorkspacePanel(panel.id);
+      return;
+    }
+    switch (command) {
+      case 'save': void saveProject(); break;
+      case 'export': void exportImage(); break;
+      case 'undo': undo(); break;
+      case 'redo': redo(); break;
+      case 'clear': requestClear(); break;
+      case 'select-all': runSelectionAction('select-all'); break;
+      case 'toggle-grid': toggleGrid(); break;
+      case 'fit': fitCanvas(); break;
+      case 'center': canvasApi?.centerActiveBoard(); break;
+      case 'zoom-in': canvasApi?.zoomBy(1); break;
+      case 'zoom-out': canvasApi?.zoomBy(-1); break;
+      case 'add-layer': addLayer(); break;
+      case 'duplicate-layer': duplicateLayer(activeLayerId); break;
+      case 'delete-layer': deleteLayer(activeLayerId); break;
+      case 'frame-add': addAnimationFrame(); break;
+      case 'frame-duplicate': duplicateAnimationFrameAtCurrent(); break;
+      case 'frame-remove': removeAnimationFrameAtCurrent(); break;
+      case 'frame-previous': selectAnimationFrame(Math.max(0, activeFrameIndex - 1)); break;
+      case 'frame-next': selectAnimationFrame(Math.min(animationFrames.length - 1, activeFrameIndex + 1)); break;
+      case 'animation-play': toggleAnimationPlayback(); break;
+      case 'workspace-drawing': selectWorkspace('drawing'); break;
+      case 'workspace-animation': selectWorkspace('animation'); break;
+      case 'workspace-tileset': selectWorkspace('tileset'); break;
+      case 'workspace-minimal': selectWorkspace('minimal'); break;
+      case 'toggle-tools': toggleWorkspaceDock('tools'); break;
+      case 'toggle-palette': toggleWorkspaceDock('palette'); break;
+      case 'toggle-timeline': toggleWorkspaceDock('timeline'); break;
+      case 'preview': openPreviewWindow(); break;
+      case 'settings':
+        settingsTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        settingsTab = 'general';
+        settingsOpen = true;
+        break;
+      case 'help':
+        helpTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        helpOpen = true;
+        break;
+    }
+  }
+
+  const editorMenuGroups = $derived<EditorMenuGroup[]>([
+    { label: 'Файл', items: [
+      { label: 'Открыть…', command: 'open' },
+      { label: 'Сохранить проект', command: 'save' },
+      { label: 'Экспорт изображения', command: 'export' },
+    ] },
+    { label: 'Правка', items: [
+      { label: 'Отменить', command: 'undo', disabled: !canUndo },
+      { label: 'Повторить', command: 'redo', disabled: !canRedo },
+      { label: 'Выбрать всё', command: 'select-all', separatorBefore: true },
+      { label: 'Очистить холст…', command: 'clear' },
+    ] },
+    { label: 'Вид', items: [
+      { label: showGrid ? 'Скрыть сетку' : 'Показать сетку', command: 'toggle-grid' },
+      { label: 'Вписать холсты', command: 'fit' },
+      { label: 'Центрировать холст', command: 'center' },
+      { label: 'Увеличить', command: 'zoom-in', separatorBefore: true },
+      { label: 'Уменьшить', command: 'zoom-out' },
+      { label: 'Предпросмотр', command: 'preview', separatorBefore: true },
+    ] },
+    { label: 'Изображение', items: [
+      { label: 'Центрировать холст', command: 'center' },
+      { label: 'Вписать холсты в окно', command: 'fit' },
+    ] },
+    { label: 'Слой', items: [
+      { label: 'Новый слой', command: 'add-layer' },
+      { label: 'Дублировать активный слой', command: 'duplicate-layer' },
+      { label: 'Удалить активный слой', command: 'delete-layer' },
+    ] },
+    { label: 'Кадр', items: [
+      { label: 'Предыдущий кадр', command: 'frame-previous' },
+      { label: 'Следующий кадр', command: 'frame-next' },
+      { label: 'Добавить кадр', command: 'frame-add', separatorBefore: true },
+      { label: 'Дублировать кадр', command: 'frame-duplicate' },
+      { label: 'Удалить кадр', command: 'frame-remove', disabled: animationFrames.length <= 1 },
+    ] },
+    { label: 'Анимация', items: [
+      { label: animationPlaying ? 'Остановить' : 'Воспроизвести', command: 'animation-play' },
+      { label: 'Показать Timeline', command: 'toggle-timeline' },
+    ] },
+    { label: 'Инструменты', items: TOOLS.map((tool) => ({
+      label: `${tool.label} (${tool.hotkeyLabel})`,
+      command: `tool:${tool.id}`,
+    })) },
+    { label: 'Окно', items: [
+      { label: 'Рабочее пространство: Рисование', command: 'workspace-drawing' },
+      { label: 'Рабочее пространство: Анимация', command: 'workspace-animation' },
+      { label: 'Рабочее пространство: Tileset', command: 'workspace-tileset' },
+      { label: 'Рабочее пространство: Минимальное', command: 'workspace-minimal' },
+      { label: workspaceLayout.toolsVisible ? 'Скрыть инструменты' : 'Показать инструменты', command: 'toggle-tools', separatorBefore: true },
+      { label: workspaceLayout.paletteVisible ? 'Скрыть палитру' : 'Показать палитру', command: 'toggle-palette' },
+      { label: workspaceLayout.timelineVisible ? 'Скрыть Timeline' : 'Показать Timeline', command: 'toggle-timeline' },
+      ...workspacePanels.map((panel) => ({
+        label: `Панель: ${panel.label}`,
+        command: `panel:${panel.id}`,
+        separatorBefore: panel.id === 'colors',
+      })),
+    ] },
+    { label: 'Справка', items: [
+      { label: 'Горячие клавиши', command: 'help' },
+      { label: 'Настройки', command: 'settings' },
+    ] },
+  ]);
+
   // ——— Автосохранение ———
 
   function currentProject(): ProjectData {
@@ -498,6 +938,7 @@
       secondary,
       recent,
       references,
+      tilemap: tilemap ?? undefined,
       canvases: boards.map((board) => ({
         id: board.id,
         x: board.x,
@@ -520,6 +961,11 @@
           effects: layer.effects,
           filters: layer.filters,
           groupId: layer.groupId ?? null,
+          animationFrames: animationFramesByLayer.get(getAnimationLayerKey(board.id, layer.id))?.map((frame) => ({
+            id: frame.id,
+            durationMs: frame.durationMs,
+            pixels: frame.buffer.data,
+          })),
         })),
         groups: board.groups,
       })),
@@ -548,6 +994,17 @@
     const board = boards.find((entry) => entry.id === boardId);
     if (!board || !layers.some((layer) => layer.id === nextActiveLayerId)) {
       throw new RangeError('Layer stack must contain its active layer.');
+    }
+    if (activeBoardId === boardId && board.activeLayerId !== nextActiveLayerId) {
+      const targetLayer = layers.find((layer) => layer.id === nextActiveLayerId)!;
+      const targetFrames = getAnimationFramesForLayer(boardId, targetLayer);
+      animationFrames = targetFrames;
+      activeFrameIndex = 0;
+      stopAnimationPlayback();
+      for (const frame of targetFrames) frameBufferIds.set(frame.buffer, frame.id);
+      layers = layers.map((layer) => layer.id === nextActiveLayerId
+        ? { ...layer, buffer: targetFrames[0]!.buffer }
+        : layer);
     }
     const nextGroups = (groups ?? board.groups).map((group) => ({ ...group }));
     const activeGroupIds = new Set(nextGroups.map((group) => group.id));
@@ -618,7 +1075,30 @@
     const layers = direction === 'undo' ? entry.beforeLayers : entry.afterLayers;
     const groups = direction === 'undo' ? entry.beforeGroups : entry.afterGroups;
     const layerId = direction === 'undo' ? entry.beforeActiveLayerId : entry.afterActiveLayerId;
+    const restoredFramesByLayer = direction === 'undo'
+      ? entry.beforeAnimationFramesByLayer
+      : entry.afterAnimationFramesByLayer;
+    if (restoredFramesByLayer) {
+      animationFramesByLayer.clear();
+      for (const [key, frames] of restoredFramesByLayer) animationFramesByLayer.set(key, frames);
+      animationFrames = animationFramesByLayer.get(getAnimationLayerKey(entry.boardId, layerId)) ?? animationFrames;
+      activeFrameIndex = direction === 'undo'
+        ? entry.beforeActiveFrameIndex ?? 0
+        : entry.afterActiveFrameIndex ?? 0;
+      for (const frames of animationFramesByLayer.values()) {
+        for (const frame of frames) frameBufferIds.set(frame.buffer, frame.id);
+      }
+    }
     replaceLayerStack(entry.boardId, layers, layerId, groups);
+    const restoredFrames = direction === 'undo' ? entry.beforeAnimationFrames : entry.afterAnimationFrames;
+    if (restoredFrames) {
+      animationFrames = restoredFrames;
+      animationFramesByLayer.set(getAnimationLayerKey(entry.boardId, layerId), restoredFrames);
+      activeFrameIndex = direction === 'undo'
+        ? entry.beforeActiveFrameIndex ?? 0
+        : entry.afterActiveFrameIndex ?? 0;
+      for (const frame of animationFrames) frameBufferIds.set(frame.buffer, frame.id);
+    }
     if (entry.beforeSelection !== undefined || entry.afterSelection !== undefined) {
       setSelection(direction === 'undo' ? entry.beforeSelection ?? null : entry.afterSelection ?? null);
     }
@@ -887,11 +1367,19 @@
   onDestroy(() => {
     clearTimeout(autosaveTimer);
     clearTimeout(noticeTimer);
+    clearInterval(animationTimer);
+    if (workspaceSaveTimer !== undefined) {
+      clearTimeout(workspaceSaveTimer);
+      if (!saveWorkspaceLayout(storage, workspaceLayout)) {
+        console.error('Не удалось сохранить раскладку рабочего пространства.');
+      }
+    }
   });
 
   // ——— История ———
 
   function syncHistory(): void {
+    historyRevision++;
     canUndo = undoTimeline.length > 0;
     canRedo = redoTimeline.length > 0;
   }
@@ -921,6 +1409,45 @@
     syncHistory();
   }
 
+  function trimTilemapHistory(): void {
+    const getUsage = (): { entries: number; bytes: number } => {
+      const retainedArrays = new Set<object>();
+      let entries = 0;
+      let bytes = 0;
+      for (const action of [...undoTimeline, ...redoTimeline]) {
+        if (action.kind !== 'tilemap') continue;
+        entries++;
+        for (const snapshot of [action.before, action.after]) {
+          if (!snapshot) continue;
+          for (const layer of snapshot.layers) {
+            if (retainedArrays.has(layer.cells)) continue;
+            retainedArrays.add(layer.cells);
+            bytes += layer.cells.length * 8;
+          }
+          for (const tile of snapshot.tiles) {
+            if (retainedArrays.has(tile.pixels)) continue;
+            retainedArrays.add(tile.pixels);
+            bytes += tile.pixels.byteLength;
+          }
+        }
+      }
+      return { entries, bytes };
+    };
+
+    let usage = getUsage();
+    while (usage.entries > MAX_TILEMAP_HISTORY_ENTRIES || usage.bytes > MAX_TILEMAP_HISTORY_BYTES) {
+      const oldestUndo = undoTimeline.findIndex((entry) => entry.kind === 'tilemap');
+      if (oldestUndo >= 0) undoTimeline.splice(oldestUndo, 1);
+      else {
+        const oldestRedo = redoTimeline.findIndex((entry) => entry.kind === 'tilemap');
+        if (oldestRedo < 0) break;
+        redoTimeline.splice(oldestRedo, 1);
+      }
+      usage = getUsage();
+    }
+    syncHistory();
+  }
+
   function applyBoardPositions(positions: Array<{ id: string; x: number; y: number }>): void {
     const changes = new Map(positions.map((position) => [position.id, position]));
     boards = boards.map((board) => {
@@ -941,9 +1468,35 @@
     buffer = layer.buffer;
     buffer.setLocked(layer.locked || groupHasLock(board.groups, layer.groupId));
     buffer.setClipMask(null);
-    const key = getHistoryKey(id, layer);
+    const boardFrames = getAnimationFramesForLayer(id, layer);
+    const activeFrame = boardFrames[0]!;
+    if (activeFrame.buffer !== layer.buffer) {
+      const layers = board.layers.map((entry) => entry.id === layer.id
+        ? { ...entry, buffer: activeFrame.buffer }
+        : entry);
+      const groupBuffers = new Map<string, PixelBuffer>();
+      const composite = compositeLayers(
+        activeFrame.buffer.width,
+        activeFrame.buffer.height,
+        layers,
+        undefined,
+        undefined,
+        board.groups,
+        groupBuffers,
+      );
+      boards = boards.map((entry) => entry.id === id
+        ? { ...entry, layers, groupBuffers, buffer: composite }
+        : entry);
+      buffer = activeFrame.buffer;
+    }
+    const activeLayer = boards.find((entry) => entry.id === id)!.layers
+      .find((entry) => entry.id === activeLayerId)!;
+    const key = getHistoryKey(id, activeLayer);
     history = histories.get(key) ?? new History();
     histories.set(key, history);
+    animationFrames = boardFrames;
+    activeFrameIndex = 0;
+    stopAnimationPlayback();
     cursor = null;
   }
 
@@ -1007,8 +1560,16 @@
   function undo(): void {
     const entry = undoTimeline.pop();
     if (!entry) return;
+    if ('historyKey' in entry) {
+      const frameId = frameByHistoryKey.get(entry.historyKey);
+      const frameIndex = animationFrames.findIndex((frame) => frame.id === frameId);
+      if (frameIndex >= 0) selectAnimationFrame(frameIndex, false);
+    }
     if (entry.kind === 'board') {
       applyBoardAction(entry.action, 'undo');
+    } else if (entry.kind === 'tilemap') {
+      tilemap = entry.before;
+      scheduleAutosave();
     } else if (entry.kind === 'layer-stack') {
       applyLayerStackAction(entry, 'undo');
     } else if (entry.kind === 'references') {
@@ -1041,8 +1602,16 @@
   function redo(): void {
     const entry = redoTimeline.pop();
     if (!entry) return;
+    if ('historyKey' in entry) {
+      const frameId = frameByHistoryKey.get(entry.historyKey);
+      const frameIndex = animationFrames.findIndex((frame) => frame.id === frameId);
+      if (frameIndex >= 0) selectAnimationFrame(frameIndex, false);
+    }
     if (entry.kind === 'board') {
       applyBoardAction(entry.action, 'redo');
+    } else if (entry.kind === 'tilemap') {
+      tilemap = entry.after;
+      scheduleAutosave();
     } else if (entry.kind === 'layer-stack') {
       applyLayerStackAction(entry, 'redo');
     } else if (entry.kind === 'references') {
@@ -1935,6 +2504,7 @@
     buffer.setClipMask(null);
     selectionMask = null;
     selectionPreview = null;
+    animationFramesByLayer.clear();
     boards = project.canvases
       ? project.canvases.map((canvas) => makeArtboard(
           canvas.id, canvas.x, canvas.y, canvas.width, canvas.height, canvas.pixels, canvas.layers, canvas.activeLayerId,
@@ -1943,11 +2513,58 @@
           project.activeCanvasId ?? 'canvas-1', 0, 0, project.width, project.height, project.pixels,
         )];
     activeBoardId = project.activeCanvasId ?? boards[0]!.id;
-    const activeBoard = boards.find((board) => board.id === activeBoardId)!;
+    let activeBoard = boards.find((board) => board.id === activeBoardId)!;
     activeLayerId = activeBoard.activeLayerId;
-    buffer = activeBoard.layers.find((layer) => layer.id === activeLayerId)!.buffer;
+    const activeLayer = activeBoard.layers.find((layer) => layer.id === activeLayerId)!;
+    for (const canvas of project.canvases ?? []) {
+      for (const layer of canvas.layers ?? []) {
+        if (!layer.animationFrames) continue;
+        animationFramesByLayer.set(
+          getAnimationLayerKey(canvas.id, layer.id),
+          layer.animationFrames.map((frame) =>
+            createAnimationFrame(frame.id, canvas.width, canvas.height, frame.pixels, frame.durationMs)),
+        );
+      }
+    }
+    const activeAnimationKey = getAnimationLayerKey(activeBoardId, activeLayerId);
+    const activeLayerFrames = animationFramesByLayer.get(activeAnimationKey) ??
+      project.animationFrames?.map((frame) =>
+        createAnimationFrame(frame.id, activeLayer.buffer.width, activeLayer.buffer.height, frame.pixels, frame.durationMs),
+      ) ?? [{
+        id: 'frame-1',
+        durationMs: 100,
+        buffer: activeLayer.buffer,
+      }];
+    animationFramesByLayer.set(activeAnimationKey, activeLayerFrames);
+    animationFrames = activeLayerFrames;
+    activeFrameIndex = 0;
+    for (const frames of animationFramesByLayer.values()) {
+      for (const frame of frames) frameBufferIds.set(frame.buffer, frame.id);
+    }
+    for (const frame of animationFrames) frameBufferIds.set(frame.buffer, frame.id);
+    const firstFrameBuffer = animationFrames[0]!.buffer;
+    activeBoard = {
+      ...activeBoard,
+      layers: activeBoard.layers.map((layer) => layer.id === activeLayerId
+        ? { ...layer, buffer: firstFrameBuffer }
+        : layer),
+    };
+    const groupBuffers = new Map<string, PixelBuffer>();
+    activeBoard.buffer = compositeLayers(
+      firstFrameBuffer.width,
+      firstFrameBuffer.height,
+      activeBoard.layers,
+      undefined,
+      undefined,
+      activeBoard.groups,
+      groupBuffers,
+    );
+    activeBoard.groupBuffers = groupBuffers;
+    boards = boards.map((board) => board.id === activeBoardId ? activeBoard : board);
+    buffer = firstFrameBuffer;
     buffer.setClipMask(null);
     histories.clear();
+    frameByHistoryKey.clear();
     for (const board of boards) {
       for (const layer of board.layers) histories.set(getHistoryKey(board.id, layer), new History());
     }
@@ -1960,9 +2577,24 @@
     secondary = project.secondary;
     recent = project.recent;
     references = project.references?.map((reference) => ({ ...reference })) ?? [];
+    tilemap = project.tilemap ?? null;
+    stopAnimationPlayback();
     selectedReferenceId = references[0]?.id ?? null;
     syncHistory();
     cursor = null;
+    scheduleAutosave();
+  }
+
+  function updateTilemap(next: TilemapData, groupId: string | null = null): void {
+    if (tilemap === next) return;
+    const previousEntry = undoTimeline[undoTimeline.length - 1];
+    if (groupId && previousEntry?.kind === 'tilemap' && previousEntry.groupId === groupId) {
+      previousEntry.after = next;
+    } else {
+      pushUndoEntry({ kind: 'tilemap', before: tilemap, after: next, groupId });
+    }
+    tilemap = next;
+    trimTilemapHistory();
     scheduleAutosave();
   }
 
@@ -2005,12 +2637,36 @@
     } else if (action.kind === 'resize') {
       const currentBoard = boards.find((board) => board.id === activeBoardId)!;
       const beforeLayers = currentBoard.layers;
-      const afterLayers = currentBoard.layers.map((layer) =>
-        ({ ...layer, buffer: layer.buffer.resized(action.width, action.height) }),
-      );
+      const beforeAnimationFrames = animationFrames;
+      for (const layer of currentBoard.layers) getAnimationFramesForLayer(activeBoardId, layer);
+      const beforeAnimationFramesByLayer = new Map(animationFramesByLayer);
+      const afterAnimationFramesByLayer = new Map(animationFramesByLayer);
+      for (const layer of currentBoard.layers) {
+        const key = getAnimationLayerKey(activeBoardId, layer.id);
+        const sourceFrames = animationFramesByLayer.get(key)!;
+        const resizedFrames = sourceFrames.map((frame) => {
+          const resized = frame.buffer.resized(action.width, action.height);
+          const next = createAnimationFrame(frame.id, action.width, action.height, resized.data, frame.durationMs);
+          frameBufferIds.set(next.buffer, next.id);
+          return next;
+        });
+        afterAnimationFramesByLayer.set(key, resizedFrames);
+      }
+      const activeLayerKey = getAnimationLayerKey(activeBoardId, activeLayerId);
+      const afterAnimationFrames = afterAnimationFramesByLayer.get(activeLayerKey)!;
+      const afterLayers = currentBoard.layers.map((layer) => {
+        const layerFrames = afterAnimationFramesByLayer.get(getAnimationLayerKey(activeBoardId, layer.id))!;
+        return {
+          ...layer,
+          buffer: layerFrames[layer.id === activeLayerId ? activeFrameIndex : 0]!.buffer,
+        };
+      });
+      animationFramesByLayer.clear();
+      for (const [key, frames] of afterAnimationFramesByLayer) animationFramesByLayer.set(key, frames);
       selectionMask = null;
       selectionPreview = null;
       replaceLayerStack(activeBoardId, afterLayers, activeLayerId);
+      animationFrames = afterAnimationFrames;
       pushUndoEntry({
         kind: 'layer-stack',
         boardId: activeBoardId,
@@ -2020,6 +2676,12 @@
         afterGroups: currentBoard.groups,
         beforeActiveLayerId: activeLayerId,
         afterActiveLayerId: activeLayerId,
+        beforeAnimationFrames,
+        afterAnimationFrames,
+        beforeAnimationFramesByLayer,
+        afterAnimationFramesByLayer,
+        beforeActiveFrameIndex: activeFrameIndex,
+        afterActiveFrameIndex: activeFrameIndex,
       });
       cursor = null;
       scheduleAutosave();
@@ -2185,6 +2847,7 @@
   }
 
   if (preferences.error) notify(preferences.error, 'error');
+  if (savedWorkspace.error) notify(savedWorkspace.error, 'error');
   if (brushLibraryError) notify(brushLibraryError, 'error');
 </script>
 
@@ -2192,6 +2855,11 @@
 <svelte:document onvisibilitychange={onVisibilityChange} />
 
 <div class="app">
+  <EditorMenuBar
+    groups={editorMenuGroups}
+    oncommand={handleEditorCommand}
+    onopen={(file) => void importProjectFile(file)}
+  />
   <ProjectBar
     {canUndo}
     {canRedo}
@@ -2225,6 +2893,7 @@
     {snapToGrid}
     {checkerboard}
     {tiledMode}
+    {tilemapMode}
     {symmetryX}
     {symmetryY}
     {customSizes}
@@ -2234,6 +2903,7 @@
     onsnaptogrid={setSnapToGrid}
     oncheckerboard={setCheckerboard}
     ontiledmode={(enabled) => (tiledMode = enabled)}
+    ontilemapmode={(enabled) => (tilemapMode = enabled)}
     onsymmetryx={(enabled) => (symmetryX = enabled)}
     onsymmetryy={(enabled) => (symmetryY = enabled)}
     {referencesOpen}
@@ -2253,8 +2923,22 @@
     onclear={requestClear}
   />
 
-  <div class="body">
+  <WorkspaceControls
+    workspace={workspaceLayout.id}
+    toolsVisible={workspaceLayout.toolsVisible}
+    paletteVisible={workspaceLayout.paletteVisible}
+    timelineVisible={workspaceLayout.timelineVisible}
+    onworkspace={selectWorkspace}
+    ontoggletools={() => toggleWorkspaceDock('tools')}
+    ontogglepalette={() => toggleWorkspaceDock('palette')}
+    ontoggletimeline={() => toggleWorkspaceDock('timeline')}
+  />
+
+  <div class="body" class:no-tools={!workspaceLayout.toolsVisible} class:no-palette={!workspaceLayout.paletteVisible}>
+    {#if workspaceLayout.toolsVisible}
+    <div class="dock tool-dock" style:width="{workspaceLayout.toolsWidth}px">
     <ToolPanel
+      panelWidth={workspaceLayout.toolsWidth}
       tools={TOOLS}
       {activeToolId}
       {brushSize}
@@ -2300,9 +2984,32 @@
       onaddbackground={() => addSpecialLayer('background')}
       onaddreference={() => addSpecialLayer('reference')}
       oncreatefromselection={getLayersFromSelection}
+      showLayers={false}
     />
+    </div>
+    <DockSplitter
+      label="Изменить ширину панели инструментов"
+      value={workspaceLayout.toolsWidth}
+      min={48}
+      max={180}
+      valueDirection={1}
+      onresize={(delta) => resizeWorkspace('tools', delta)}
+    />
+    {/if}
 
     <section class="workspace" aria-label="Холст">
+      {#if tilemapMode}
+        <TilemapEditor
+          sourceWidth={activeBoard.buffer.width}
+          sourceHeight={activeBoard.buffer.height}
+          sourcePixels={activeBoard.buffer.data}
+          primaryColor={primary}
+          secondaryColor={secondary}
+          {tilemap}
+          ontilemapchange={updateTilemap}
+          onclose={() => (tilemapMode = false)}
+        />
+      {:else}
       <Canvas
         bind:this={canvasApi}
         {buffer}
@@ -2368,21 +3075,230 @@
           onclose={() => (referencesOpen = false)}
         />
       {/if}
+      {/if}
     </section>
 
-    <PalettePanel
-      palettes={PALETTES}
-      {palette}
-      {freeColor}
-      {primary}
-      {secondary}
-      recent={visibleRecent}
-      onpalette={selectPalette}
-      onfreecolor={setFreeColor}
-      onpick={setColor}
-      onswap={swapColors}
+    {#if workspaceLayout.paletteVisible}
+    <DockSplitter
+      label="Изменить ширину панели палитры"
+      value={workspaceLayout.paletteWidth}
+      min={180}
+      max={400}
+      valueDirection={-1}
+      onresize={(delta) => resizeWorkspace('palette', delta)}
     />
+    <div class="dock palette-dock" style:width="{workspaceLayout.paletteWidth}px">
+      <nav class="panel-tabs" aria-label="Правая панель">
+        {#each workspacePanels as panel (panel.id)}
+          <button type="button" class:active={workspaceLayout.rightPanel === panel.id}
+            aria-pressed={workspaceLayout.rightPanel === panel.id}
+            aria-controls="workspace-panel-content"
+            onclick={() => selectWorkspacePanel(panel.id)}>{panel.label}</button>
+        {/each}
+      </nav>
+      <div id="workspace-panel-content" class="panel-content" aria-label={workspacePanels.find((entry) => entry.id === workspaceLayout.rightPanel)?.label}>
+        {#if workspaceLayout.rightPanel === 'colors' || workspaceLayout.rightPanel === 'palette'}
+          <PalettePanel
+            panelWidth={workspaceLayout.paletteWidth}
+            palettes={PALETTES}
+            {palette}
+            {freeColor}
+            {primary}
+            {secondary}
+            recent={visibleRecent}
+            onpalette={selectPalette}
+            onfreecolor={setFreeColor}
+            onpick={setColor}
+            onswap={swapColors}
+          />
+        {:else if workspaceLayout.rightPanel === 'layers' || workspaceLayout.rightPanel === 'properties'}
+          {#if workspaceLayout.rightPanel === 'properties'}
+            <section class="inspector-section" aria-label="Свойства холста">
+              <h2>Свойства</h2>
+              <p>Холст: {buffer.width} × {buffer.height} px</p>
+              <p>Положение: {activeBoard.x}, {activeBoard.y}</p>
+              <p>Активный слой: {getActiveLayer().name}</p>
+              <p>Кадр: {activeFrameIndex + 1} / {animationFrames.length}</p>
+            </section>
+          {/if}
+          <LayersPanel
+            layers={activeLayers}
+            groups={activeBoard.groups}
+            {activeLayerId}
+            hasSelection={selectionMask !== null}
+            onselect={selectLayer}
+            onadd={addLayer}
+            onaddgroup={addLayerGroup}
+            ongroupupdate={updateGroup}
+            ongroupdelete={deleteGroup}
+            onaddbackground={() => addSpecialLayer('background')}
+            onaddreference={() => addSpecialLayer('reference')}
+            onduplicate={duplicateLayer}
+            ondelete={deleteLayer}
+            onmove={moveLayer}
+            onreorder={reorderLayers}
+            onupdate={updateLayer}
+            oncreatefromselection={getLayersFromSelection}
+          />
+        {:else if workspaceLayout.rightPanel === 'reference'}
+          <ReferencesPanel
+            {references}
+            docked
+            {selectedReferenceId}
+            onimport={(file) => void importReference(file)}
+            onselect={(id) => (selectedReferenceId = id)}
+            onupdate={updateReference}
+            onremove={removeReference}
+            onclose={() => selectWorkspacePanel('palette')}
+          />
+        {:else if workspaceLayout.rightPanel === 'history'}
+          <section class="inspector-section">
+            <h2>История</h2>
+            <div class="inspector-actions">
+              <button type="button" disabled={!canUndo} onclick={undo}>Отменить</button>
+              <button type="button" disabled={!canRedo} onclick={redo}>Повторить</button>
+            </div>
+            {#if historyEntries.length === 0}
+              <p>Действий пока нет.</p>
+            {:else}
+              <ol class="history-list">
+                {#each historyEntries as label, index (`${index}-${label}`)}
+                  <li>{label}</li>
+                {/each}
+              </ol>
+            {/if}
+          </section>
+        {:else if workspaceLayout.rightPanel === 'navigator' || workspaceLayout.rightPanel === 'preview'}
+          <section class="inspector-section">
+            <h2>{workspaceLayout.rightPanel === 'navigator' ? 'Navigator' : 'Preview'}</h2>
+            <p>{buffer.width} × {buffer.height} px · масштаб {Math.round(view.zoom * 100)}%</p>
+            <div class="inspector-actions">
+              <button type="button" onclick={fitCanvas}>Вписать</button>
+              <button type="button" onclick={() => canvasApi?.centerActiveBoard()}>Центр</button>
+              <button type="button" onclick={() => canvasApi?.actualSize()}>100%</button>
+              <button type="button" onclick={openPreviewWindow}>Открыть предпросмотр</button>
+            </div>
+          </section>
+        {:else if workspaceLayout.rightPanel === 'brush-settings'}
+          <section class="inspector-section">
+            <h2>Настройки кисти</h2>
+            <label>Размер: {brushSize} px
+              <input type="range" min={MIN_BRUSH_SIZE} max={MAX_BRUSH_SIZE} value={brushSize}
+                oninput={(event) => setBrushSize(Number(event.currentTarget.value))} />
+            </label>
+            <label>Непрозрачность: {brushOpacity}%
+              <input type="range" min="1" max="100" value={brushOpacity}
+                oninput={(event) => setBrushOpacity(Number(event.currentTarget.value))} />
+            </label>
+            <div class="inspector-actions">
+              <button type="button" aria-pressed={brushShape === 'square'} onclick={() => setBrushShape('square')}>Квадрат</button>
+              <button type="button" aria-pressed={brushShape === 'circle'} onclick={() => setBrushShape('circle')}>Круг</button>
+            </div>
+          </section>
+        {:else if workspaceLayout.rightPanel === 'brush-library'}
+          <section class="inspector-section">
+            <h2>Библиотека кистей</h2>
+            <label>Кисть
+              <select aria-label="Библиотека кистей" value={selectedBrushId} onchange={(event) => selectBrush(event.currentTarget.value)}>
+                <option value="">Стандартная форма</option>
+                {#each brushLibrary as brush (brush.id)}
+                  <option value={brush.id}>{brush.name} · {brush.size}px</option>
+                {/each}
+              </select>
+            </label>
+            <label>Имя кисти
+              <input bind:value={brushPanelName} maxlength="80" />
+            </label>
+            <label>Тип
+              <select bind:value={brushPanelType}>
+                <option value="pencil">Pencil</option><option value="square">Square</option>
+                <option value="circle">Circle</option><option value="custom">Custom</option>
+                <option value="pattern">Pattern</option><option value="stamp">Stamp</option>
+                <option value="texture">Texture</option><option value="scatter">Scatter</option>
+              </select>
+            </label>
+            <div class="inspector-actions">
+              <button type="button" onclick={() => saveBrush(brushPanelName, brushPanelType)}>Сохранить текущую</button>
+              <button type="button" disabled={!selectedBrushId} onclick={removeBrush}>Удалить</button>
+            </div>
+          </section>
+        {:else if workspaceLayout.rightPanel === 'grid-settings'}
+          <section class="inspector-section">
+            <h2>Настройки сетки</h2>
+            <label><input type="checkbox" checked={showGrid} onchange={(event) => (showGrid = event.currentTarget.checked)} /> Показывать сетку</label>
+            <label>Режим
+              <select value={gridMode} onchange={(event) => {
+                const value = event.currentTarget.value;
+                if (value === 'pixel' || value === 'square' || value === 'isometric') setGridMode(value);
+              }}>
+                <option value="pixel">Пиксельная</option><option value="square">Квадратная</option><option value="isometric">Изометрическая</option>
+              </select>
+            </label>
+            <label>Шаг
+              <select value={gridSpacing} onchange={(event) => {
+                const value = Number(event.currentTarget.value);
+                if (GRID_SPACINGS.some((spacing) => spacing === value)) setGridSpacing(value);
+              }}>
+                {#each GRID_SPACINGS as spacing (spacing)}<option value={spacing}>{spacing} px</option>{/each}
+              </select>
+            </label>
+            <label><input type="checkbox" checked={snapToGrid} onchange={(event) => setSnapToGrid(event.currentTarget.checked)} /> Привязка</label>
+            <label><input type="checkbox" checked={checkerboard} onchange={(event) => setCheckerboard(event.currentTarget.checked)} /> Шахматный фон</label>
+          </section>
+        {:else if workspaceLayout.rightPanel === 'export'}
+          <section class="inspector-section">
+            <h2>Экспорт</h2>
+            <label>Формат
+              <select value={exportFormat} onchange={(event) => {
+                const value = event.currentTarget.value;
+                if (isExportFormat(value)) exportFormat = value;
+              }}>
+                {#each EXPORT_FORMATS as format (format)}<option value={format}>{format.toUpperCase()}</option>{/each}
+              </select>
+            </label>
+            <label>Масштаб
+              <select value={exportScale} onchange={(event) => {
+                const value = Number(event.currentTarget.value);
+                if (isExportScale(value) && availableExportScales.includes(value)) exportScale = value;
+              }}>
+                {#each EXPORT_SCALES as scale (scale)}
+                  <option value={scale} disabled={!availableExportScales.includes(scale)}>×{scale}</option>
+                {/each}
+              </select>
+            </label>
+            <p>Итоговый размер: {buffer.width * exportScale} × {buffer.height * exportScale}</p>
+            <button type="button" onclick={() => void exportImage()}>Экспортировать</button>
+          </section>
+        {/if}
+      </div>
+    </div>
+    {/if}
   </div>
+
+  {#if workspaceLayout.timelineVisible}
+    <DockSplitter
+      label="Изменить высоту Timeline"
+      value={workspaceLayout.timelineHeight}
+      min={90}
+      max={360}
+      valueDirection={-1}
+      orientation="vertical"
+      onresize={(delta) => resizeWorkspace('timeline', delta)}
+    />
+    <div class="timeline-dock" style:height="{workspaceLayout.timelineHeight}px">
+      <TimelinePanel
+        frames={animationFrames}
+        activeIndex={activeFrameIndex}
+        playing={animationPlaying}
+        onselect={(index) => selectAnimationFrame(index)}
+        onadd={addAnimationFrame}
+        onduplicate={duplicateAnimationFrameAtCurrent}
+        onremove={removeAnimationFrameAtCurrent}
+        onduration={setAnimationFrameDuration}
+        ontoggleplay={toggleAnimationPlayback}
+      />
+    </div>
+  {/if}
 
   <StatusBar
     {cursor}
@@ -2433,7 +3349,7 @@
 <style>
   .app {
     display: grid;
-    grid-template-rows: auto auto minmax(0, 1fr) auto;
+    grid-template-rows: auto auto auto auto minmax(0, 1fr) auto auto auto;
     height: 100%;
   }
 
@@ -2443,10 +3359,27 @@
     min-height: 0;
   }
 
+  .dock {
+    flex: 0 0 auto;
+    min-width: 0;
+    height: 100%;
+    overflow: hidden;
+  }
+
   /* Узкий экран: панель инструментов — полоса сверху, палитра — полоса снизу */
   @media (max-width: 859px) {
     .body {
       flex-direction: column;
+    }
+
+    .dock {
+      width: auto !important;
+      height: auto;
+      max-height: 42vh;
+    }
+
+    .tool-dock {
+      max-height: 36vh;
     }
   }
 
@@ -2455,5 +3388,82 @@
     flex: 1;
     min-width: 0;
     min-height: 0;
+  }
+
+  .timeline-dock {
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .palette-dock {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .panel-tabs {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 2px;
+    overflow-x: auto;
+    padding: 4px;
+    border-bottom: 1px solid var(--border);
+    scrollbar-width: thin;
+  }
+
+  .panel-tabs button {
+    min-height: 27px;
+    padding: 3px 7px;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--text-dim);
+    font: inherit;
+    font-size: 11px;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+
+  .panel-tabs button.active {
+    border-color: var(--border);
+    background: var(--panel-2);
+    color: var(--text);
+  }
+
+  .panel-content {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+  }
+
+  .inspector-section {
+    display: grid;
+    align-content: start;
+    gap: 10px;
+    padding: 12px;
+    color: var(--text);
+    font-size: 12px;
+  }
+
+  .inspector-section h2, .inspector-section p { margin: 0; }
+  .inspector-section label { display: grid; gap: 4px; color: var(--text-dim); }
+  .inspector-section input:not([type="checkbox"]):not([type="range"]),
+  .inspector-section select,
+  .inspector-section button {
+    min-height: 28px;
+    padding: 4px 7px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--panel-2);
+    color: var(--text);
+    font: inherit;
+  }
+  .inspector-section button { cursor: pointer; }
+  .inspector-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+  .history-list { display: grid; gap: 5px; margin: 0; padding-left: 20px; }
+  .inspector-section :focus-visible, .panel-tabs :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
   }
 </style>

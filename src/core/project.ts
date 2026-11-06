@@ -33,11 +33,18 @@ import {
   MAX_REFERENCE_TOTAL_PIXELS,
   type ReferenceImage,
 } from './reference';
+import { isValidTilemap, type TilemapData } from './tilemap';
+import {
+  MAX_ANIMATION_FRAMES,
+  MAX_FRAME_DURATION_MS,
+  MIN_FRAME_DURATION_MS,
+} from './animation';
 
 export const PROJECT_FORMAT = 'pixel-editor-project';
-export const PROJECT_VERSION = 7;
+export const PROJECT_VERSION = 9;
 export const MAX_PROJECT_CANVASES = 32;
 export const MAX_PROJECT_TOTAL_PIXELS = 4_194_304;
+export const MAX_PROJECT_ANIMATION_PIXELS = 16_777_216;
 export const MAX_PROJECT_LAYERS = 64;
 export const MAX_PROJECT_CANVAS_COORDINATE = 1_000_000;
 /** Максимальный размер JSON проекта (символов), рассчитан на холст до 4 мегапикселей. */
@@ -55,6 +62,12 @@ export interface ProjectCanvasData {
   activeLayerId?: string;
 }
 
+export interface ProjectAnimationFrameData {
+  id: string;
+  durationMs: number;
+  pixels: Uint8ClampedArray;
+}
+
 export interface ProjectLayerData {
   id: string;
   name: string;
@@ -69,6 +82,7 @@ export interface ProjectLayerData {
   effects?: LayerEffects;
   filters?: readonly LayerEffect[];
   groupId?: string | null;
+  animationFrames?: ProjectAnimationFrameData[];
 }
 
 export interface ProjectData {
@@ -84,6 +98,8 @@ export interface ProjectData {
   canvases?: ProjectCanvasData[];
   activeCanvasId?: string;
   references?: ReferenceImage[];
+  tilemap?: TilemapData;
+  animationFrames?: ProjectAnimationFrameData[];
 }
 
 /** Файл не является корректным проектом; message можно показывать пользователю. */
@@ -121,6 +137,39 @@ export function serializeProject(project: ProjectData): string {
   const multiCanvas = canvases !== undefined;
   const layered = canvases?.some((canvas) => canvas.layers !== undefined) ?? false;
   const references = project.references;
+  const tilemap = project.tilemap;
+  const animationFrames = project.animationFrames;
+  const hasLayerAnimationFrames = canvases?.some((canvas) =>
+    canvas.layers?.some((layer) => layer.animationFrames !== undefined),
+  ) ?? false;
+  if (animationFrames !== undefined) {
+    if (!Array.isArray(animationFrames) || animationFrames.length === 0 ||
+      animationFrames.length > MAX_ANIMATION_FRAMES) {
+      throw new ProjectFormatError(`Анимация должна содержать от 1 до ${MAX_ANIMATION_FRAMES} кадров.`);
+    }
+    const frameIds = new Set<string>();
+    let animationPixels = 0;
+    for (const frame of animationFrames) {
+      if (
+        typeof frame.id !== 'string' || frame.id.length === 0 || frame.id.length > 80 ||
+        frameIds.has(frame.id) ||
+        !Number.isInteger(frame.durationMs) ||
+        frame.durationMs < MIN_FRAME_DURATION_MS || frame.durationMs > MAX_FRAME_DURATION_MS ||
+        !(frame.pixels instanceof Uint8ClampedArray) ||
+        frame.pixels.length !== project.width * project.height * CHANNELS
+      ) {
+        throw new ProjectFormatError('В проекте указаны некорректные данные кадра анимации.');
+      }
+      frameIds.add(frame.id);
+      animationPixels += project.width * project.height;
+      if (animationPixels > MAX_PROJECT_ANIMATION_PIXELS) {
+        throw new ProjectFormatError('Общий размер кадров анимации превышает допустимый лимит.');
+      }
+    }
+  }
+  if (tilemap !== undefined && !isValidTilemap(tilemap)) {
+    throw new ProjectFormatError('В проекте указаны некорректные данные tilemap.');
+  }
   if (references !== undefined) {
     if (!Array.isArray(references) || references.length > MAX_PROJECT_REFERENCES) {
       throw new ProjectFormatError(`В проекте может быть не больше ${MAX_PROJECT_REFERENCES} референсов.`);
@@ -192,6 +241,9 @@ export function serializeProject(project: ProjectData): string {
           }
           if (layerIds.has(layer.id)) throw new ProjectFormatError('В проекте повторяется идентификатор слоя.');
           layerIds.add(layer.id);
+          if (layer.animationFrames !== undefined) {
+            validateProjectAnimationFrames(layer.animationFrames, canvas.width, canvas.height);
+          }
           totalPixels += canvas.width * canvas.height;
           if (totalPixels > MAX_PROJECT_TOTAL_PIXELS) {
             throw new ProjectFormatError('Общая площадь пиксельных данных проекта превышает допустимый лимит.');
@@ -256,9 +308,13 @@ export function serializeProject(project: ProjectData): string {
   }
   const common = {
     format: PROJECT_FORMAT,
-    version: canvases?.some((canvas) => canvas.layers?.some((layer) => (layer.filters?.length ?? 0) > 0))
+    version: animationFrames !== undefined || hasLayerAnimationFrames
       ? PROJECT_VERSION
-      : references !== undefined ? 6 : multiCanvas ? (layered ? 5 : 2) : 1,
+      : tilemap !== undefined
+      ? 8
+      : canvases?.some((canvas) => canvas.layers?.some((layer) => (layer.filters?.length ?? 0) > 0))
+        ? 7
+        : references !== undefined ? 6 : multiCanvas ? (layered ? 5 : 2) : 1,
     savedAt: new Date().toISOString(),
     palette: { id: project.paletteId, freeColor: project.freeColor },
     colors: { primary: colorToArray(project.primary), secondary: colorToArray(project.secondary) },
@@ -270,6 +326,16 @@ export function serializeProject(project: ProjectData): string {
       activeCanvasId: project.activeCanvasId,
       ...(references !== undefined
         ? { references: references.map((reference) => ({ ...reference, pixels: bytesToBase64(reference.pixels) })) }
+        : {}),
+      ...(tilemap !== undefined
+        ? { tilemap: { ...tilemap, tiles: tilemap.tiles.map((tile) => ({ ...tile, pixels: bytesToBase64(tile.pixels) })) } }
+        : {}),
+      ...(animationFrames !== undefined
+        ? { animationFrames: animationFrames.map((frame) => ({
+            id: frame.id,
+            durationMs: frame.durationMs,
+            pixels: bytesToBase64(frame.pixels),
+          })) }
         : {}),
       canvases: canvases.map((canvas) => layered
         ? {
@@ -287,6 +353,13 @@ export function serializeProject(project: ProjectData): string {
                 role: layer.role ?? 'paint',
                 effects: layer.effects ?? { ...DEFAULT_LAYER_EFFECTS },
                 ...(filters && filters.length > 0 ? { filters } : {}),
+                ...(layer.animationFrames !== undefined
+                  ? { animationFrames: layer.animationFrames.map((frame) => ({
+                      id: frame.id,
+                      durationMs: frame.durationMs,
+                      pixels: bytesToBase64(frame.pixels),
+                    })) }
+                  : {}),
                 groupId: layer.groupId ?? null,
                 pixels: bytesToBase64(layer.pixels),
               };
@@ -310,6 +383,16 @@ export function serializeProject(project: ProjectData): string {
     ...(references !== undefined
       ? { references: references.map((reference) => ({ ...reference, pixels: bytesToBase64(reference.pixels) })) }
       : {}),
+    ...(tilemap !== undefined
+      ? { tilemap: { ...tilemap, tiles: tilemap.tiles.map((tile) => ({ ...tile, pixels: bytesToBase64(tile.pixels) })) } }
+      : {}),
+    ...(animationFrames !== undefined
+      ? { animationFrames: animationFrames.map((frame) => ({
+          id: frame.id,
+          durationMs: frame.durationMs,
+          pixels: bytesToBase64(frame.pixels),
+        })) }
+      : {}),
   });
   if (serialized.length > MAX_PROJECT_JSON_LENGTH) {
     throw new ProjectFormatError('Файл проекта превышает допустимый размер.');
@@ -319,6 +402,61 @@ export function serializeProject(project: ProjectData): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function validateProjectAnimationFrames(
+  frames: readonly ProjectAnimationFrameData[],
+  width: number,
+  height: number,
+): void {
+  if (!Array.isArray(frames) || frames.length === 0 || frames.length > MAX_ANIMATION_FRAMES) {
+    throw new ProjectFormatError(`Анимация должна содержать от 1 до ${MAX_ANIMATION_FRAMES} кадров.`);
+  }
+  const ids = new Set<string>();
+  for (const frame of frames) {
+    if (
+      typeof frame.id !== 'string' || frame.id.length === 0 || frame.id.length > 80 || ids.has(frame.id) ||
+      !Number.isInteger(frame.durationMs) ||
+      frame.durationMs < MIN_FRAME_DURATION_MS || frame.durationMs > MAX_FRAME_DURATION_MS ||
+      !(frame.pixels instanceof Uint8ClampedArray) ||
+      frame.pixels.length !== width * height * CHANNELS
+    ) {
+      throw new ProjectFormatError('В проекте указаны некорректные данные кадра анимации.');
+    }
+    ids.add(frame.id);
+  }
+  if (frames.length * width * height > MAX_PROJECT_ANIMATION_PIXELS) {
+    throw new ProjectFormatError('Общий размер кадров анимации превышает допустимый лимит.');
+  }
+}
+
+function parseProjectAnimationFrames(
+  value: unknown,
+  width: number,
+  height: number,
+): ProjectAnimationFrameData[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_ANIMATION_FRAMES) {
+    throw new ProjectFormatError(`Анимация должна содержать от 1 до ${MAX_ANIMATION_FRAMES} кадров.`);
+  }
+  const ids = new Set<string>();
+  const frames = value.map((entry): ProjectAnimationFrameData => {
+    if (!isRecord(entry) || typeof entry.id !== 'string' || entry.id.length === 0 || entry.id.length > 80 ||
+      ids.has(entry.id) || typeof entry.durationMs !== 'number' || !Number.isInteger(entry.durationMs) ||
+      entry.durationMs < MIN_FRAME_DURATION_MS || entry.durationMs > MAX_FRAME_DURATION_MS) {
+      throw new ProjectFormatError('В проекте указаны некорректные данные кадра анимации.');
+    }
+    ids.add(entry.id);
+    return {
+      id: entry.id,
+      durationMs: entry.durationMs,
+      pixels: parsePixelData(entry.pixels, width, height),
+    };
+  });
+  if (frames.length * width * height > MAX_PROJECT_ANIMATION_PIXELS) {
+    throw new ProjectFormatError('Общий размер кадров анимации превышает допустимый лимит.');
+  }
+  return frames;
 }
 
 function isLayerEffects(value: unknown): value is LayerEffects {
@@ -368,6 +506,8 @@ export function parseProject(text: string): ProjectData {
   let canvases: ProjectCanvasData[] | undefined;
   let activeCanvasId: string | undefined;
   let references: ReferenceImage[] | undefined;
+  let tilemap: TilemapData | undefined;
+  let animationFrames: ProjectAnimationFrameData[] | undefined;
 
   if ((version >= 2 && version <= 5) || (version >= 6 && raw.canvases !== undefined)) {
     if (!Array.isArray(raw.canvases) || raw.canvases.length === 0 || raw.canvases.length > MAX_PROJECT_CANVASES) {
@@ -452,6 +592,9 @@ export function parseProject(text: string): ProjectData {
             filters: version >= 7 ? (rawFilters as LayerEffect[] | undefined) ?? [] : [],
             groupId: version >= 5 ? groupId as string | null : null,
             pixels: parsePixelData(item.pixels, canvasWidth, canvasHeight),
+            animationFrames: version >= 9
+              ? parseProjectAnimationFrames(item.animationFrames, canvasWidth, canvasHeight)
+              : undefined,
           };
         });
         if (version >= 5) {
@@ -627,6 +770,37 @@ export function parseProject(text: string): ProjectData {
     });
   }
 
+  if (version >= 8 && raw.tilemap !== undefined) {
+    tilemap = parseTilemapData(raw.tilemap);
+  }
+
+  if (version >= 9 && raw.animationFrames !== undefined) {
+    if (!Array.isArray(raw.animationFrames) || raw.animationFrames.length === 0 ||
+      raw.animationFrames.length > MAX_ANIMATION_FRAMES) {
+      throw new ProjectFormatError(`Анимация должна содержать от 1 до ${MAX_ANIMATION_FRAMES} кадров.`);
+    }
+    const frameIds = new Set<string>();
+    let animationPixels = 0;
+    animationFrames = raw.animationFrames.map((entry): ProjectAnimationFrameData => {
+      if (!isRecord(entry) || typeof entry.id !== 'string' || entry.id.length === 0 || entry.id.length > 80 ||
+        frameIds.has(entry.id) ||
+        typeof entry.durationMs !== 'number' || !Number.isInteger(entry.durationMs) ||
+        entry.durationMs < MIN_FRAME_DURATION_MS || entry.durationMs > MAX_FRAME_DURATION_MS) {
+        throw new ProjectFormatError('В проекте указаны некорректные данные кадра анимации.');
+      }
+      frameIds.add(entry.id);
+      animationPixels += width * height;
+      if (animationPixels > MAX_PROJECT_ANIMATION_PIXELS) {
+        throw new ProjectFormatError('Общий размер кадров анимации превышает допустимый лимит.');
+      }
+      return {
+        id: entry.id,
+        durationMs: entry.durationMs,
+        pixels: parsePixelData(entry.pixels, width, height),
+      };
+    });
+  }
+
   const paletteInfo = isRecord(raw.palette) ? raw.palette : {};
   const known = typeof paletteInfo.id === 'string' && PALETTES.some((p) => p.id === paletteInfo.id);
   const paletteId = known ? (paletteInfo.id as string) : DEFAULT_PALETTE_ID;
@@ -650,7 +824,33 @@ export function parseProject(text: string): ProjectData {
     }
   }
 
-  return { width, height, pixels, paletteId, freeColor, primary, secondary, recent, canvases, activeCanvasId, references };
+  return {
+    width, height, pixels, paletteId, freeColor, primary, secondary, recent, canvases,
+    activeCanvasId, references, tilemap, animationFrames,
+  };
+}
+
+function parseTilemapData(value: unknown): TilemapData {
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.tiles) ||
+    typeof value.tileWidth !== 'number' ||
+    typeof value.tileHeight !== 'number' ||
+    !isValidCanvasSize(value.tileWidth, value.tileHeight)
+  ) throw new ProjectFormatError('В проекте указаны некорректные данные tilemap.');
+
+  const tiles = value.tiles.map((entry) => {
+    if (!isRecord(entry) || typeof entry.pixels !== 'string') {
+      throw new ProjectFormatError('В проекте указаны некорректные данные тайла.');
+    }
+    return {
+      ...entry,
+      pixels: parsePixelData(entry.pixels, value.tileWidth as number, value.tileHeight as number),
+    };
+  });
+  const map = { ...value, tiles };
+  if (!isValidTilemap(map)) throw new ProjectFormatError('В проекте указаны некорректные данные tilemap.');
+  return map;
 }
 
 function parsePixelData(value: unknown, width: number, height: number): Uint8ClampedArray {

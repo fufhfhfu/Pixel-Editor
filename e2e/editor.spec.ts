@@ -1,5 +1,6 @@
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test } from '@playwright/test';
+import { readFile } from 'node:fs/promises';
 
 async function createPng(page: import('@playwright/test').Page, width: number, height: number): Promise<Buffer> {
   const base64 = await page.evaluate(async ({ width, height }) => {
@@ -177,6 +178,176 @@ test('moves a single board independently and moves a Ctrl+right-click selection 
   });
   await page.mouse.click(emptyPoint.x, emptyPoint.y);
   await expect(boards.nth(1)).not.toHaveClass(/group-selected/);
+});
+
+test('creates and edits a tileset-backed tilemap, then restores it from autosave', async ({ page }) => {
+  test.setTimeout(60_000);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Tilemap' }).click();
+  await page.getByRole('button', { name: 'Создать tileset из активного холста' }).click();
+  await expect(page.getByRole('heading', { name: 'Tileset (4)' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Выбрать Tile 1' })).toBeVisible();
+
+  const firstTileCanvas = page.locator('.tile-list button').first().locator('canvas');
+  const readEditedPixels = () => firstTileCanvas.evaluate((canvas: HTMLCanvasElement) => {
+    const context = canvas.getContext('2d')!;
+    return [3, 4].map((x) => [...context.getImageData(x, 3, 1, 1).data]);
+  });
+  const originalPixels = await readEditedPixels();
+  const tileEditor = page.getByLabel('Редактор пикселей выбранного тайла');
+  await tileEditor.scrollIntoViewIfNeeded();
+  const tileEditorBounds = await tileEditor.boundingBox();
+  if (!tileEditorBounds) throw new Error('Редактор пикселей тайла не отображается.');
+  const editorPixel = (column: number) => ({
+    x: tileEditorBounds.x + tileEditorBounds.width * (column + 0.5) / 16,
+    y: tileEditorBounds.y + tileEditorBounds.height * 3.5 / 16,
+  });
+  const strokeStart = editorPixel(3);
+  await page.mouse.move(strokeStart.x, strokeStart.y);
+  await page.mouse.down();
+  const strokeEnd = editorPixel(4);
+  await page.mouse.move(strokeEnd.x, strokeEnd.y);
+  await page.mouse.up();
+  await expect.poll(readEditedPixels).not.toEqual(originalPixels);
+  const editedPixels = await readEditedPixels();
+  await page.getByRole('button', { name: 'Отменить' }).click();
+  await expect.poll(readEditedPixels).toEqual(originalPixels);
+  await page.getByRole('button', { name: 'Повторить' }).click();
+  await expect.poll(readEditedPixels).toEqual(editedPixels);
+
+  const atlasDownloadPromise = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Экспорт PNG tileset' }).click();
+  const atlasDownload = await atlasDownloadPromise;
+  expect(atlasDownload.suggestedFilename()).toBe('tileset.png');
+  const png = await readFile(await atlasDownload.path());
+  expect([...png.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+  expect(png.readUInt32BE(16)).toBe(64);
+  expect(png.readUInt32BE(20)).toBe(16);
+
+  const variantGroup = page.getByLabel('Группа вариантов');
+  await variantGroup.fill('ground');
+  await variantGroup.evaluate((element: HTMLInputElement) => element.blur());
+  await expect(variantGroup).toHaveValue('ground');
+  await page.getByRole('button', { name: 'Добавить слой' }).click();
+  await expect(page.locator('.map-layer')).toHaveCount(2);
+  await page.getByRole('combobox', { name: 'Сетка' }).selectOption('hexagonal');
+  await page.getByRole('button', { name: 'Бесшовное превью' }).click();
+  await expect(page.locator('canvas[aria-label="Плиточный предпросмотр выбранного тайла"]')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Заливка прямоугольника' }).click();
+  const mapCanvas = page.locator('canvas[aria-label^="Карта тайлов"]');
+  const bounds = await mapCanvas.boundingBox();
+  if (!bounds) throw new Error('Карта тайлов не отображается.');
+  await page.mouse.move(bounds.x + 16, bounds.y + 6);
+  await page.mouse.down();
+  await page.mouse.move(bounds.x + 48, bounds.y + 18);
+  await page.mouse.up();
+
+  const exportMetadata = async () => {
+    const downloadPromise = page.waitForEvent('download');
+    await page.getByRole('button', { name: 'Экспорт метаданных' }).click();
+    const download = await downloadPromise;
+    expect(download.suggestedFilename()).toBe('tilemap.json');
+    return JSON.parse(await readFile(await download.path(), 'utf8')) as {
+      grid: string;
+      layers: Array<{ cells: Array<string | null> }>;
+    };
+  };
+  const metadata = await exportMetadata();
+  expect(metadata.grid).toBe('hexagonal');
+  expect(metadata.layers).toHaveLength(2);
+  expect(metadata.layers[1]!.cells.some((tileId) => tileId !== null)).toBe(true);
+
+  await page.getByRole('button', { name: 'Отменить' }).click();
+  const undoneMetadata = await exportMetadata();
+  expect(undoneMetadata.layers[1]!.cells.every((tileId) => tileId === null)).toBe(true);
+  await page.getByRole('button', { name: 'Повторить' }).click();
+
+  await page.waitForTimeout(1000);
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.getByRole('button', { name: 'Tilemap' }).click();
+  await expect(page.getByRole('heading', { name: 'Tileset (4)' })).toBeVisible();
+  await expect(page.getByRole('combobox', { name: 'Сетка' })).toHaveValue('hexagonal');
+  await expect.poll(readEditedPixels).toEqual(editedPixels);
+  const restoredMetadata = await exportMetadata();
+  expect(restoredMetadata.layers[1]!.cells.some((tileId) => tileId !== null)).toBe(true);
+});
+
+test('switches, resizes, hides, and restores saved workspace layouts', async ({ page }) => {
+  await page.goto('/');
+  const workspace = page.getByRole('combobox', { name: 'Рабочее пространство' });
+  const toolsDock = page.locator('.tool-dock');
+  const paletteDock = page.locator('.palette-dock');
+
+  await workspace.selectOption('minimal');
+  await expect(toolsDock).toHaveCount(0);
+  await expect(paletteDock).toHaveCount(0);
+  await page.getByRole('button', { name: 'Палитра' }).click();
+  await expect(paletteDock).toBeVisible();
+  await page.getByRole('button', { name: 'Палитра' }).click();
+  await expect(paletteDock).toHaveCount(0);
+
+  await workspace.selectOption('drawing');
+  await expect(toolsDock).toBeVisible();
+  await expect(paletteDock).toBeVisible();
+  const toolSplitter = page.getByRole('slider', { name: 'Изменить ширину панели инструментов' });
+  const previousWidth = Number(await toolSplitter.getAttribute('aria-valuenow'));
+  await toolSplitter.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(toolSplitter).toHaveAttribute('aria-valuenow', String(previousWidth + 8));
+
+  await page.waitForTimeout(300);
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await expect(page.getByRole('combobox', { name: 'Рабочее пространство' })).toHaveValue('drawing');
+  await expect(page.getByRole('slider', { name: 'Изменить ширину панели инструментов' }))
+    .toHaveAttribute('aria-valuenow', String(previousWidth + 8));
+
+  await page.getByRole('combobox', { name: 'Рабочее пространство' }).selectOption('tileset');
+  await expect(page.getByRole('heading', { name: 'Редактор Tilemap' })).toBeVisible();
+  await expect(toolsDock).toHaveCount(0);
+  await expect(paletteDock).toHaveCount(0);
+});
+
+test('uses top-level menus, dock panels, and editable animation frames', async ({ page }) => {
+  await page.goto('/');
+  const fileMenu = page.getByRole('button', { name: 'Файл', exact: true });
+  await fileMenu.focus();
+  await page.keyboard.press('ArrowDown');
+  await expect(page.getByRole('menuitem', { name: 'Открыть…' })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(fileMenu).toBeFocused();
+
+  const workspace = page.getByRole('combobox', { name: 'Рабочее пространство' });
+  await expect(workspace).toBeVisible();
+  await workspace.selectOption('animation');
+  await expect(page.getByRole('region', { name: 'Timeline кадров' })).toBeVisible();
+  const timelineSplitter = page.getByRole('slider', { name: 'Изменить высоту Timeline' });
+  const initialTimelineHeight = Number(await timelineSplitter.getAttribute('aria-valuenow'));
+  await timelineSplitter.focus();
+  await page.keyboard.press('ArrowUp');
+  await expect(timelineSplitter).toHaveAttribute('aria-valuenow', String(initialTimelineHeight + 8));
+
+  await page.getByRole('button', { name: 'Добавить кадр' }).click();
+  await expect(page.getByText('2 кадров')).toBeVisible();
+  await page.getByRole('button', { name: 'Дублировать кадр' }).click();
+  await expect(page.getByText('3 кадров')).toBeVisible();
+  const duration = page.getByRole('spinbutton', { name: 'Длительность кадра (мс)' });
+  await duration.fill('250');
+  await duration.press('Enter');
+  await expect(page.getByRole('button', { name: 'Кадр 3, 250 мс' })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Properties' }).click();
+  await expect(page.getByText('Кадр: 3 / 3')).toBeVisible();
+  await page.getByRole('button', { name: 'Кадр 1, 100 мс' }).click();
+  await expect(page.getByText('Кадр: 1 / 3')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Окно', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Панель: History' }).click();
+  await expect(page.getByRole('heading', { name: 'История' })).toBeVisible();
+
+  await page.waitForTimeout(1100);
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await expect(page.getByRole('button', { name: 'History' })).toHaveAttribute('aria-pressed', 'true');
 });
 
 test('smoothly minifies canvas artwork below 100% and keeps pixelated rendering when enlarged', async ({ page }) => {

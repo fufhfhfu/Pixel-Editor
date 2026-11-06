@@ -16,6 +16,7 @@ import {
   type KeyValueStorage,
 } from './storage';
 import { createLayerEffect } from './effects';
+import { createTilemap, sliceTileAtlas } from './tilemap';
 
 function sample(): ProjectData {
   const pixels = new Uint8ClampedArray(5 * 4 * 4);
@@ -46,6 +47,77 @@ describe('проект JSON', () => {
     expect(q.secondary).toEqual(p.secondary);
     expect(q.recent).toEqual(p.recent);
     expect(q.canvases).toBeUndefined();
+  });
+
+  it('сохраняет кадры анимации и проверяет их размер и уникальные идентификаторы', () => {
+    const project = sample();
+    const animationProject = {
+      ...project,
+      animationFrames: [
+        { id: 'frame-a', durationMs: 100, pixels: project.pixels },
+        { id: 'frame-b', durationMs: 250, pixels: new Uint8ClampedArray(project.pixels.length).fill(75) },
+      ],
+    };
+    const serialized = serializeProject(animationProject);
+    const restored = parseProject(serialized);
+
+    expect(JSON.parse(serialized).version).toBe(9);
+    expect(restored.animationFrames?.map(({ id, durationMs }) => ({ id, durationMs }))).toEqual([
+      { id: 'frame-a', durationMs: 100 },
+      { id: 'frame-b', durationMs: 250 },
+    ]);
+    expect(Array.from(restored.animationFrames![1]!.pixels)).toEqual(
+      Array.from(animationProject.animationFrames[1]!.pixels),
+    );
+
+    expect(() => serializeProject({
+      ...project,
+      animationFrames: [
+        { id: 'duplicate', durationMs: 100, pixels: project.pixels },
+        { id: 'duplicate', durationMs: 100, pixels: project.pixels },
+      ],
+    })).toThrow(ProjectFormatError);
+  });
+
+  it('сохраняет независимые кадры каждого слоя в формате версии 9', () => {
+    const project = sample();
+    const layerFrames = [
+      { id: 'cel-1', durationMs: 100, pixels: project.pixels },
+      { id: 'cel-2', durationMs: 180, pixels: new Uint8ClampedArray(project.pixels.length).fill(22) },
+    ];
+    const layeredProject: ProjectData = {
+      ...project,
+      canvases: [{
+        id: 'canvas',
+        x: 0,
+        y: 0,
+        width: project.width,
+        height: project.height,
+        pixels: project.pixels,
+        activeLayerId: 'layer',
+        layers: [{
+          id: 'layer',
+          name: 'Layer',
+          pixels: project.pixels,
+          visible: true,
+          locked: false,
+          opacity: 1,
+          blendMode: 'normal',
+          alphaLock: false,
+          clippingMask: false,
+          animationFrames: layerFrames,
+        }],
+      }],
+      activeCanvasId: 'canvas',
+    };
+
+    const restored = parseProject(serializeProject(layeredProject));
+    const frames = restored.canvases?.[0]?.layers?.[0]?.animationFrames;
+    expect(frames?.map(({ id, durationMs }) => ({ id, durationMs }))).toEqual([
+      { id: 'cel-1', durationMs: 100 },
+      { id: 'cel-2', durationMs: 180 },
+    ]);
+    expect(Array.from(frames![1]!.pixels)).toEqual(Array.from(layerFrames[1]!.pixels));
   });
 
   it('сохраняет и восстанавливает несколько холстов с активным холстом и позициями', () => {
@@ -396,6 +468,60 @@ describe('проект JSON', () => {
   it('base64 корректен на всех значениях байта', () => {
     const all = new Uint8ClampedArray(256 * 3 + 1).map((_, i) => i % 256);
     expect(base64ToBytes(bytesToBase64(all))).toEqual(all);
+  });
+
+  it('сохраняет tilemap и пиксели тайлов в версии 8 формата', () => {
+    const project = sample();
+    const pixels = new Uint8ClampedArray(4 * 4 * 4);
+    pixels.fill(127);
+    const tiles = sliceTileAtlas(pixels, 4, 4, 2, 2);
+    const tilemap = {
+      ...createTilemap(3, 2, 2, 2, 'hexagonal'),
+      tiles,
+      layers: [{
+        id: 'ground',
+        name: 'Ground',
+        visible: true,
+        locked: false,
+        cells: ['tile-1', null, 'tile-2', null, 'tile-1', 'tile-2'],
+      }],
+      activeLayerId: 'ground',
+    };
+    const json = serializeProject({ ...project, tilemap });
+    expect(JSON.parse(json).version).toBe(8);
+    const restored = parseProject(json);
+    expect(restored.tilemap?.grid).toBe('hexagonal');
+    expect(restored.tilemap?.layers[0]?.cells).toEqual(tilemap.layers[0]!.cells);
+    expect(restored.tilemap?.tiles.map((tile) => [...tile.pixels])).toEqual(tiles.map((tile) => [...tile.pixels]));
+  });
+
+  it('отклоняет tilemap со ссылками на отсутствующие тайлы и повреждёнными пикселями', () => {
+    const project = sample();
+    const pixels = new Uint8ClampedArray(4 * 4 * 4);
+    const [tile] = sliceTileAtlas(pixels, 4, 4, 2, 2);
+    const invalidMap = {
+      ...createTilemap(1, 1, 2, 2),
+      tiles: [tile!],
+      layers: [{
+        id: 'ground',
+        name: 'Ground',
+        visible: true,
+        locked: false,
+        cells: ['missing-tile'],
+      }],
+      activeLayerId: 'ground',
+    };
+    expect(() => serializeProject({ ...project, tilemap: invalidMap })).toThrow(ProjectFormatError);
+
+    const validMap = {
+      ...invalidMap,
+      layers: [{ ...invalidMap.layers[0]!, cells: ['tile-1'] }],
+    };
+    const parsed = JSON.parse(serializeProject({ ...project, tilemap: validMap })) as {
+      tilemap: { tiles: Array<{ pixels: string }> };
+    };
+    parsed.tilemap.tiles[0]!.pixels = 'broken';
+    expect(() => parseProject(JSON.stringify(parsed))).toThrow(ProjectFormatError);
   });
 
   it('BUG-B: прозрачные пиксели со спрятанным RGB при загрузке приводятся к (0,0,0,0)', () => {

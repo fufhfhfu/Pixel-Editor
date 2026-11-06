@@ -19,6 +19,7 @@ async function bootstrap(): Promise<void> {
   const autosaveRepository = new AutosaveRepository(getBrowserIndexedDB(), legacyStorage);
   appTarget.textContent = 'Загрузка проекта…';
   const startup = await autosaveRepository.load();
+  appTarget.replaceChildren();
   mount(App, {
     target: appTarget,
     props: {

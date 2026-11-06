@@ -7,15 +7,16 @@ import { AUTOSAVE_KEY } from './core/storage';
 import { parseProject, type ProjectData } from './core/project';
 import { computeFloodFillOutput, type FloodFillWorkerRequest } from './core/tools/floodFillWorker';
 
-/** Заглушки того, чего нет в jsdom: canvas, ImageData, ResizeObserver, захват указателя. */
+/** Заглушки DOM-возможностей, отсутствующих в jsdom. */
 interface PutCall {
   dirty: [number, number, number, number];
 }
 const putCalls: PutCall[] = [];
 let canvasData: Uint8ClampedArray | null = null;
 const rasterDrawCalls: number[][] = [];
+const desktopSaveFile = vi.fn(async () => 'saved' as const);
 
-function installBrowserStubs(): void {
+function installDomStubs(): void {
   const proto = HTMLCanvasElement.prototype as unknown as { getContext: () => unknown };
   proto.getContext = function (this: HTMLCanvasElement) {
     const canvas = this;
@@ -146,11 +147,16 @@ function drawStroke(from: [number, number], to: [number, number], init: PointerE
 }
 
 beforeEach(async () => {
-  installBrowserStubs();
+  installDomStubs();
   putCalls.length = 0;
   canvasData = null;
   rasterDrawCalls.length = 0;
+  desktopSaveFile.mockClear();
   localStorage.clear();
+  Object.defineProperty(window, 'pixelEditorDesktop', {
+    configurable: true,
+    value: { saveFile: desktopSaveFile },
+  });
   document.body.innerHTML = '<div id="app"></div>';
   await mountApp();
 });
@@ -158,6 +164,7 @@ beforeEach(async () => {
 afterEach(() => {
   if (app) unmount(app);
   app = null;
+  delete (window as Window & { pixelEditorDesktop?: unknown }).pixelEditorDesktop;
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -175,6 +182,29 @@ describe('приложение целиком (jsdom)', () => {
     expect(Array.from((document.querySelector('#canvas-preset') as HTMLSelectElement).options).map((option) => option.value))
       .toEqual(['8x8', '16x16', '32x32', '64x64', '128x128', '256x256', '512x512', '1024x1024']);
     expect((document.querySelector('.board') as HTMLElement).style.backgroundColor).toBe('rgb(255, 255, 255)');
+  });
+
+  it('упрощает левую панель и оставляет режимы выделения в меню «Правка»', async () => {
+    const toolPanel = document.querySelector<HTMLElement>('[aria-label="Инструменты"]')!;
+    expect(toolPanel.querySelectorAll('button.tool').length).toBeGreaterThan(0);
+    expect(toolPanel.querySelector('.options > summary')?.textContent).toContain('⚙');
+    expect(toolPanel.querySelector('[aria-label="Размер кисти"]')).toBeNull();
+    expect(toolPanel.querySelector('[aria-label="Форма кисти"]')).toBeNull();
+    expect(toolPanel.textContent).not.toContain('Выделение');
+    expect(toolPanel.textContent).not.toContain('Библиотека кистей');
+
+    document.querySelector<HTMLButtonElement>('[data-menu="Правка"]')!.click();
+    await tick();
+    const rectSelection = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'))
+      .find((button) => button.textContent?.includes('Выделение: прямоугольник'))!;
+    expect(rectSelection).toBeTruthy();
+    rectSelection.click();
+    await tick();
+    expect(document.querySelector('[role="menu"]')).toBeNull();
+
+    document.querySelector<HTMLButtonElement>('[data-menu="Правка"]')!.click();
+    await tick();
+    expect(document.querySelector('[role="menu"]')?.textContent).toContain('Снять режим выделения');
   });
 
   it('группирует фигуры в безымянной кнопке и закрывает меню после выбора', () => {
@@ -762,6 +792,10 @@ describe('приложение целиком (jsdom)', () => {
   });
 
   it('экспортирует WebP выбранного размера и использует правильный MIME-тип', async () => {
+    Object.defineProperty(Blob.prototype, 'arrayBuffer', {
+      configurable: true,
+      value: vi.fn(async () => new Uint8Array([1]).buffer),
+    });
     const toBlob = vi.fn(function (
       this: HTMLCanvasElement,
       callback: BlobCallback,
@@ -780,11 +814,16 @@ describe('приложение целиком (jsdom)', () => {
     format.value = 'webp';
     format.dispatchEvent(new Event('change', { bubbles: true }));
     await tick();
-    (document.querySelector('button[title="Скачать WEBP"]') as HTMLButtonElement).click();
+    (document.querySelector('button[title="Сохранить WEBP"]') as HTMLButtonElement).click();
     await vi.waitFor(() => expect(document.body.textContent).toContain('WEBP сохранён'));
 
     expect(toBlob).toHaveBeenCalledOnce();
     expect(toBlob.mock.calls[0][1]).toBe('image/webp');
+    expect(desktopSaveFile).toHaveBeenCalledWith(expect.objectContaining({
+      suggestedName: 'pixel-art-32x32@4x.webp',
+      mimeType: 'image/webp',
+      data: new Uint8Array([1]),
+    }));
   });
 
   it('справка открывается по H и закрывается Escape, фокус возвращается', async () => {
@@ -855,6 +894,6 @@ describe('приложение целиком (jsdom)', () => {
 
   it('сохраняет клавиши быстрого выбора размера кисти', () => {
     key('Digit7');
-    expect((document.querySelector('#brush-size') as HTMLInputElement).value).toBe('7');
+    expect(document.querySelector('.value.tool')?.textContent).toContain('7 px');
   });
 });

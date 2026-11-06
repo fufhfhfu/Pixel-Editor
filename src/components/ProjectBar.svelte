@@ -135,7 +135,7 @@
         <button
           type="button"
           class="btn primary export-button"
-          title={exportFormat === 'jpeg' ? 'Скачать JPEG; прозрачность будет заменена цветом фона рабочей области' : `Скачать ${exportFormat.toUpperCase()}`}
+          title={exportFormat === 'jpeg' ? 'Сохранить JPEG; прозрачность будет заменена цветом фона рабочей области' : `Сохранить ${exportFormat.toUpperCase()}`}
           onclick={() => {
             closeFileMenu();
             onexport();

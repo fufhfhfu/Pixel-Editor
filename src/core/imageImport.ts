@@ -46,30 +46,11 @@ function assertImageFile(file: File): void {
 }
 
 async function decodeBitmap(file: File): Promise<DecodedImageSource> {
-  if (typeof createImageBitmap === 'function') {
-    const bitmap = await createImageBitmap(file);
-    return { source: bitmap, width: bitmap.width, height: bitmap.height, close: () => bitmap.close() };
+  if (typeof createImageBitmap !== 'function') {
+    throw new Error('Встроенный Chromium не поддерживает чтение изображений.');
   }
-
-  if (typeof Image === 'undefined' || typeof URL.createObjectURL !== 'function') {
-    throw new Error('Этот браузер не поддерживает чтение изображений.');
-  }
-
-  const url = URL.createObjectURL(file);
-  const image = new Image();
-  image.src = url;
-  try {
-    await image.decode();
-  } catch (error) {
-    URL.revokeObjectURL(url);
-    throw error;
-  }
-  return {
-    source: image,
-    width: image.naturalWidth,
-    height: image.naturalHeight,
-    close: () => URL.revokeObjectURL(url),
-  };
+  const bitmap = await createImageBitmap(file);
+  return { source: bitmap, width: bitmap.width, height: bitmap.height, close: () => bitmap.close() };
 }
 
 export async function decodeRasterImage(

@@ -31,7 +31,7 @@ describe('PixelRenderer', () => {
     globalWithImageData.ImageData = class {
       data: Uint8ClampedArray;
       constructor(data: Uint8ClampedArray, public width: number, public height: number) {
-        this.data = data; // как в браузерах: память делится с буфером
+        this.data = data; // память делится с буфером
       }
     };
   });
@@ -82,7 +82,7 @@ describe('PixelRenderer', () => {
     globalWithImageData.ImageData = class {
       data: Uint8ClampedArray;
       constructor(data: Uint8ClampedArray, public width: number, public height: number) {
-        this.data = data.slice(); // «неправильный» браузер
+        this.data = data.slice(); // реализация с копированием
       }
     };
     const { canvas, calls } = makeCanvas();

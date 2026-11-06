@@ -1,130 +1,32 @@
 <script lang="ts">
   import { hexToRgba, rgbaToHex } from '../core/color';
   import {
-    MAX_BRUSH_SIZE,
-    MIN_BRUSH_SIZE,
-    type BrushShape,
     type DrawingSettings,
-    type BrushDefinition,
-    type BrushType,
     type Tool,
     type ToolId,
-    bresenham,
     parseCustomDitherPattern,
-    parseBrushLibrary,
-    resizeBrushDefinition,
   } from '../core/tools';
-  import type { SelectionMode, SelectionOperation } from '../core/selection';
-  import LayersPanel from './LayersPanel.svelte';
-  import type { LayerGroup, LayerGroupUpdate, LayerUpdate, RasterLayer } from '../core/layers';
-
-  export type SelectionAction =
-    | 'select-all' | 'select-opaque' | 'invert' | 'deselect' | 'copy' | 'cut' | 'paste' | 'clear' | 'crop'
-    | 'move-left' | 'move-right' | 'move-up' | 'move-down'
-    | 'flip-horizontal' | 'flip-vertical' | 'rotate-left' | 'rotate-right' | 'scale-up' | 'scale-down';
 
   interface Props {
     panelWidth: number;
     tools: readonly Tool[];
     activeToolId: ToolId;
-    brushSize: number;
-    brushShape: BrushShape;
-    brushOpacity: number;
     settings: DrawingSettings;
-    brushes: readonly BrushDefinition[];
-    selectedBrushId: string;
-    selectionMode: SelectionMode | null;
-    selectionOperation: SelectionOperation;
-    selectionAvailable: boolean;
-    clipboardAvailable: boolean;
-    layers: readonly RasterLayer[];
-    groups: readonly LayerGroup[];
-    activeLayerId: string;
-    hasSelection: boolean;
-    showLayers?: boolean;
     onselect: (id: ToolId) => void;
-    onbrush: (size: number) => void;
-    onbrushshape: (shape: BrushShape) => void;
-    onbrushopacity: (opacity: number) => void;
     onsettings: (settings: DrawingSettings) => void;
-    onbrushsave: (name: string, type: BrushType) => void;
-    onbrushselect: (id: string) => void;
-    onbrushdelete: () => void;
-    onbrushupdate: (brush: BrushDefinition) => void;
-    onbrushimport: (brushes: readonly BrushDefinition[]) => void;
-    onbrushexport: (brush: BrushDefinition) => string;
-    onbrusherror: (message: string) => void;
     onaddboard: () => void;
-    onselectionmode: (mode: SelectionMode | null) => void;
-    onselectionoperation: (operation: SelectionOperation) => void;
-    onselectionaction: (action: SelectionAction) => void;
-    onlayerselect: (id: string) => void;
-    onlayeradd: () => void;
-    onaddgroup: () => void;
-    ongroupupdate: (id: string, update: LayerGroupUpdate) => void;
-    ongroupdelete: (id: string) => void;
-    onaddbackground: () => void;
-    onaddreference: () => void;
-    onlayerduplicate: (id: string) => void;
-    onlayerdelete: (id: string) => void;
-    onlayermove: (id: string, direction: -1 | 1) => void;
-    onlayerreorder: (sourceId: string, targetId: string) => void;
-    onlayerupdate: (id: string, update: LayerUpdate) => void;
-    oncreatefromselection: () => void;
   }
 
   let {
     panelWidth,
     tools,
     activeToolId,
-    brushSize,
-    brushShape,
-    brushOpacity,
     settings,
-    brushes,
-    selectedBrushId,
-    selectionMode,
-    selectionOperation,
-    selectionAvailable,
-    clipboardAvailable,
-    layers,
-    groups,
-    activeLayerId,
-    hasSelection,
-    showLayers = true,
     onselect,
-    onbrush,
-    onbrushshape,
-    onbrushopacity,
     onsettings,
-    onbrushsave,
-    onbrushselect,
-    onbrushdelete,
-    onbrushupdate,
-    onbrushimport,
-    onbrushexport,
-    onbrusherror,
     onaddboard,
-    onselectionmode,
-    onselectionoperation,
-    onselectionaction,
-    onlayerselect,
-    onlayeradd,
-    onaddgroup,
-    ongroupupdate,
-    ongroupdelete,
-    onaddbackground,
-    onaddreference,
-    onlayerduplicate,
-    onlayerdelete,
-    onlayermove,
-    onlayerreorder,
-    onlayerupdate,
-    oncreatefromselection,
   }: Props = $props();
 
-  const brushEnabled = $derived(tools.find((t) => t.id === activeToolId)?.usesBrush ?? false);
-  const selectedBrush = $derived(brushes.find((brush) => brush.id === selectedBrushId) ?? null);
   const shapeToolIds: readonly ToolId[] = [
     'line', 'rect', 'filledRect', 'circle', 'filledCircle', 'ellipse',
     'filledEllipse', 'triangle', 'filledTriangle', 'polygon', 'filledPolygon',
@@ -133,135 +35,6 @@
   const activeShapeTool = $derived(shapeTools.find((tool) => tool.id === activeToolId));
   let shapeMenuOpen = $state(false);
   let shapeMenuContainer = $state<HTMLDivElement | null>(null);
-  let brushName = $state('');
-  let brushType = $state<BrushType>('custom');
-  let importInput: HTMLInputElement;
-  let brushMaskCanvas = $state<HTMLCanvasElement | null>(null);
-  let lastMaskCell: { x: number; y: number } | null = null;
-  let focusedMaskCell = { x: 0, y: 0 };
-  let maskPaintValue = 1;
-
-  function renderBrushMask(brush: BrushDefinition): void {
-    if (!brushMaskCanvas) return;
-    const context = brushMaskCanvas.getContext('2d');
-    if (!context) throw new Error('Не удалось создать контекст редактора маски кисти.');
-    const cellSize = brushMaskCanvas.width / brush.size;
-    context.imageSmoothingEnabled = false;
-    context.fillStyle = '#363a48';
-    context.fillRect(0, 0, brushMaskCanvas.width, brushMaskCanvas.height);
-    for (let y = 0; y < brush.size; y++) {
-      for (let x = 0; x < brush.size; x++) {
-        if (!brush.mask[y * brush.size + x]) continue;
-        context.fillStyle = '#b7a5ff';
-        context.fillRect(Math.floor(x * cellSize), Math.floor(y * cellSize), Math.ceil(cellSize), Math.ceil(cellSize));
-      }
-    }
-    if (brush.size <= 16) {
-      context.strokeStyle = '#ffffff30';
-      context.lineWidth = 1;
-      for (let cell = 0; cell <= brush.size; cell++) {
-        const position = Math.round(cell * cellSize) + 0.5;
-        context.beginPath();
-        context.moveTo(position, 0);
-        context.lineTo(position, brushMaskCanvas.height);
-        context.moveTo(0, position);
-        context.lineTo(brushMaskCanvas.width, position);
-        context.stroke();
-      }
-    }
-    if (document.activeElement === brushMaskCanvas) {
-      context.strokeStyle = '#ffffff';
-      context.lineWidth = 2;
-      context.strokeRect(
-        focusedMaskCell.x * cellSize + 1,
-        focusedMaskCell.y * cellSize + 1,
-        cellSize - 2,
-        cellSize - 2,
-      );
-    }
-  }
-
-  function updateMaskCell(brush: BrushDefinition, x: number, y: number): void {
-    if (x < 0 || y < 0 || x >= brush.size || y >= brush.size) return;
-    const mask = [...brush.mask];
-    mask[y * brush.size + x] = maskPaintValue;
-    onbrushupdate({ ...brush, mask });
-  }
-
-  function brushMaskPointerDown(event: PointerEvent): void {
-    if (!selectedBrush || !brushMaskCanvas) return;
-    event.preventDefault();
-    brushMaskCanvas.setPointerCapture(event.pointerId);
-    const bounds = brushMaskCanvas.getBoundingClientRect();
-    const x = Math.min(selectedBrush.size - 1, Math.floor(((event.clientX - bounds.left) / bounds.width) * selectedBrush.size));
-    const y = Math.min(selectedBrush.size - 1, Math.floor(((event.clientY - bounds.top) / bounds.height) * selectedBrush.size));
-    maskPaintValue = event.button === 2 ? 0 : selectedBrush.mask[y * selectedBrush.size + x] ? 0 : 1;
-    lastMaskCell = { x, y };
-    focusedMaskCell = { x, y };
-    updateMaskCell(selectedBrush, x, y);
-  }
-
-  function brushMaskKeyDown(event: KeyboardEvent): void {
-    if (!selectedBrush) return;
-    const directions: Record<string, readonly [number, number]> = {
-      ArrowLeft: [-1, 0],
-      ArrowRight: [1, 0],
-      ArrowUp: [0, -1],
-      ArrowDown: [0, 1],
-    };
-    const direction = directions[event.code];
-    if (direction) {
-      event.preventDefault();
-      focusedMaskCell = {
-        x: Math.max(0, Math.min(selectedBrush.size - 1, focusedMaskCell.x + direction[0])),
-        y: Math.max(0, Math.min(selectedBrush.size - 1, focusedMaskCell.y + direction[1])),
-      };
-      renderBrushMask(selectedBrush);
-    } else if (event.code === 'Space' || event.code === 'Enter') {
-      event.preventDefault();
-      maskPaintValue = selectedBrush.mask[focusedMaskCell.y * selectedBrush.size + focusedMaskCell.x] ? 0 : 1;
-      updateMaskCell(selectedBrush, focusedMaskCell.x, focusedMaskCell.y);
-    }
-  }
-
-  function brushMaskPointerMove(event: PointerEvent): void {
-    if (!selectedBrush || !brushMaskCanvas || !lastMaskCell || !brushMaskCanvas.hasPointerCapture(event.pointerId)) return;
-    const bounds = brushMaskCanvas.getBoundingClientRect();
-    const x = Math.floor(((event.clientX - bounds.left) / bounds.width) * selectedBrush.size);
-    const y = Math.floor(((event.clientY - bounds.top) / bounds.height) * selectedBrush.size);
-    const from = lastMaskCell;
-    bresenham(from.x, from.y, x, y, (cellX, cellY) => updateMaskCell(selectedBrush, cellX, cellY));
-    lastMaskCell = { x, y };
-  }
-
-  $effect(() => {
-    const brush = selectedBrush;
-    if (brush) renderBrushMask(brush);
-  });
-
-  async function importBrushFile(event: Event): Promise<void> {
-    const input = event.currentTarget as HTMLInputElement;
-    const file = input.files?.[0];
-    if (!file) return;
-    try {
-      onbrushimport(parseBrushLibrary(await file.text()));
-    } catch (error) {
-      onbrusherror(`Не удалось импортировать кисть: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      input.value = '';
-    }
-  }
-
-  function exportSelectedBrush(): void {
-    if (!selectedBrush) return;
-    const blob = new Blob([onbrushexport(selectedBrush)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `${selectedBrush.name.replace(/[^\p{L}\p{N}-]+/gu, '-').replace(/^-|-$/g, '') || 'brush'}.json`;
-    link.click();
-    URL.revokeObjectURL(url);
-  }
 
   function closeShapeMenuOnOutsidePointer(event: PointerEvent): void {
     if (shapeMenuOpen && shapeMenuContainer && event.target instanceof Node && !shapeMenuContainer.contains(event.target)) {
@@ -411,58 +184,6 @@
     {/each}
   </div>
 
-  <div class="rule"></div>
-
-  <div class="section brush" class:dim={!brushEnabled}>
-    <label class="control-label" for="brush-size">Размер {brushSize}px</label>
-    <input
-      id="brush-size"
-      class="slider"
-      type="range"
-      min={MIN_BRUSH_SIZE}
-      max={MAX_BRUSH_SIZE}
-      step="1"
-      value={brushSize}
-      aria-label="Размер кисти"
-      aria-valuetext="{brushSize} пикселей"
-      disabled={!brushEnabled}
-      oninput={(event) => onbrush(Number(event.currentTarget.value))}
-    />
-    <div class="brush-shapes" role="group" aria-label="Форма кисти">
-      <button
-        type="button"
-        class="shape"
-        class:active={brushShape === 'square'}
-        aria-label="Квадратная кисть"
-        aria-pressed={brushShape === 'square'}
-        disabled={!brushEnabled}
-        onclick={() => onbrushshape('square')}
-      ><span class="square-tip"></span></button>
-      <button
-        type="button"
-        class="shape"
-        class:active={brushShape === 'circle'}
-        aria-label="Круглая кисть"
-        aria-pressed={brushShape === 'circle'}
-        disabled={!brushEnabled}
-        onclick={() => onbrushshape('circle')}
-      ><span class="circle-tip"></span></button>
-    </div>
-    <label class="control-label" for="brush-opacity">Непрозрачность {brushOpacity}%</label>
-    <input
-      id="brush-opacity"
-      class="slider"
-      type="range"
-      min="0"
-      max="100"
-      step="1"
-      value={brushOpacity}
-      aria-label="Непрозрачность кисти"
-      aria-valuetext="{brushOpacity}%"
-      disabled={!brushEnabled}
-      oninput={(event) => onbrushopacity(Number(event.currentTarget.value))}
-    />
-  </div>
   <details class="options">
     <summary aria-label="Параметры инструмента" title="Параметры инструмента">⚙</summary>
     <div class="options-panel">
@@ -624,172 +345,6 @@
       {/if}
     </div>
   </details>
-  {#if showLayers}
-  <LayersPanel
-    {layers}
-    {groups}
-    {activeLayerId}
-    {hasSelection}
-    onselect={onlayerselect}
-    onadd={onlayeradd}
-    {onaddgroup}
-    {ongroupupdate}
-    {ongroupdelete}
-    {onaddbackground}
-    {onaddreference}
-    onduplicate={onlayerduplicate}
-    ondelete={onlayerdelete}
-    onmove={onlayermove}
-    onreorder={onlayerreorder}
-    onupdate={onlayerupdate}
-    oncreatefromselection={oncreatefromselection}
-  />
-  {/if}
-  <details class="brush-library">
-    <summary>Выделение</summary>
-    <div class="options-panel">
-      <div class="selection-modes" role="group" aria-label="Инструмент выделения">
-        <button type="button" class:active={selectionMode === 'rect'} aria-pressed={selectionMode === 'rect'}
-          onclick={() => onselectionmode(selectionMode === 'rect' ? null : 'rect')}>Прямоугольное</button>
-        <button type="button" class:active={selectionMode === 'ellipse'} aria-pressed={selectionMode === 'ellipse'}
-          onclick={() => onselectionmode(selectionMode === 'ellipse' ? null : 'ellipse')}>Эллиптическое</button>
-        <button type="button" class:active={selectionMode === 'lasso'} aria-pressed={selectionMode === 'lasso'}
-          onclick={() => onselectionmode(selectionMode === 'lasso' ? null : 'lasso')}>Лассо</button>
-        <button type="button" class:active={selectionMode === 'polygon'} aria-pressed={selectionMode === 'polygon'}
-          onclick={() => onselectionmode(selectionMode === 'polygon' ? null : 'polygon')}>Многоугольное лассо</button>
-        <button type="button" class:active={selectionMode === 'wand'} aria-pressed={selectionMode === 'wand'}
-          onclick={() => onselectionmode(selectionMode === 'wand' ? null : 'wand')}>Волшебная палочка</button>
-        <button type="button" class:active={selectionMode === 'color'} aria-pressed={selectionMode === 'color'}
-          onclick={() => onselectionmode(selectionMode === 'color' ? null : 'color')}>Выбрать цвет</button>
-      </div>
-      <label>Комбинирование
-        <select aria-label="Операция выделения" value={selectionOperation}
-          onchange={(event) => onselectionoperation(event.currentTarget.value as SelectionOperation)}>
-          <option value="replace">Заменить</option><option value="add">Добавить</option>
-          <option value="subtract">Вычесть</option><option value="intersect">Пересечь</option>
-        </select>
-      </label>
-      <label class="check">
-        <input type="checkbox" checked={settings.sampleMerged}
-          onchange={(event) => onsettings({ ...settings, sampleMerged: event.currentTarget.checked })} />
-        Выделять и копировать по видимым слоям
-      </label>
-      <div class="selection-actions">
-        <button type="button" onclick={() => onselectionaction('select-all')}>Выбрать всё</button>
-        <button type="button" onclick={() => onselectionaction('select-opaque')}>Непрозрачные пиксели</button>
-        <button type="button" disabled={!selectionAvailable} onclick={() => onselectionaction('invert')}>Инвертировать</button>
-        <button type="button" disabled={!selectionAvailable} onclick={() => onselectionaction('deselect')}>Снять</button>
-        <button type="button" disabled={!selectionAvailable} onclick={() => onselectionaction('copy')}>Копировать</button>
-        <button type="button" disabled={!selectionAvailable} onclick={() => onselectionaction('cut')}>Вырезать</button>
-        <button type="button" disabled={!clipboardAvailable} onclick={() => onselectionaction('paste')}>Вставить по центру</button>
-        <button type="button" disabled={!selectionAvailable} onclick={() => onselectionaction('clear')}>Очистить пиксели</button>
-        <button type="button" disabled={!selectionAvailable} onclick={() => onselectionaction('crop')}>Обрезать холст по выделению</button>
-      </div>
-      <span class="note">Прямоугольник, эллипс и лассо задаются перетаскиванием. Для многоугольного лассо ставьте точки и завершайте Enter или двойным щелчком. Палочка выбирает связную область.</span>
-      <div class="selection-actions">
-        <button type="button" disabled={!selectionAvailable} onclick={() => onselectionaction('move-left')}>← 1 px</button>
-        <button type="button" disabled={!selectionAvailable} onclick={() => onselectionaction('move-right')}>→ 1 px</button>
-        <button type="button" disabled={!selectionAvailable} onclick={() => onselectionaction('move-up')}>↑ 1 px</button>
-        <button type="button" disabled={!selectionAvailable} onclick={() => onselectionaction('move-down')}>↓ 1 px</button>
-        <button type="button" disabled={!selectionAvailable} onclick={() => onselectionaction('flip-horizontal')}>Отразить ↔</button>
-        <button type="button" disabled={!selectionAvailable} onclick={() => onselectionaction('flip-vertical')}>Отразить ↕</button>
-        <button type="button" disabled={!selectionAvailable} onclick={() => onselectionaction('rotate-left')}>Повернуть −90°</button>
-        <button type="button" disabled={!selectionAvailable} onclick={() => onselectionaction('rotate-right')}>Повернуть +90°</button>
-        <button type="button" disabled={!selectionAvailable} onclick={() => onselectionaction('scale-up')}>Масштаб ×2</button>
-        <button type="button" disabled={!selectionAvailable} onclick={() => onselectionaction('scale-down')}>Масштаб ÷2</button>
-      </div>
-    </div>
-  </details>
-  <details class="brush-library">
-    <summary>Кисти</summary>
-    <div class="options-panel">
-      <label>Моя кисть
-        <select aria-label="Библиотека кистей" value={selectedBrushId} onchange={(event) => onbrushselect(event.currentTarget.value)}>
-          <option value="">Стандартная форма</option>
-          {#each brushes as brush (brush.id)}
-            <option value={brush.id}>{brush.name} · {brush.type} · {brush.size}px</option>
-          {/each}
-        </select>
-      </label>
-      <label>Имя
-        <input aria-label="Имя кисти" bind:value={brushName} maxlength="80" />
-      </label>
-      <label>Тип
-        <select aria-label="Тип кисти" bind:value={brushType}>
-          <option value="pencil">Pencil Brush</option>
-          <option value="square">Square Brush</option>
-          <option value="circle">Circle Brush</option>
-          <option value="custom">Custom Brush</option>
-          <option value="pattern">Pattern Brush</option>
-          <option value="stamp">Stamp Brush</option>
-          <option value="texture">Texture Brush</option>
-          <option value="scatter">Scatter Brush</option>
-        </select>
-      </label>
-      <button type="button" class="library-button" onclick={() => onbrushsave(brushName, brushType)}>Сохранить текущую кисть</button>
-      <input bind:this={importInput} class="file-input" type="file" accept=".json,application/json" onchange={importBrushFile} />
-      <button type="button" class="library-button" onclick={() => importInput.click()}>Импортировать кисть</button>
-      <div class="library-actions">
-        <button type="button" class="library-button" disabled={!selectedBrush} onclick={exportSelectedBrush}>Экспорт</button>
-        <button type="button" class="library-button" disabled={!selectedBrush} onclick={onbrushdelete}>Удалить</button>
-      </div>
-      {#if selectedBrush}
-        <span>Маска: {selectedBrush.mask.reduce((count, pixel) => count + pixel, 0)}/{selectedBrush.mask.length} пикселей</span>
-        <canvas
-          bind:this={brushMaskCanvas}
-          class="brush-mask-editor"
-          width="128"
-          height="128"
-          role="button"
-          aria-roledescription="Редактор пиксельной маски"
-          tabindex="0"
-          aria-label="Редактор маски кисти: ЛКМ переключает пиксель, ПКМ стирает"
-          onpointerdown={brushMaskPointerDown}
-          onpointermove={brushMaskPointerMove}
-          onpointerup={() => (lastMaskCell = null)}
-          onpointercancel={() => (lastMaskCell = null)}
-          onkeydown={brushMaskKeyDown}
-          oncontextmenu={(event) => event.preventDefault()}
-        ></canvas>
-        <span class="note">Стрелки перемещают курсор; Enter/Пробел переключает пиксель.</span>
-        <label>Размер {selectedBrush.size}px
-          <input type="range" min="1" max="64" value={selectedBrush.size} aria-label="Размер пользовательской кисти"
-            oninput={(event) => onbrushupdate(resizeBrushDefinition(selectedBrush!, Number(event.currentTarget.value)))} />
-        </label>
-        <label>Угол {selectedBrush.angle}°
-          <input type="range" min="-180" max="180" value={selectedBrush.angle} aria-label="Угол пользовательской кисти"
-            oninput={(event) => onbrushupdate({ ...selectedBrush!, angle: Number(event.currentTarget.value) })} />
-        </label>
-        <label>Интервал {selectedBrush.spacing}
-          <input type="range" min="1" max="16" value={selectedBrush.spacing} aria-label="Интервал отпечатков кисти"
-            oninput={(event) => onbrushupdate({ ...selectedBrush!, spacing: Number(event.currentTarget.value) })} />
-        </label>
-        <label>Плотность {Math.round(selectedBrush.density * 100)}%
-          <input type="range" min="0" max="100" value={selectedBrush.density * 100} aria-label="Плотность кисти"
-            oninput={(event) => onbrushupdate({ ...selectedBrush!, density: Number(event.currentTarget.value) / 100 })} />
-        </label>
-        <label>Разброс {selectedBrush.scatter}px
-          <input type="range" min="0" max="64" value={selectedBrush.scatter} aria-label="Разброс кисти"
-            oninput={(event) => onbrushupdate({ ...selectedBrush!, scatter: Number(event.currentTarget.value) })} />
-        </label>
-        <label class="check">
-          <input type="checkbox" checked={selectedBrush.randomRotation}
-            onchange={(event) => onbrushupdate({ ...selectedBrush!, randomRotation: event.currentTarget.checked })} />
-          Случайный поворот
-        </label>
-        <label class="check">
-          <input type="checkbox" checked={selectedBrush.randomSize}
-            onchange={(event) => onbrushupdate({ ...selectedBrush!, randomSize: event.currentTarget.checked })} />
-          Случайный размер
-        </label>
-        <label class="check">
-          <input type="checkbox" checked={selectedBrush.pressure}
-            onchange={(event) => onbrushupdate({ ...selectedBrush!, pressure: event.currentTarget.checked })} />
-          Давление пера
-        </label>
-      {/if}
-    </div>
-  </details>
 </aside>
 
 <style>
@@ -811,6 +366,10 @@
     border-right: 1px solid var(--border);
   }
 
+  .panel:has(.options[open]) {
+    overflow: visible;
+  }
+
   .panel > * {
     flex-shrink: 0;
   }
@@ -819,19 +378,6 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
-  }
-
-  .brush {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 5px;
-    width: 52px;
-    transition: opacity 0.12s;
-  }
-
-  .brush.dim {
-    opacity: 0.4;
   }
 
   .rule {
@@ -932,9 +478,7 @@
     color: #fff;
   }
 
-  .tool:focus-visible,
-  .shape:focus-visible,
-  .slider:focus-visible {
+  .tool:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 1px;
   }
@@ -967,12 +511,6 @@
       flex-direction: row;
     }
 
-    .brush {
-      flex-direction: row;
-      width: auto;
-      gap: 7px;
-    }
-
     .rule {
       width: 1px;
       height: 28px;
@@ -983,73 +521,13 @@
     }
   }
 
-  @media (pointer: coarse) {
-    .shape {
-      width: 32px;
-      height: 32px;
-    }
-  }
-
-  .shape {
-    display: grid;
-    place-items: center;
-    width: 20px;
-    height: 20px;
-    padding: 0;
-    border: 1px solid var(--border);
-    border-radius: 5px;
-    background: var(--panel-2);
-    cursor: pointer;
-  }
-
-  .shape:hover {
-    border-color: #3b3f50;
-  }
-
-  .shape.active {
-    border-color: var(--accent);
-    background: var(--accent-soft);
-  }
-
-  .square-tip,
-  .circle-tip {
-    display: block;
-    width: 10px;
-    height: 10px;
-    background: var(--text);
-    border-radius: 1px;
-  }
-
-  .control-label {
-    color: var(--text-dim);
-    font-size: 10px;
-    white-space: nowrap;
-  }
-
-  .slider {
-    width: 46px;
-    margin: 0;
-    accent-color: var(--accent);
-  }
-
-  @media (max-width: 859px) {
-    .slider {
-      width: 88px;
-    }
-  }
-
-  .shape:disabled,
-  .slider:disabled {
-    cursor: not-allowed;
-  }
-
-  .circle-tip {
-    border-radius: 50%;
-  }
-
   .options {
     position: relative;
     z-index: 25;
+  }
+
+  .options[open] {
+    z-index: 80;
   }
 
   .options > summary {
@@ -1063,100 +541,6 @@
     color: var(--text);
     cursor: pointer;
     list-style: none;
-  }
-
-  .brush-library > summary {
-    display: grid;
-    place-items: center;
-    min-width: 40px;
-    min-height: 30px;
-    padding: 0 5px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    background: var(--panel-2);
-    color: var(--text);
-    cursor: pointer;
-    font-size: 11px;
-    list-style: none;
-  }
-
-  .brush-library > summary::-webkit-details-marker {
-    display: none;
-  }
-
-  .brush-library[open] .options-panel {
-    top: 0;
-  }
-
-  .file-input {
-    display: none;
-  }
-
-  .library-button {
-    min-height: 30px;
-    padding: 4px 8px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    background: var(--panel-2);
-    color: var(--text);
-    font: inherit;
-    cursor: pointer;
-  }
-
-  .library-button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .library-actions {
-    display: flex;
-    gap: 6px;
-  }
-
-  .selection-modes,
-  .selection-actions {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 5px;
-  }
-
-  .selection-modes button,
-  .selection-actions button {
-    min-width: 0;
-    min-height: 30px;
-    padding: 4px 6px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    background: var(--panel-2);
-    color: var(--text);
-    font: inherit;
-    font-size: 11px;
-    cursor: pointer;
-  }
-
-  .selection-modes button.active {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-
-  .selection-actions button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .brush-mask-editor {
-    width: 128px;
-    height: 128px;
-    align-self: center;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    cursor: crosshair;
-    touch-action: none;
-  }
-
-  .brush-mask-editor:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 3px;
   }
 
   .options > summary::-webkit-details-marker {
@@ -1202,11 +586,6 @@
     display: flex;
     align-items: center;
     color: var(--text);
-  }
-
-  .note {
-    color: var(--text-dim);
-    font-size: 11px;
   }
 
   @media (max-width: 859px) {

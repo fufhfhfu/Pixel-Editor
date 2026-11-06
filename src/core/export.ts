@@ -1,6 +1,6 @@
 /**
  * Ядро: экспорт изображения.
- * scaleNearest и кодирование PNG — чистые функции; Blob и ссылка скачивания используют DOM.
+ * scaleNearest и кодирование PNG — чистые функции; Blob использует DOM.
  */
 
 import { encodePng } from './png';
@@ -134,25 +134,13 @@ export async function exportRasterBlob(
   const mimeType = format === 'jpeg' ? 'image/jpeg' : 'image/webp';
   const blob = await new Promise<Blob>((resolve, reject) => {
     canvas.toBlob(
-      (result) => (result ? resolve(result) : reject(new Error(`Браузер не смог создать ${format.toUpperCase()}.`))),
+      (result) => (result ? resolve(result) : reject(new Error(`Не удалось создать ${format.toUpperCase()}.`))),
       mimeType,
       0.92,
     );
   });
   if (blob.type !== mimeType) {
-    throw new Error(`Этот браузер не поддерживает экспорт в ${format.toUpperCase()}.`);
+    throw new Error(`Среда приложения не поддерживает экспорт в ${format.toUpperCase()}.`);
   }
   return blob;
-}
-
-/** Скачивает Blob как файл с заданным именем. */
-export function downloadBlob(blob: Blob, filename: string): void {
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }

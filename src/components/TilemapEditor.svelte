@@ -18,6 +18,7 @@
     type TilemapPoint,
   } from '../core/tilemap';
   import { encodePng } from '../core/png';
+  import { saveDesktopBlob } from '../core/desktopFiles';
   import { rgbaToCss } from '../core/color';
   import type { RGBA } from '../core/state';
 
@@ -545,26 +546,22 @@
 
   async function exportAtlas(): Promise<void> {
     if (!tilemap) return;
-    const atlas = buildTileAtlas(tilemap);
-    const png = await encodePng({ width: atlas.width, height: atlas.height, data: atlas.pixels });
-    download(new Blob([png], { type: 'image/png' }), 'tileset.png');
+    try {
+      const atlas = buildTileAtlas(tilemap);
+      const png = await encodePng({ width: atlas.width, height: atlas.height, data: atlas.pixels });
+      await saveDesktopBlob(new Blob([png], { type: 'image/png' }), 'tileset.png');
+    } catch (reason) {
+      error = reason instanceof Error ? reason.message : 'Не удалось сохранить PNG tileset.';
+    }
   }
 
-  function exportMetadata(): void {
+  async function exportMetadata(): Promise<void> {
     if (!tilemap) return;
-    download(new Blob([exportTilemapMetadata(tilemap)], { type: 'application/json' }), 'tilemap.json');
-  }
-
-  function download(blob: Blob, fileName: string): void {
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = fileName;
-    anchor.hidden = true;
-    document.body.append(anchor);
-    anchor.click();
-    anchor.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    try {
+      await saveDesktopBlob(new Blob([exportTilemapMetadata(tilemap)], { type: 'application/json' }), 'tilemap.json');
+    } catch (reason) {
+      error = reason instanceof Error ? reason.message : 'Не удалось сохранить метаданные Tilemap.';
+    }
   }
 
   onMount(() => {

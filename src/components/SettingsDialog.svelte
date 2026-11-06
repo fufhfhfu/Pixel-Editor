@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { trapFocus } from './focusTrap';
+  import { saveDesktopBlob } from '../core/desktopFiles';
   import type { ThemePreference } from '../core/preferences';
   import {
     SHORTCUT_ACTIONS,
@@ -135,14 +136,13 @@
     message = '';
   }
 
-  function exportScheme(): void {
+  async function exportScheme(): Promise<void> {
     const blob = new Blob([serializeShortcutScheme(shortcuts)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = 'pixel-editor-hotkeys.json';
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(url), 0);
+    try {
+      await saveDesktopBlob(blob, 'pixel-editor-hotkeys.json');
+    } catch (error) {
+      message = `Не удалось сохранить схему: ${error instanceof Error ? error.message : String(error)}`;
+    }
   }
 
   async function importScheme(event: Event): Promise<void> {

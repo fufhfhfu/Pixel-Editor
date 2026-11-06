@@ -20,7 +20,6 @@
   import LayersPanel from './components/LayersPanel.svelte';
   import {
     DEFAULT_EXPORT_SCALE,
-    downloadBlob,
     exportPngBlob,
     exportRasterBlob,
     getAvailableExportScales,
@@ -105,12 +104,9 @@
   } from './core/hotkeys';
   import {
     AutosaveRepository,
-    pickSaveFileHandle,
-    supportsSaveFilePicker,
-    writeBlobToFile,
-    type SaveFileHandle,
     type AutosaveStorageMode,
   } from './core/autosave';
+  import { saveDesktopBlob } from './core/desktopFiles';
   import { DEFAULT_GRID_SIZE, PixelBuffer, isValidCanvasSize, type RGBA } from './core/state';
   import {
     compositeLayers,
@@ -144,7 +140,7 @@
     type SelectionMode,
     type SelectionOperation,
   } from './core/selection';
-  import { getBrowserStorage, type SaveStatus } from './core/storage';
+  import { getAppStorage, type SaveStatus } from './core/storage';
   import type { StrokeOutcome } from './core/stroke';
   import {
     MAX_BRUSH_SIZE,
@@ -175,7 +171,10 @@
     type WorkspacePanelId,
     type WorkspaceLayout,
   } from './core/workspace';
-  import type { SelectionAction } from './components/ToolPanel.svelte';
+  type SelectionAction =
+    | 'select-all' | 'select-opaque' | 'invert' | 'deselect' | 'copy' | 'cut' | 'paste' | 'clear' | 'crop'
+    | 'move-left' | 'move-right' | 'move-up' | 'move-down'
+    | 'flip-horizontal' | 'flip-vertical' | 'rotate-left' | 'rotate-right' | 'scale-up' | 'scale-down';
 
   interface Props {
     initialProject: ProjectData | null;
@@ -201,7 +200,7 @@
 
   function persistBrushLibrary(): void {
     if (!storage) {
-      notify('Библиотека кистей недоступна: браузер не разрешил доступ к локальному хранилищу.', 'error');
+      notify('Библиотека кистей недоступна: нет доступа к хранилищу приложения.', 'error');
       return;
     }
     try {
@@ -336,7 +335,7 @@
   const START_PRIMARY: RGBA = { r: 255, g: 0, b: 77, a: 255 };
   const START_SECONDARY: RGBA = { r: 255, g: 241, b: 232, a: 255 };
 
-  const storage = getBrowserStorage();
+  const storage = getAppStorage();
   const preferences = loadEditorPreferences(storage);
   const savedShortcuts = loadShortcutMap(storage);
   const savedWorkspace = loadWorkspaceLayout(storage);
@@ -528,7 +527,6 @@
   let shortcuts = $state.raw<ShortcutMap>(savedShortcuts.shortcuts);
   let pendingShortcutSequence = $state.raw<ShortcutSequence>([]);
   let shortcutSequenceTimer: ReturnType<typeof setTimeout> | undefined;
-  const saveFilePickerSupported = supportsSaveFilePicker();
   let canvasApi = $state.raw<ReturnType<typeof Canvas>>();
   let boardSequence = 1;
   let layerSequence = 1;
@@ -867,6 +865,18 @@
       case 'redo': redo(); break;
       case 'clear': requestClear(); break;
       case 'select-all': runSelectionAction('select-all'); break;
+      case 'select-opaque': runSelectionAction('select-opaque'); break;
+      case 'selection-mode:none': selectionMode = null; break;
+      case 'selection-mode:rect': selectionMode = 'rect'; break;
+      case 'selection-mode:ellipse': selectionMode = 'ellipse'; break;
+      case 'selection-mode:lasso': selectionMode = 'lasso'; break;
+      case 'selection-mode:polygon': selectionMode = 'polygon'; break;
+      case 'selection-mode:wand': selectionMode = 'wand'; break;
+      case 'selection-mode:color': selectionMode = 'color'; break;
+      case 'selection-operation:replace': selectionOperation = 'replace'; break;
+      case 'selection-operation:add': selectionOperation = 'add'; break;
+      case 'selection-operation:subtract': selectionOperation = 'subtract'; break;
+      case 'selection-operation:intersect': selectionOperation = 'intersect'; break;
       case 'toggle-grid': toggleGrid(); break;
       case 'fit': fitCanvas(); break;
       case 'center': canvasApi?.centerActiveBoard(); break;
@@ -898,6 +908,14 @@
         helpTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
         helpOpen = true;
         break;
+      default: {
+        const action = ([
+          'invert', 'deselect', 'copy', 'cut', 'paste', 'clear', 'crop',
+          'move-left', 'move-right', 'move-up', 'move-down',
+          'flip-horizontal', 'flip-vertical', 'rotate-left', 'rotate-right', 'scale-up', 'scale-down',
+        ] as const).find((entry) => command === `selection-action:${entry}`);
+        if (action) runSelectionAction(action);
+      }
     }
   }
 
@@ -911,6 +929,34 @@
       { label: 'Отменить', command: 'undo', disabled: !canUndo },
       { label: 'Повторить', command: 'redo', disabled: !canRedo },
       { label: 'Выбрать всё', command: 'select-all', separatorBefore: true },
+      { label: 'Выбрать непрозрачные пиксели', command: 'select-opaque' },
+      { label: selectionMode ? 'Снять режим выделения' : 'Выделение: прямоугольник', command: selectionMode ? 'selection-mode:none' : 'selection-mode:rect', separatorBefore: true },
+      { label: `${selectionMode === 'ellipse' ? '✓ ' : ''}Выделение: эллипс`, command: 'selection-mode:ellipse' },
+      { label: `${selectionMode === 'lasso' ? '✓ ' : ''}Выделение: лассо`, command: 'selection-mode:lasso' },
+      { label: `${selectionMode === 'polygon' ? '✓ ' : ''}Выделение: многоугольное лассо`, command: 'selection-mode:polygon' },
+      { label: `${selectionMode === 'wand' ? '✓ ' : ''}Выделение: волшебная палочка`, command: 'selection-mode:wand' },
+      { label: `${selectionMode === 'color' ? '✓ ' : ''}Выделение: цвет`, command: 'selection-mode:color' },
+      { label: `${selectionOperation === 'replace' ? '✓ ' : ''}Заменить выделение`, command: 'selection-operation:replace', separatorBefore: true },
+      { label: `${selectionOperation === 'add' ? '✓ ' : ''}Добавить к выделению`, command: 'selection-operation:add' },
+      { label: `${selectionOperation === 'subtract' ? '✓ ' : ''}Вычесть из выделения`, command: 'selection-operation:subtract' },
+      { label: `${selectionOperation === 'intersect' ? '✓ ' : ''}Пересечь выделения`, command: 'selection-operation:intersect' },
+      { label: 'Инвертировать выделение', command: 'selection-action:invert', disabled: selectionMask === null, separatorBefore: true },
+      { label: 'Снять выделение', command: 'selection-action:deselect', disabled: selectionMask === null },
+      { label: 'Копировать', command: 'selection-action:copy', disabled: selectionMask === null },
+      { label: 'Вырезать', command: 'selection-action:cut', disabled: selectionMask === null },
+      { label: 'Вставить по центру', command: 'selection-action:paste', disabled: selectionClipboard === null },
+      { label: 'Очистить выделенное', command: 'selection-action:clear', disabled: selectionMask === null },
+      { label: 'Обрезать холст по выделению', command: 'selection-action:crop', disabled: selectionMask === null },
+      { label: 'Сдвинуть влево', command: 'selection-action:move-left', disabled: selectionMask === null, separatorBefore: true },
+      { label: 'Сдвинуть вправо', command: 'selection-action:move-right', disabled: selectionMask === null },
+      { label: 'Сдвинуть вверх', command: 'selection-action:move-up', disabled: selectionMask === null },
+      { label: 'Сдвинуть вниз', command: 'selection-action:move-down', disabled: selectionMask === null },
+      { label: 'Отразить по горизонтали', command: 'selection-action:flip-horizontal', disabled: selectionMask === null },
+      { label: 'Отразить по вертикали', command: 'selection-action:flip-vertical', disabled: selectionMask === null },
+      { label: 'Повернуть влево на 90°', command: 'selection-action:rotate-left', disabled: selectionMask === null },
+      { label: 'Повернуть вправо на 90°', command: 'selection-action:rotate-right', disabled: selectionMask === null },
+      { label: 'Увеличить вдвое', command: 'selection-action:scale-up', disabled: selectionMask === null },
+      { label: 'Уменьшить вдвое', command: 'selection-action:scale-down', disabled: selectionMask === null },
       { label: 'Очистить холст…', command: 'clear' },
     ] },
     { label: 'Вид', items: [
@@ -1774,7 +1820,7 @@
     const next = [...customSizes, size];
     customSizes = next;
     if (saveCustomSizes(storage, next)) notify(`Размер ${size.width}×${size.height} добавлен в список.`);
-    else notify('Размер добавлен до закрытия страницы, но не сохранён: хранилище браузера недоступно.', 'error');
+    else notify('Размер добавлен до закрытия приложения, но не сохранён: хранилище недоступно.', 'error');
   }
 
   function removeCurrentSavedSize(): void {
@@ -2517,57 +2563,12 @@
 
   // ——— Файлы: проект JSON и PNG ———
 
-  async function chooseSaveFile(filename: string, mimeType: string, extensions: string[]) {
-    try {
-      return await pickSaveFileHandle(filename, mimeType, extensions);
-    } catch (error) {
-      notify(error instanceof Error ? error.message : 'Не удалось открыть диалог сохранения файла.', 'error');
-      return null;
-    }
-  }
-
-  type SaveDestination = { kind: 'desktop' } | { kind: 'browser'; handle: SaveFileHandle } | { kind: 'download' };
-
-  async function chooseSaveDestination(
-    filename: string,
-    mimeType: string,
-    extensions: string[],
-  ): Promise<SaveDestination | null> {
-    if (window.pixelEditorDesktop) return { kind: 'desktop' };
-    if (!supportsSaveFilePicker()) return { kind: 'download' };
-    const handle = await chooseSaveFile(filename, mimeType, extensions);
-    return handle ? { kind: 'browser', handle } : null;
-  }
-
-  async function saveOutput(blob: Blob, filename: string, destination: SaveDestination): Promise<boolean> {
-    if (destination.kind === 'desktop') {
-      if (!window.pixelEditorDesktop) throw new Error('Возможность сохранения в приложении недоступна.');
-      const result = await window.pixelEditorDesktop.saveFile({
-        suggestedName: filename,
-        mimeType: blob.type,
-        data: new Uint8Array(await blob.arrayBuffer()),
-      });
-      return result === 'saved';
-    }
-
-    if (destination.kind === 'browser') {
-      await writeBlobToFile(destination.handle, blob);
-      return true;
-    }
-
-    downloadBlob(blob, filename);
-    return true;
-  }
-
   async function saveProject(): Promise<void> {
     const filename = `pixel-art-${boards.length}-canvases.json`;
-    const destination = await chooseSaveDestination(filename, 'application/json', ['.json']);
-    if (!destination) return;
-
     try {
       const text = serializeProject(currentProject());
       const blob = new Blob([text], { type: 'application/json' });
-      if (await saveOutput(blob, filename, destination)) notify('Проект сохранён в файл.');
+      if (await saveDesktopBlob(blob, filename) === 'saved') notify('Проект сохранён в файл.');
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Не удалось сохранить проект.', 'error');
     }
@@ -2618,16 +2619,13 @@
       : baseExportBuffer;
     const extension = exportFormat === 'jpeg' ? 'jpg' : exportFormat;
     const filename = `pixel-art-${width}x${height}@${exportScale}x.${extension}`;
-    const mimeType = exportFormat === 'jpeg' ? 'image/jpeg' : `image/${exportFormat}`;
-    const destination = await chooseSaveDestination(filename, mimeType, [`.${extension}`]);
-    if (!destination) return;
 
     try {
       const blob =
         exportFormat === 'png'
           ? await exportPngBlob(exportBuffer, exportScale)
           : await exportRasterBlob(exportBuffer, exportScale, exportFormat, canvasBackground);
-      if (!(await saveOutput(blob, filename, destination))) return;
+      if (await saveDesktopBlob(blob, filename) !== 'saved') return;
       notify(
         `${exportFormat === 'jpeg' ? 'JPEG' : exportFormat.toUpperCase()} сохранён: ${width * exportScale}×${height * exportScale}.`,
       );
@@ -2970,7 +2968,7 @@
       brushLibraryError = `Библиотека кистей повреждена и не загружена: ${error instanceof Error ? error.message : String(error)}`;
     }
   } else {
-    brushLibraryError = 'Библиотека кистей недоступна: браузер не разрешил доступ к локальному хранилищу.';
+    brushLibraryError = 'Библиотека кистей недоступна: нет доступа к хранилищу приложения.';
   }
 
   if (preferences.error) notify(preferences.error, 'error');
@@ -3074,50 +3072,10 @@
       panelWidth={workspaceLayout.toolsWidth}
       tools={keyboardTools}
       {activeToolId}
-      {brushSize}
-      {brushShape}
-      {brushOpacity}
       settings={drawingSettings}
-      brushes={brushLibrary}
-      {selectedBrushId}
-      {selectionMode}
-      {selectionOperation}
-      selectionAvailable={selectionMask !== null}
-      clipboardAvailable={selectionClipboard !== null}
-      layers={activeLayers}
-      groups={activeBoard.groups}
-      {activeLayerId}
-      hasSelection={selectionMask !== null}
       onselect={selectTool}
-      onbrush={setBrushSize}
-      onbrushshape={setBrushShape}
-      onbrushopacity={setBrushOpacity}
       onsettings={updateDrawingSettings}
-      onbrushsave={saveBrush}
-      onbrushselect={selectBrush}
-      onbrushdelete={removeBrush}
-      onbrushupdate={updateBrush}
-      onbrushimport={importBrushLibrary}
-      onbrusherror={(message) => notify(message, 'error')}
-      onbrushexport={(brush) => serializeBrushLibrary([brush])}
       onaddboard={addBoard}
-      onselectionmode={(mode) => (selectionMode = mode)}
-      onselectionoperation={(operation) => (selectionOperation = operation)}
-      onselectionaction={runSelectionAction}
-      onlayerselect={selectLayer}
-      onlayeradd={addLayer}
-      onaddgroup={addLayerGroup}
-      ongroupupdate={updateGroup}
-      ongroupdelete={deleteGroup}
-      onlayerduplicate={duplicateLayer}
-      onlayerdelete={deleteLayer}
-      onlayermove={moveLayer}
-      onlayerreorder={reorderLayers}
-      onlayerupdate={updateLayer}
-      onaddbackground={() => addSpecialLayer('background')}
-      onaddreference={() => addSpecialLayer('reference')}
-      oncreatefromselection={getLayersFromSelection}
-      showLayers={false}
     />
     </div>
     <DockSplitter
@@ -3558,6 +3516,12 @@
     min-width: 0;
     height: 100%;
     overflow: hidden;
+  }
+
+  :global(.tool-dock:has(.options[open])) {
+    position: relative;
+    z-index: 40;
+    overflow: visible;
   }
 
   /* Узкий экран: панель инструментов — полоса сверху, палитра — полоса снизу */

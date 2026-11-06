@@ -24,16 +24,11 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run check
-      - run: npm run check:e2e
-      - run: npm run build
+      - run: npm run build:renderer
       - name: Audit production dependencies
         run: npm audit --omit=dev
       - name: Audit all dependencies (fail on high or critical)
         run: npm audit --audit-level=high
-      - name: Install Playwright browsers and system dependencies
-        run: npx playwright install --with-deps chromium firefox webkit
-      - name: Run browser tests
-        run: npm run test:e2e
   windows-desktop:
     needs: verify
     runs-on: windows-latest

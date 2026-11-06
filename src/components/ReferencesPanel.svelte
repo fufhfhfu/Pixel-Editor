@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { ReferenceImage } from '../core/reference';
+  import { MAX_PROJECT_REFERENCES, MAX_REFERENCE_TOTAL_PIXELS } from '../core/reference';
 
   interface Props {
     references: readonly ReferenceImage[];
@@ -18,6 +19,7 @@
   let { references, docked = false, selectedReferenceId, onimport, onselect, onupdate, onremove, onclose }: Props = $props();
   let fileInput: HTMLInputElement | undefined;
   const selected = $derived(references.find((reference) => reference.id === selectedReferenceId) ?? null);
+  const totalPixels = $derived(references.reduce((sum, reference) => sum + reference.width * reference.height, 0));
 
   function importFile(event: Event & { currentTarget: HTMLInputElement }): void {
     const input = event.currentTarget;
@@ -41,7 +43,16 @@
     <button type="button" class="icon-button" aria-label="Закрыть панель референсов" onclick={onclose}>×</button>
   </header>
 
-  <button type="button" class="import-button" onclick={() => fileInput?.click()}>Импортировать изображение</button>
+  <button
+    type="button"
+    class="import-button"
+    disabled={references.length >= MAX_PROJECT_REFERENCES || totalPixels >= MAX_REFERENCE_TOTAL_PIXELS}
+    onclick={() => fileInput?.click()}
+  >Импортировать изображение</button>
+  <p class="capacity" aria-live="polite">
+    {references.length} / {MAX_PROJECT_REFERENCES} изображений ·
+    {totalPixels.toLocaleString('ru-RU')} / {MAX_REFERENCE_TOTAL_PIXELS.toLocaleString('ru-RU')} px
+  </p>
   <input
     bind:this={fileInput}
     class="hidden-input"
@@ -196,6 +207,17 @@
 
   .import-button {
     padding: 0 10px;
+  }
+
+  .import-button:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+
+  .capacity {
+    margin: -6px 0 0;
+    color: var(--text-dim);
+    font-size: 11px;
   }
 
   .reference-list {

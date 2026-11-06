@@ -319,6 +319,7 @@
     brushDefinition: BrushDefinition | null;
     settings: DrawingSettings;
     temporaryPicker: boolean;
+    fillInProgress: boolean;
     selectionMask: SelectionMask | null;
     previewSelection: SelectionMask | null;
     selectionMode: SelectionMode | null;
@@ -331,6 +332,7 @@
     onstrokebegin: () => void;
     /** После штриха: commit — записать в историю, rollback — откатить целиком. */
     onstrokeend: (outcome: StrokeOutcome) => void;
+    onfill: (x: number, y: number, slot: ColorSlot) => void;
     onrender: () => void;
     onselectboard: (id: string) => void;
     onmoveboard: (id: string, x: number, y: number) => void;
@@ -377,6 +379,7 @@
     brushDefinition,
     settings,
     temporaryPicker,
+    fillInProgress,
     selectionMask,
     previewSelection,
     selectionMode,
@@ -386,6 +389,7 @@
     onusecolor,
     onstrokebegin,
     onstrokeend,
+    onfill,
     onrender,
     onselectboard,
     onmoveboard,
@@ -981,7 +985,7 @@
   // ——— Указатель: мышь, перо, касание ———
 
   function onPointerDown(e: PointerEvent): void {
-    if (!viewportEl) return;
+    if (!viewportEl || fillInProgress) return;
     refreshOrigin();
     keyboardCursorShown = false;
 
@@ -1121,8 +1125,12 @@
     viewportEl.focus({ preventScroll: true });
     viewportEl.setPointerCapture(e.pointerId);
     const p = pixelAtBoard(board, e.clientX, e.clientY);
-    activeStrokeBoardId = board.id;
     const activeTool = temporaryPicker || e.altKey ? getTool('picker') : tool;
+    if (activeTool.id === 'fill') {
+      onfill(p.x, p.y, slot);
+      return;
+    }
+    activeStrokeBoardId = board.id;
     session.start(e.pointerId, activeTool, slot, p.x, p.y, e.pointerType === 'pen' ? e.pressure : 1);
   }
 
@@ -1438,6 +1446,10 @@
 
   function toggleKeyboardStroke(slot: ColorSlot): void {
     const here = { x: keyboardX, y: keyboardY };
+    if (tool.id === 'fill') {
+      onfill(here.x, here.y, slot);
+      return;
+    }
     if (session.isActiveFor('keyboard')) {
       session.finish('keyboard', here);
       keyboardPenDown = false;
@@ -1450,6 +1462,10 @@
   }
 
   function onKeyDown(e: KeyboardEvent): void {
+    if (fillInProgress) {
+      e.preventDefault();
+      return;
+    }
     if (selectionMode === 'polygon' && e.key === 'Enter') {
       e.preventDefault();
       finishPolygonSelection();

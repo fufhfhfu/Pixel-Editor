@@ -1,14 +1,16 @@
 <script lang="ts">
   import type { Tool } from '../core/tools';
+  import { formatShortcutSequence, type ShortcutMap } from '../core/hotkeys';
   import { trapFocus } from './focusTrap';
 
   interface Props {
     tools: readonly Tool[];
+    shortcuts: ShortcutMap;
     returnFocusTo: HTMLElement | null;
     onclose: () => void;
   }
 
-  let { tools, returnFocusTo, onclose }: Props = $props();
+  let { tools, shortcuts, returnFocusTo, onclose }: Props = $props();
 
   let closeButton: HTMLButtonElement | undefined = $state();
 
@@ -32,31 +34,38 @@
     action: string;
   }
 
-  const view: Row[] = [
+  const shortcutLabel = (id: string): string =>
+    (shortcuts[id] ?? []).map(formatShortcutSequence).join('; ') || '—';
+  const view = $derived<Row[]>([
     { keys: 'Колесо мыши', action: 'Масштаб к точке под курсором' },
-    { keys: '+ / −', action: 'Масштаб вокруг центра' },
-    { keys: 'Пробел + перетаскивание', action: 'Панорама (также средняя кнопка мыши или перетаскивание ПКМ)' },
+    { keys: `${shortcutLabel('zoom-in')} / ${shortcutLabel('zoom-out')}`, action: 'Масштаб вокруг центра' },
+    { keys: `${shortcutLabel('pan')} + перетаскивание`, action: 'Панорама (также средняя кнопка мыши или перетаскивание ПКМ)' },
     { keys: 'Два пальца', action: 'Масштаб и перемещение на сенсорном экране' },
-    { keys: 'F', action: 'Вписать холст в окно' },
-    { keys: 'G', action: 'Показать или скрыть сетку' },
-  ];
-  const colors: Row[] = [
+    { keys: shortcutLabel('fit'), action: 'Вписать холст в окно' },
+    { keys: shortcutLabel('toggle-grid'), action: 'Показать или скрыть сетку' },
+  ]);
+  const colors = $derived<Row[]>([
     { keys: 'ЛКМ / клик ПКМ', action: 'Рисовать основным / дополнительным цветом; перетаскивание ПКМ панорамирует холст' },
-    { keys: 'X', action: 'Поменять цвета местами' },
+    { keys: shortcutLabel('swap-colors'), action: 'Поменять цвета местами' },
     { keys: 'ЛКМ / ПКМ по палитре', action: 'Выбрать основной / дополнительный цвет (также Shift+клик)' },
-  ];
-  const file: Row[] = [
-    { keys: 'Ctrl+Z', action: 'Отменить' },
-    { keys: 'Ctrl+Shift+Z, Ctrl+Y', action: 'Повторить' },
-    { keys: 'Ctrl+S', action: 'Сохранить проект в файл JSON' },
-    { keys: 'H, F1', action: 'Эта справка' },
-  ];
-  const keyboard: Row[] = [
+  ]);
+  const file = $derived<Row[]>([
+    { keys: shortcutLabel('undo'), action: 'Отменить' },
+    { keys: shortcutLabel('redo'), action: 'Повторить' },
+    { keys: shortcutLabel('save'), action: 'Сохранить проект в файл JSON' },
+    { keys: shortcutLabel('help'), action: 'Эта справка' },
+    { keys: shortcutLabel('temporary-picker'), action: 'Временная пипетка при удержании' },
+  ]);
+  const keyboard = $derived<Row[]>([
+    {
+      keys: Array.from({ length: 9 }, (_, index) => shortcutLabel(`brush-size:${index + 1}`)).join(', '),
+      action: 'Размер кисти, px',
+    },
     { keys: 'Tab', action: 'Перейти на холст' },
     { keys: '← ↑ → ↓', action: 'Двигать курсор на один пиксель (с Shift — на 8)' },
     { keys: 'Enter', action: 'Начать штрих, повторное нажатие — закончить (Shift+Enter — дополнительным цветом)' },
     { keys: 'Escape', action: 'Отменить текущий штрих целиком' },
-  ];
+  ]);
 </script>
 
 <svelte:window onkeydown={onKeydown} />
@@ -75,7 +84,6 @@
           {#each tools as tool (tool.id)}
             <div><dt><span class="kbd">{tool.hotkeyLabel}</span></dt><dd>{tool.label}</dd></div>
           {/each}
-          <div><dt><span class="kbd">1</span>–<span class="kbd">9</span></dt><dd>Размер кисти, px</dd></div>
         </dl>
 
         <h3>Цвета</h3>

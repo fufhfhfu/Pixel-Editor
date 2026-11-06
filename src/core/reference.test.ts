@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { PixelBuffer } from './state';
-import { applyReferencesToBuffer, referenceAtPoint, sampleReferenceColor, type ReferenceImage } from './reference';
+import {
+  MAX_PROJECT_REFERENCES,
+  MAX_REFERENCE_TOTAL_PIXELS,
+  applyReferencesToBuffer,
+  referenceAtPoint,
+  sampleReferenceColor,
+  type ReferenceImage,
+} from './reference';
 
 function reference(overrides: Partial<ReferenceImage> = {}): ReferenceImage {
   return {
@@ -21,6 +28,11 @@ function reference(overrides: Partial<ReferenceImage> = {}): ReferenceImage {
 }
 
 describe('референсы', () => {
+  it('повышает рабочие лимиты, сохраняя конечные верхние границы', () => {
+    expect(MAX_PROJECT_REFERENCES).toBe(32);
+    expect(MAX_REFERENCE_TOTAL_PIXELS).toBe(4_194_304);
+  });
+
   it('сэмплирует исходный пиксель с учётом позиции и масштаба', () => {
     const image = reference({ scale: 2 });
     expect(sampleReferenceColor(image, 10.5, 20.5)).toEqual({ r: 255, g: 0, b: 0, a: 255 });

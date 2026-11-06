@@ -5,6 +5,7 @@ import {
   base64ToBytes,
   bytesToBase64,
   parseProject,
+  parseProjectMetadataJson,
   serializeProject,
   type ProjectData,
 } from './project';
@@ -17,6 +18,7 @@ import {
 } from './storage';
 import { createLayerEffect } from './effects';
 import { createTilemap, sliceTileAtlas } from './tilemap';
+import { createBrushDefinition } from './tools/brushLibrary';
 
 function sample(): ProjectData {
   const pixels = new Uint8ClampedArray(5 * 4 * 4);
@@ -36,6 +38,68 @@ function sample(): ProjectData {
 }
 
 describe('проект JSON', () => {
+  it('сохраняет кисти и расширяемые метаданные в версии 10', () => {
+    const project: ProjectData = {
+      ...sample(),
+      brushes: [createBrushDefinition('Кисть проекта', 3, 'circle', 'custom')],
+      metadata: {
+        title: 'Пиксельный персонаж',
+        custom: { author: 'Artist', tags: ['sprite', 'v10'], settings: [true, null, 3] },
+      },
+    };
+
+    const serialized = serializeProject(project);
+    const restored = parseProject(serialized);
+
+    expect(JSON.parse(serialized).version).toBe(10);
+    expect(restored.brushes).toEqual(project.brushes);
+    expect(restored.metadata).toEqual(project.metadata);
+  });
+
+  it('сохраняет пользовательские палитры и выбранный цветовой режим в версии 11', () => {
+    const project: ProjectData = {
+      ...sample(),
+      paletteId: 'custom-test-palette',
+      customPalettes: [{
+        id: 'custom-test-palette',
+        name: 'Тестовая',
+        colors: [{ r: 12, g: 34, b: 56, a: 255 }, { r: 78, g: 90, b: 123, a: 255 }],
+      }],
+    };
+    const json = serializeProject(project);
+    const restored = parseProject(json);
+    expect(JSON.parse(json).version).toBe(11);
+    expect(restored.customPalettes).toEqual(project.customPalettes);
+    expect(restored.paletteId).toBe(project.paletteId);
+  });
+
+  it('проверяет метаданные JSON до применения', () => {
+    expect(parseProjectMetadataJson('{"title":"Sprite","tags":["game"]}')).toEqual({
+      title: 'Sprite',
+      tags: ['game'],
+    });
+    expect(() => parseProjectMetadataJson('[]')).toThrow(/объект/i);
+    expect(() => parseProjectMetadataJson('{"constructor":true}')).toThrow(/метаданных/i);
+  });
+
+  it('отклоняет повреждённые кисти и небезопасные метаданные проекта', () => {
+    const valid = JSON.parse(serializeProject({
+      ...sample(),
+      brushes: [createBrushDefinition('Valid', 2)],
+      metadata: { title: 'Valid' },
+    }));
+    const invalidBrushes = structuredClone(valid);
+    invalidBrushes.brushes[0].mask = [1];
+    expect(() => parseProject(JSON.stringify(invalidBrushes))).toThrow(ProjectFormatError);
+
+    const invalidMetadata = structuredClone(valid);
+    invalidMetadata.metadata = JSON.parse('{"__proto__":{"polluted":true}}');
+    expect(() => parseProject(JSON.stringify(invalidMetadata))).toThrow(/метаданных/i);
+
+    expect(() => serializeProject({ ...sample(), metadata: { value: Number.POSITIVE_INFINITY } }))
+      .toThrow(/метаданных/i);
+  });
+
   it('сохранение и загрузка без потерь', () => {
     const p = sample();
     const q = parseProject(serializeProject(p));
@@ -608,5 +672,14 @@ describe('автосохранение', () => {
       removeItem() {},
     };
     expect(loadAutosave(closed).error).toMatch(/недоступно/);
+  });
+
+  it('считает запись несохранённой, если localStorage не подтверждает сохранённые байты', () => {
+    const storage: KeyValueStorage = {
+      getItem: () => null,
+      setItem() {},
+      removeItem() {},
+    };
+    expect(saveAutosave(storage, sample())).toBe(false);
   });
 });

@@ -277,7 +277,7 @@ export class AutosaveRepository {
   private writeLegacy(serialized: string): boolean {
     try {
       this.legacyStorage?.setItem(AUTOSAVE_KEY, serialized);
-      return this.legacyStorage !== null;
+      return this.legacyStorage?.getItem(AUTOSAVE_KEY) === serialized;
     } catch {
       return false;
     }

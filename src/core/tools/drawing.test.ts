@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { PixelBuffer, type RGBA } from '../state';
-import { floodFill } from './floodFill';
+import { floodFill, floodFillAsync } from './floodFill';
+import { computeFloodFillOutput, type FloodFillWorkerRequest } from './floodFillWorker';
 import { applyDither, ditherThreshold, paintGradient, parseCustomDitherPattern } from './paintEffects';
 import { drawEllipse, drawPolygon, drawTriangle } from './shapes';
 import { isPixelPerfectCorner } from './draw';
@@ -38,6 +39,114 @@ describe('Pixel Perfect', () => {
 });
 
 describe('Bucket fill options', () => {
+  it('computes a worker result without mutating the source buffer', () => {
+    const source = new PixelBuffer(2, 1);
+    source.setPixel(0, 0, RED);
+    source.setPixel(1, 0, RED);
+    const request: FloodFillWorkerRequest = {
+      width: 2,
+      height: 1,
+      x: 0,
+      y: 0,
+      color: GREEN,
+      options: {},
+      pixels: source.data.slice().buffer,
+      samplePixels: source.data.slice().buffer,
+      alphaLock: false,
+    };
+    const result = computeFloodFillOutput(request);
+    expect(Array.from(result)).toEqual([
+      GREEN.r, GREEN.g, GREEN.b, GREEN.a,
+      GREEN.r, GREEN.g, GREEN.b, GREEN.a,
+    ]);
+    expect(source.getPixel(0, 0)).toEqual(RED);
+  });
+
+  it('applies worker results in batches while preserving selection constraints', async () => {
+    class FakeWorker {
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onerror: ((event: ErrorEvent) => void) | null = null;
+      onmessageerror: (() => void) | null = null;
+      terminated = false;
+
+      postMessage(message: FloodFillWorkerRequest): void {
+        const pixels = computeFloodFillOutput(message);
+        queueMicrotask(() => this.onmessage?.({ data: { pixels: pixels.buffer } } as MessageEvent));
+      }
+
+      terminate(): void {
+        this.terminated = true;
+      }
+    }
+
+    const buffer = new PixelBuffer(3, 1);
+    buffer.setClipMask(Uint8Array.from([1, 0, 1]));
+    const worker = new FakeWorker();
+    const result = await floodFillAsync(buffer, 0, 0, GREEN, {
+      contiguous: false,
+      workerFactory: () => worker as unknown as Worker,
+    });
+    expect(result).toBe(true);
+    expect(buffer.getPixel(0, 0)).toEqual(GREEN);
+    expect(buffer.getPixel(1, 0)?.a).toBe(0);
+    expect(buffer.getPixel(2, 0)).toEqual(GREEN);
+    expect(worker.terminated).toBe(true);
+  });
+
+  it('matches a reference flood traversal on randomized masks and both connectivities', () => {
+    let random = 0x5eed1234;
+    const nextRandom = () => {
+      random = (Math.imul(random, 1664525) + 1013904223) >>> 0;
+      return random / 0x1_0000_0000;
+    };
+
+    for (const connectivity of [4, 8] as const) {
+      for (let trial = 0; trial < 30; trial++) {
+        const width = 17;
+        const height = 13;
+        const actual = new PixelBuffer(width, height);
+        const expected = new PixelBuffer(width, height);
+        const selection = new Uint8Array(width * height);
+        for (let pixel = 0; pixel < width * height; pixel++) {
+          const color = nextRandom() < 0.62 ? RED : BLUE;
+          actual.setPixel(pixel % width, Math.floor(pixel / width), color);
+          expected.setPixel(pixel % width, Math.floor(pixel / width), color);
+          selection[pixel] = nextRandom() < 0.84 ? 1 : 0;
+        }
+        actual.takeDirty();
+        expected.takeDirty();
+        const startX = Math.floor(nextRandom() * width);
+        const startY = Math.floor(nextRandom() * height);
+        const start = startY * width + startX;
+        const startColor = actual.getPixel(startX, startY)!;
+        const visited = new Uint8Array(width * height);
+        const queue = [start];
+        const offsets = connectivity === 4
+          ? [[0, -1], [-1, 0], [1, 0], [0, 1]]
+          : [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]];
+        let head = 0;
+        while (head < queue.length) {
+          const pixel = queue[head++]!;
+          if (visited[pixel]) continue;
+          visited[pixel] = 1;
+          const px = pixel % width;
+          const py = Math.floor(pixel / width);
+          if (selection[pixel] === 0 || expected.getPixel(px, py)!.r !== startColor.r) continue;
+          expected.setPixel(px, py, GREEN);
+          for (const [dx, dy] of offsets) {
+            const nx = px + dx!;
+            const ny = py + dy!;
+            if (nx >= 0 && nx < width && ny >= 0 && ny < height) queue.push(ny * width + nx);
+          }
+        }
+
+        const expectedResult = expected.data.some((value, index) => value !== actual.data[index]);
+        expect(floodFill(actual, startX, startY, GREEN, { selection, connectivity })).toBe(expectedResult);
+        expect(actual.data).toEqual(expected.data);
+      }
+    }
+  });
+
   it('global fill replaces separated matching pixels but leaves other colors alone', () => {
     const b = new PixelBuffer(4, 4);
     b.setPixel(0, 0, RED);

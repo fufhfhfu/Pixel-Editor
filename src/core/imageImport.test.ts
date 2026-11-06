@@ -42,6 +42,20 @@ describe('импорт растровых изображений', () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
+  it('проверяет дополнительный лимит пикселей до выделения canvas и закрывает bitmap', async () => {
+    const close = vi.fn();
+    const getImageData = vi.fn();
+    vi.stubGlobal('createImageBitmap', vi.fn(async () => ({ width: 2, height: 2, close })));
+    vi.stubGlobal('document', {
+      createElement: vi.fn(() => ({ getContext: vi.fn(() => ({ getImageData })) })),
+    });
+
+    await expect(decodeRasterImage(new File(['image'], 'ref.png'), { maxPixels: 3 }))
+      .rejects.toThrow(/лимит пикселей/i);
+    expect(getImageData).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
   it('отклоняет изображения, превышающие безопасный размер холста, вместо их обрезки', () => {
     expect(() => fitImageDimensions(3000, 2000)).toThrow(/слишком велико для холста/);
   });

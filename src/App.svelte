@@ -7,6 +7,7 @@
   import ReferencesPanel from './components/ReferencesPanel.svelte';
   import TilemapEditor from './components/TilemapEditor.svelte';
   import PalettePanel from './components/PalettePanel.svelte';
+  import ProjectMetadataPanel from './components/ProjectMetadataPanel.svelte';
   import ProjectBar from './components/ProjectBar.svelte';
   import StatusBar from './components/StatusBar.svelte';
   import Toast from './components/Toast.svelte';
@@ -52,12 +53,15 @@
   import {
     DEFAULT_PALETTE_ID,
     PALETTES,
+    MAX_CUSTOM_PALETTES,
     constrainColor,
     filterToPalette,
     getPalette,
     nearestPaletteColor,
+    parseCustomPalettes,
     pushRecentColor,
     type ColorSlot,
+    type Palette,
   } from './core/palette';
   import {
     MAX_PROJECT_JSON_LENGTH,
@@ -70,6 +74,7 @@
     parseProject,
     serializeProject,
     type ProjectData,
+    type ProjectMetadata,
   } from './core/project';
   import {
     loadEditorPreferences,
@@ -88,6 +93,16 @@
     type GridMode,
     type ThemePreference,
   } from './core/preferences';
+  import {
+    findShortcutConflicts,
+    formatShortcutSequence,
+    getTemporaryActionForCode,
+    loadShortcutMap,
+    resolveShortcutEvent,
+    saveShortcutMap,
+    type ShortcutMap,
+    type ShortcutSequence,
+  } from './core/hotkeys';
   import {
     AutosaveRepository,
     pickSaveFileHandle,
@@ -147,6 +162,7 @@
     type DrawingSettings,
     type ToolId,
   } from './core/tools';
+  import { floodFillAsync } from './core/tools/floodFill';
   import type { PixelPos, ViewState } from './core/viewport';
   import type { TilemapData } from './core/tilemap';
   import {
@@ -195,6 +211,21 @@
     }
   }
 
+  function mergeBrushDefinitions(
+    existing: readonly BrushDefinition[],
+    incoming: readonly BrushDefinition[],
+  ): BrushDefinition[] {
+    const merged = [...existing];
+    for (const brush of incoming) {
+      const byId = merged.findIndex((entry) => entry.id === brush.id);
+      const byName = merged.findIndex((entry) => entry.name.toLowerCase() === brush.name.toLowerCase());
+      const index = byId >= 0 ? byId : byName;
+      if (index >= 0) merged[index] = brush;
+      else if (merged.length < 64) merged.push(brush);
+    }
+    return merged;
+  }
+
   function saveBrush(name: string, type: BrushType): void {
     const brush = createBrushDefinition(name, brushSize, brushShape, type);
     const existing = brushLibrary.findIndex((entry) => entry.name.toLowerCase() === brush.name.toLowerCase());
@@ -224,15 +255,7 @@
   }
 
   function importBrushLibrary(incoming: readonly BrushDefinition[]): void {
-    const merged = [...brushLibrary];
-    for (const brush of incoming) {
-      const byId = merged.findIndex((entry) => entry.id === brush.id);
-      const byName = merged.findIndex((entry) => entry.name.toLowerCase() === brush.name.toLowerCase());
-      const index = byId >= 0 ? byId : byName;
-      if (index >= 0) merged[index] = brush;
-      else if (merged.length < 64) merged.push(brush);
-    }
-    brushLibrary = merged;
+    brushLibrary = mergeBrushDefinitions(brushLibrary, incoming);
     persistBrushLibrary();
     notify(`Импортировано кистей: ${incoming.length}.`);
   }
@@ -315,10 +338,13 @@
 
   const storage = getBrowserStorage();
   const preferences = loadEditorPreferences(storage);
+  const savedShortcuts = loadShortcutMap(storage);
   const savedWorkspace = loadWorkspaceLayout(storage);
   const start = untrack(() => initialProject);
   const startupStorageMode = untrack(() => initialStorageMode);
-  const startPalette = getPalette(start?.paletteId ?? DEFAULT_PALETTE_ID);
+  const startPalette = PALETTES.find((entry) => entry.id === start?.paletteId) ??
+    start?.customPalettes?.find((entry) => entry.id === start?.paletteId) ??
+    getPalette(DEFAULT_PALETTE_ID);
   const animationFramesByLayer = new Map<string, AnimationFrame[]>();
 
   function getAnimationLayerKey(boardId: string, layerId: string): string {
@@ -496,15 +522,19 @@
   let helpOpen = $state(false);
   let helpTrigger = $state<HTMLElement | null>(null);
   let settingsOpen = $state(false);
-  let settingsTab = $state<'general' | 'background'>('general');
+  let settingsTab = $state<'general' | 'background' | 'hotkeys'>('general');
   let settingsTrigger = $state<HTMLElement | null>(null);
   let theme = $state<ThemePreference>(preferences.theme);
+  let shortcuts = $state.raw<ShortcutMap>(savedShortcuts.shortcuts);
+  let pendingShortcutSequence = $state.raw<ShortcutSequence>([]);
+  let shortcutSequenceTimer: ReturnType<typeof setTimeout> | undefined;
   const saveFilePickerSupported = supportsSaveFilePicker();
   let canvasApi = $state.raw<ReturnType<typeof Canvas>>();
   let boardSequence = 1;
   let layerSequence = 1;
 
   let activeToolId = $state<ToolId>('pencil');
+  let fillInProgress = $state(false);
   let selectionMask = $state.raw<SelectionMask | null>(null);
   let selectionMode = $state<SelectionMode | null>(null);
   let selectionOperation = $state<SelectionOperation>('replace');
@@ -520,7 +550,8 @@
   let brushShape = $state<BrushShape>('square');
   let brushOpacity = $state(100);
   const BRUSH_LIBRARY_KEY = 'pixel-editor:brush-library';
-  let brushLibrary = $state.raw<BrushDefinition[]>([]);
+  let brushLibrary = $state.raw<BrushDefinition[]>(start?.brushes?.map((brush) => ({ ...brush, mask: [...brush.mask] })) ?? []);
+  let projectMetadata = $state.raw<ProjectMetadata>(start?.metadata ?? {});
   let brushPanelName = $state('Моя кисть');
   let brushPanelType = $state<BrushType>('pencil');
   let selectedBrushId = $state('');
@@ -550,6 +581,7 @@
   });
 
   let paletteId = $state(start?.paletteId ?? DEFAULT_PALETTE_ID);
+  let customPalettes = $state.raw<Palette[]>(start?.customPalettes ?? []);
   let freeColor = $state(start?.freeColor ?? false);
   let primary = $state.raw<RGBA>(start?.primary ?? nearestPaletteColor(startPalette, START_PRIMARY));
   let secondary = $state.raw<RGBA>(start?.secondary ?? nearestPaletteColor(startPalette, START_SECONDARY));
@@ -585,6 +617,13 @@
   let autosaveRevision = 0;
 
   const activeTool = $derived(getTool(activeToolId));
+  function shortcutLabel(actionId: string): string {
+    return (shortcuts[actionId] ?? []).map(formatShortcutSequence).join('; ') || '—';
+  }
+  const keyboardTools = $derived(TOOLS.map((tool) => ({
+    ...tool,
+    hotkeyLabel: shortcutLabel(`tool:${tool.id}`),
+  })));
   const activeBoard = $derived(boards.find((board) => board.id === activeBoardId) ?? boards[0]!);
   const activeLayers = $derived(activeBoard.layers);
   const historyEntries = $derived(undoTimeline.slice(-10).reverse().map((entry) => {
@@ -595,7 +634,8 @@
     if (entry.kind === 'references') return 'Изменение референсов';
     return entry.action.kind === 'add' ? 'Добавление холста' : 'Перемещение холстов';
   }));
-  const palette = $derived(getPalette(paletteId));
+  const allPalettes = $derived([...PALETTES, ...customPalettes]);
+  const palette = $derived(allPalettes.find((entry) => entry.id === paletteId) ?? getPalette(DEFAULT_PALETTE_ID));
   // В режиме палитры показываем только недавние цвета, которые в ней есть
   const visibleRecent = $derived(freeColor ? recent : filterToPalette(recent, palette));
 
@@ -902,7 +942,7 @@
       { label: 'Показать Timeline', command: 'toggle-timeline' },
     ] },
     { label: 'Инструменты', items: TOOLS.map((tool) => ({
-      label: `${tool.label} (${tool.hotkeyLabel})`,
+      label: `${tool.label} (${shortcutLabel(`tool:${tool.id}`)})`,
       command: `tool:${tool.id}`,
     })) },
     { label: 'Окно', items: [
@@ -938,7 +978,10 @@
       secondary,
       recent,
       references,
+      customPalettes: customPalettes.length ? customPalettes : undefined,
       tilemap: tilemap ?? undefined,
+      brushes: brushLibrary,
+      metadata: projectMetadata,
       canvases: boards.map((board) => ({
         id: board.id,
         x: board.x,
@@ -1357,6 +1400,8 @@
     void secondary;
     void recent;
     void references;
+    void customPalettes;
+    void projectMetadata;
     if (!autosaveArmed) {
       autosaveArmed = true;
       return;
@@ -1367,6 +1412,7 @@
   onDestroy(() => {
     clearTimeout(autosaveTimer);
     clearTimeout(noticeTimer);
+    if (shortcutSequenceTimer !== undefined) clearTimeout(shortcutSequenceTimer);
     clearInterval(animationTimer);
     if (workspaceSaveTimer !== undefined) {
       clearTimeout(workspaceSaveTimer);
@@ -1536,6 +1582,37 @@
       scheduleAutosave();
     }
     refreshComposite(activeBoardId, getActiveLayer());
+  }
+
+  async function fillAt(x: number, y: number, slot: ColorSlot): Promise<void> {
+    if (fillInProgress) return;
+    fillInProgress = true;
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+    let historyStarted = false;
+    try {
+      const color = slot === 'primary' ? primary : secondary;
+      rememberColor(color);
+      beginStroke();
+      historyStarted = true;
+      await floodFillAsync(buffer, x, y, color, {
+        contiguous: drawingSettings.fillContiguous,
+        tolerance: drawingSettings.fillTolerance,
+        connectivity: drawingSettings.fillConnectivity,
+        protectAlpha: drawingSettings.fillProtectAlpha,
+        opacity: brushOpacity / 100,
+        selection: selectionMask?.data,
+        sampleBuffer: drawingSettings.sampleMerged ? activeBoard.buffer : undefined,
+      });
+      endStroke('commit');
+      historyStarted = false;
+    } catch (error) {
+      if (historyStarted) endStroke('rollback');
+      notify(error instanceof Error ? error.message : 'Не удалось выполнить заливку.', 'error');
+    } finally {
+      fillInProgress = false;
+      canvasApi?.requestRender();
+    }
   }
 
   /** Применяет результат undo/redo к указанному холсту. */
@@ -1731,7 +1808,20 @@
     }
   }
 
-  function openSettings(tab: 'general' | 'background', trigger: HTMLElement): void {
+  function setShortcuts(next: ShortcutMap): void {
+    if (findShortcutConflicts(next).length) {
+      notify('Не удалось применить схему: сочетания клавиш конфликтуют.', 'error');
+      return;
+    }
+    spaceHeld = false;
+    temporaryPicker = false;
+    shortcuts = next;
+    if (!saveShortcutMap(storage, next)) {
+      notify('Сочетания изменены, но не удалось сохранить их в локальном хранилище.', 'error');
+    }
+  }
+
+  function openSettings(tab: 'general' | 'background' | 'hotkeys', trigger: HTMLElement): void {
     settingsTab = tab;
     settingsTrigger = trigger;
     settingsOpen = true;
@@ -2241,12 +2331,13 @@
     }
 
     try {
-      const image = await decodeRasterImage(file);
       const totalPixels = references.reduce((sum, reference) => sum + reference.width * reference.height, 0);
-      if (totalPixels + image.width * image.height > MAX_REFERENCE_TOTAL_PIXELS) {
-        notify('Общая площадь изображений референсов превышает допустимый лимит.', 'error');
+      const availablePixels = MAX_REFERENCE_TOTAL_PIXELS - totalPixels;
+      if (availablePixels < 1) {
+        notify('Достигнут общий лимит пикселей референсов. Удалите или уменьшите один из референсов.', 'error');
         return;
       }
+      const image = await decodeRasterImage(file, { maxPixels: availablePixels });
 
       const board = boards.find((entry) => entry.id === activeBoardId)!;
       const scale = Math.max(MIN_REFERENCE_SCALE, Math.min(1, 256 / image.width, 256 / image.height));
@@ -2352,12 +2443,58 @@
 
   function selectPalette(id: string): void {
     if (id === paletteId) return;
-    const next = getPalette(id);
+    const next = allPalettes.find((entry) => entry.id === id);
+    if (!next) {
+      notify('Не удалось выбрать: палитра не найдена.', 'error');
+      return;
+    }
     paletteId = id;
     if (!freeColor) {
       primary = nearestPaletteColor(next, primary);
       secondary = nearestPaletteColor(next, secondary);
     }
+  }
+
+  function createProjectPalette(name: string, colors: RGBA[]): void {
+    if (customPalettes.length >= MAX_CUSTOM_PALETTES) {
+      notify('Достигнут лимит пользовательских палитр.', 'error');
+      return;
+    }
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
+    const baseId = `custom-${slug || 'palette'}-${Date.now().toString(36)}`;
+    let id = baseId;
+    let suffix = 2;
+    while (customPalettes.some((entry) => entry.id === id)) id = `${baseId}-${suffix++}`;
+    try {
+      const nextPalettes = parseCustomPalettes([...customPalettes, { id, name, colors }]);
+      const created = nextPalettes.find((entry) => entry.id === id)!;
+      customPalettes = nextPalettes;
+      paletteId = id;
+      if (!freeColor) {
+        primary = nearestPaletteColor(created, primary);
+        secondary = nearestPaletteColor(created, secondary);
+      }
+      notify(`Палитра «${name}» добавлена в проект.`);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Не удалось создать палитру.', 'error');
+    }
+  }
+
+  function deleteProjectPalette(id: string): void {
+    customPalettes = customPalettes.filter((entry) => entry.id !== id);
+    if (paletteId === id) {
+      paletteId = DEFAULT_PALETTE_ID;
+      if (!freeColor) {
+        const defaultPalette = getPalette(DEFAULT_PALETTE_ID);
+        primary = nearestPaletteColor(defaultPalette, primary);
+        secondary = nearestPaletteColor(defaultPalette, secondary);
+      }
+    }
+    notify('Пользовательская палитра удалена из проекта.');
+  }
+
+  function updateProjectMetadata(metadata: ProjectMetadata): void {
+    projectMetadata = metadata;
   }
 
   function setFreeColor(enabled: boolean): void {
@@ -2463,7 +2600,7 @@
 
     try {
       const image = await decodeRasterImage(file);
-      const project = rasterImageToProject(image, { paletteId, freeColor, primary, secondary, recent });
+      const project = rasterImageToProject(image, { paletteId, freeColor, primary, secondary, recent, customPalettes });
       pending = { kind: 'image', project, fileName: file.name };
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Не удалось декодировать изображение.', 'error');
@@ -2572,12 +2709,18 @@
     redoTimeline.length = 0;
     history = histories.get(getHistoryKey(activeBoardId, activeBoard.layers.find((layer) => layer.id === activeLayerId)!))!;
     paletteId = project.paletteId;
+    customPalettes = project.customPalettes ?? [];
     freeColor = project.freeColor;
     primary = project.primary;
     secondary = project.secondary;
     recent = project.recent;
     references = project.references?.map((reference) => ({ ...reference })) ?? [];
     tilemap = project.tilemap ?? null;
+    projectMetadata = project.metadata ?? {};
+    if (project.brushes !== undefined) {
+      brushLibrary = mergeBrushDefinitions(brushLibrary, project.brushes);
+      persistBrushLibrary();
+    }
     stopAnimationPlayback();
     selectedReferenceId = references[0]?.id ?? null;
     syncHistory();
@@ -2633,7 +2776,7 @@
       refreshComposite(activeBoardId, getActiveLayer());
       canvasApi?.requestRender();
       scheduleAutosave();
-      notify('Холст очищен. Действие можно отменить сочетанием Ctrl+Z.');
+      notify(`Холст очищен. Действие можно отменить сочетанием ${shortcutLabel('undo')}.`);
     } else if (action.kind === 'resize') {
       const currentBoard = boards.find((board) => board.id === activeBoardId)!;
       const beforeLayers = currentBoard.layers;
@@ -2699,7 +2842,7 @@
     if (action.kind === 'clear') {
       return {
         title: 'Очистить холст?',
-        message: 'Все пиксели будут удалены. Очистку можно отменить сочетанием Ctrl+Z.',
+        message: `Все пиксели будут удалены. Очистку можно отменить сочетанием ${shortcutLabel('undo')}.`,
         confirmText: 'Очистить',
       };
     }
@@ -2726,7 +2869,7 @@
     const crops = action.width < buffer.width || action.height < buffer.height;
     let message = `Размер сетки изменится с ${from} на ${to}. Содержимое сохранится от левого верхнего угла.`;
     if (crops) message += ' Всё, что не поместится в новый размер, будет обрезано.';
-    message += ' Изменение можно отменить (Ctrl+Z).';
+    message += ` Изменение можно отменить (${shortcutLabel('undo')}).`;
     return { title: 'Изменить размер сетки?', message, confirmText: 'Изменить' };
   }
 
@@ -2741,104 +2884,88 @@
     );
   }
 
-  // Горячие клавиши по e.code: работают независимо от раскладки (в том числе русской)
   function onKeyDown(e: KeyboardEvent): void {
-    if (pending || helpOpen || settingsOpen || isTypingTarget(e.target)) return;
+    if (fillInProgress || pending || helpOpen || settingsOpen || isTypingTarget(e.target)) return;
 
-    if (e.altKey) {
+    if (e.repeat) return;
+    const resolution = resolveShortcutEvent(shortcuts, pendingShortcutSequence, e);
+    if (shortcutSequenceTimer !== undefined) {
+      clearTimeout(shortcutSequenceTimer);
+      shortcutSequenceTimer = undefined;
+    }
+    pendingShortcutSequence = resolution.pending;
+    if (resolution.pending.length) {
+      shortcutSequenceTimer = setTimeout(() => {
+        pendingShortcutSequence = [];
+        shortcutSequenceTimer = undefined;
+      }, 1200);
+      e.preventDefault();
+      return;
+    }
+
+    const action = resolution.action;
+    if (!action) return;
+    e.preventDefault();
+
+    if (action === 'temporary-picker') {
       temporaryPicker = true;
       return;
     }
-
-    if ((e.ctrlKey || e.metaKey) && !e.altKey) {
-      if (e.code === 'KeyZ') {
-        e.preventDefault();
-        if (e.shiftKey) redo();
-        else undo();
-      } else if (e.code === 'KeyY') {
-        e.preventDefault();
-        redo();
-      } else if (e.code === 'KeyS') {
-        e.preventDefault();
-        if (!e.repeat) saveProject();
-      } else if (e.code === 'KeyC') {
-        e.preventDefault();
-        runSelectionAction('copy');
-      } else if (e.code === 'KeyX') {
-        e.preventDefault();
-        runSelectionAction('cut');
-      } else if (e.code === 'KeyV') {
-        e.preventDefault();
-        runSelectionAction('paste');
-      }
-      return;
-    }
-    if (e.ctrlKey || e.metaKey || e.altKey) return;
-
-    if (e.code === 'Space') {
-      // preventDefault: не прокручивать страницу и не нажимать сфокусированную кнопку
-      e.preventDefault();
+    if (action === 'pan') {
       spaceHeld = true;
       return;
     }
-
     if (e.repeat) return;
 
-    if (e.code === 'KeyG') {
-      toggleGrid();
+    if (action.startsWith('tool:')) {
+      const tool = TOOLS.find((entry) => `tool:${entry.id}` === action);
+      if (tool) selectTool(tool.id);
       return;
     }
-    if (e.code === 'KeyF') {
-      fitCanvas();
-      return;
-    }
-    if (e.code === 'KeyX') {
-      swapColors();
-      return;
-    }
-    if (e.code === 'KeyH' || e.code === 'F1') {
-      e.preventDefault();
-      helpOpen = true;
-      return;
-    }
-    if (e.code === 'Equal' || e.code === 'NumpadAdd') {
-      canvasApi?.zoomBy(1);
-      return;
-    }
-    if (e.code === 'Minus' || e.code === 'NumpadSubtract') {
-      canvasApi?.zoomBy(-1);
-      return;
-    }
-
-    const tool = TOOLS.find((t) => t.hotkeyCode === e.code);
-    if (tool) {
-      selectTool(tool.id);
-      return;
-    }
-
-    const digit = /^(?:Digit|Numpad)(\d)$/.exec(e.code);
-    if (digit) {
-      const size = Number(digit[1]);
-      if (size >= MIN_BRUSH_SIZE && size <= MAX_BRUSH_SIZE) setBrushSize(size);
+    switch (action) {
+      case 'undo': undo(); break;
+      case 'redo': redo(); break;
+      case 'save': saveProject(); break;
+      case 'copy': runSelectionAction('copy'); break;
+      case 'cut': runSelectionAction('cut'); break;
+      case 'paste': runSelectionAction('paste'); break;
+      case 'swap-colors': swapColors(); break;
+      case 'toggle-grid': toggleGrid(); break;
+      case 'fit': fitCanvas(); break;
+      case 'help':
+        helpTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        helpOpen = true;
+        break;
+      case 'zoom-in': canvasApi?.zoomBy(1); break;
+      case 'zoom-out': canvasApi?.zoomBy(-1); break;
+      default: {
+        const brushSizeMatch = /^brush-size:(\d)$/.exec(action);
+        if (brushSizeMatch) setBrushSize(Number(brushSizeMatch[1]));
+      }
     }
   }
 
   function onKeyUp(e: KeyboardEvent): void {
-    if (!e.altKey) temporaryPicker = false;
-    if (e.code !== 'Space') return;
-    spaceHeld = false;
-    if (!pending && !helpOpen && !settingsOpen && !isTypingTarget(e.target)) e.preventDefault();
+    const action = getTemporaryActionForCode(shortcuts, e.code);
+    if (action === 'temporary-picker') temporaryPicker = false;
+    if (action === 'pan') spaceHeld = false;
+    if (action && !pending && !helpOpen && !settingsOpen && !isTypingTarget(e.target)) e.preventDefault();
   }
 
   function onWindowBlur(): void {
     spaceHeld = false;
     temporaryPicker = false;
+    pendingShortcutSequence = [];
+    if (shortcutSequenceTimer !== undefined) clearTimeout(shortcutSequenceTimer);
+    shortcutSequenceTimer = undefined;
   }
 
   if (storage) {
     try {
       const savedBrushes = storage.getItem(BRUSH_LIBRARY_KEY);
-      if (savedBrushes) brushLibrary = parseBrushLibrary(savedBrushes);
+      if (savedBrushes) {
+        brushLibrary = mergeBrushDefinitions(parseBrushLibrary(savedBrushes), untrack(() => brushLibrary));
+      }
     } catch (error) {
       brushLibraryError = `Библиотека кистей повреждена и не загружена: ${error instanceof Error ? error.message : String(error)}`;
     }
@@ -2847,6 +2974,7 @@
   }
 
   if (preferences.error) notify(preferences.error, 'error');
+  if (savedShortcuts.error) notify(savedShortcuts.error, 'error');
   if (savedWorkspace.error) notify(savedWorkspace.error, 'error');
   if (brushLibraryError) notify(brushLibraryError, 'error');
 </script>
@@ -2868,6 +2996,10 @@
     {availableExportScales}
     exportWidth={buffer.width * exportScale}
     exportHeight={buffer.height * exportScale}
+    undoShortcut={shortcutLabel('undo')}
+    redoShortcut={shortcutLabel('redo')}
+    saveShortcut={shortcutLabel('save')}
+    helpShortcut={shortcutLabel('help')}
     onundo={undo}
     onredo={redo}
     onopen={importProjectFile}
@@ -2897,6 +3029,7 @@
     {symmetryX}
     {symmetryY}
     {customSizes}
+    undoShortcut={shortcutLabel('undo')}
     ontogglegrid={toggleGrid}
     ongridmode={setGridMode}
     ongridspacing={setGridSpacing}
@@ -2939,7 +3072,7 @@
     <div class="dock tool-dock" style:width="{workspaceLayout.toolsWidth}px">
     <ToolPanel
       panelWidth={workspaceLayout.toolsWidth}
-      tools={TOOLS}
+      tools={keyboardTools}
       {activeToolId}
       {brushSize}
       {brushShape}
@@ -3040,6 +3173,8 @@
         brushDefinition={brushLibrary.find((entry) => entry.id === selectedBrushId) ?? null}
         settings={drawingSettings}
         {temporaryPicker}
+        {fillInProgress}
+        onfill={(x, y, slot) => void fillAt(x, y, slot)}
         {selectionMask}
         previewSelection={selectionPreview?.selection ?? null}
         {selectionMode}
@@ -3100,7 +3235,8 @@
         {#if workspaceLayout.rightPanel === 'colors' || workspaceLayout.rightPanel === 'palette'}
           <PalettePanel
             panelWidth={workspaceLayout.paletteWidth}
-            palettes={PALETTES}
+            palettes={allPalettes}
+            customPaletteCount={customPalettes.length}
             {palette}
             {freeColor}
             {primary}
@@ -3110,6 +3246,8 @@
             onfreecolor={setFreeColor}
             onpick={setColor}
             onswap={swapColors}
+            oncreatepalette={createProjectPalette}
+            ondeletepalette={deleteProjectPalette}
           />
         {:else if workspaceLayout.rightPanel === 'layers' || workspaceLayout.rightPanel === 'properties'}
           {#if workspaceLayout.rightPanel === 'properties'}
@@ -3119,6 +3257,7 @@
               <p>Положение: {activeBoard.x}, {activeBoard.y}</p>
               <p>Активный слой: {getActiveLayer().name}</p>
               <p>Кадр: {activeFrameIndex + 1} / {animationFrames.length}</p>
+              <ProjectMetadataPanel metadata={projectMetadata} onapply={updateProjectMetadata} />
             </section>
           {/if}
           <LayersPanel
@@ -3270,6 +3409,11 @@
             <button type="button" onclick={() => void exportImage()}>Экспортировать</button>
           </section>
         {/if}
+        {#if pendingShortcutSequence.length > 0}
+          <div class="shortcut-sequence-hint" role="status" aria-live="polite">
+            {formatShortcutSequence(pendingShortcutSequence)} · ожидается продолжение
+          </div>
+        {/if}
       </div>
     </div>
     {/if}
@@ -3310,6 +3454,12 @@
     {saveStatus}
     {savedAt}
   />
+  {#if fillInProgress}
+    <div class="fill-overlay" role="status" aria-live="polite">
+      <span class="fill-spinner" aria-hidden="true"></span>
+      <span>Выполняется заливка. Редактор временно заблокирован.</span>
+    </div>
+  {/if}
 </div>
 
 {#if notice}
@@ -3317,7 +3467,7 @@
 {/if}
 
 {#if helpOpen}
-  <HelpDialog tools={TOOLS} returnFocusTo={helpTrigger} onclose={() => (helpOpen = false)} />
+  <HelpDialog tools={keyboardTools} {shortcuts} returnFocusTo={helpTrigger} onclose={() => (helpOpen = false)} />
 {/if}
 
 {#if settingsOpen}
@@ -3326,10 +3476,12 @@
   initialTab={settingsTab}
   {canvasBackground}
   {workspaceBackground}
+  {shortcuts}
   returnFocusTo={settingsTrigger}
   ontheme={setTheme}
   oncanvasbackground={setCanvasBackground}
   onworkspacebackground={setWorkspaceBackground}
+  onshortcuts={setShortcuts}
   onclose={() => (settingsOpen = false)}
 />
 {/if}
@@ -3357,6 +3509,48 @@
     display: flex;
     min-width: 0;
     min-height: 0;
+  }
+
+  .fill-overlay {
+    position: fixed;
+    z-index: 110;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    background: rgba(8, 10, 16, 0.62);
+    color: var(--text);
+    cursor: progress;
+  }
+
+  .fill-spinner {
+    width: 20px;
+    height: 20px;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: fill-spin 0.8s linear infinite;
+  }
+
+  .shortcut-sequence-hint {
+    position: fixed;
+    z-index: 100;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    max-width: calc(100vw - 24px);
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--panel);
+    color: var(--text);
+    box-shadow: 0 4px 16px #0005;
+    font: 12px var(--mono);
+  }
+
+  @keyframes fill-spin {
+    to { transform: rotate(360deg); }
   }
 
   .dock {

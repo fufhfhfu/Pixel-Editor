@@ -13,7 +13,15 @@
  * }
  */
 
-import { DEFAULT_PALETTE_ID, MAX_RECENT_COLORS, PALETTES, getPalette, nearestPaletteColor } from './palette';
+import {
+  DEFAULT_PALETTE_ID,
+  MAX_RECENT_COLORS,
+  PALETTES,
+  getPalette,
+  nearestPaletteColor,
+  parseCustomPalettes,
+  type Palette,
+} from './palette';
 import { CHANNELS, isValidCanvasSize, normalizeTransparent, type RGBA } from './state';
 import {
   DEFAULT_LAYER_EFFECTS,
@@ -39,16 +47,36 @@ import {
   MAX_FRAME_DURATION_MS,
   MIN_FRAME_DURATION_MS,
 } from './animation';
+import {
+  MAX_BRUSH_LIBRARY_SIZE,
+  parseBrushLibrary,
+  type BrushDefinition,
+} from './tools/brushLibrary';
 
 export const PROJECT_FORMAT = 'pixel-editor-project';
-export const PROJECT_VERSION = 9;
+export const PROJECT_VERSION = 11;
 export const MAX_PROJECT_CANVASES = 32;
 export const MAX_PROJECT_TOTAL_PIXELS = 4_194_304;
 export const MAX_PROJECT_ANIMATION_PIXELS = 16_777_216;
 export const MAX_PROJECT_LAYERS = 64;
 export const MAX_PROJECT_CANVAS_COORDINATE = 1_000_000;
+export const MAX_PROJECT_METADATA_LENGTH = 256 * 1024;
+const MAX_PROJECT_METADATA_DEPTH = 12;
+const MAX_PROJECT_METADATA_VALUES = 4096;
 /** Максимальный размер JSON проекта (символов), рассчитан на холст до 4 мегапикселей. */
 export const MAX_PROJECT_JSON_LENGTH = 32 * 1024 * 1024;
+
+export type ProjectMetadataValue =
+  | null
+  | boolean
+  | number
+  | string
+  | ProjectMetadataValue[]
+  | { [key: string]: ProjectMetadataValue };
+
+export interface ProjectMetadata {
+  [key: string]: ProjectMetadataValue;
+}
 
 export interface ProjectCanvasData {
   id: string;
@@ -100,6 +128,9 @@ export interface ProjectData {
   references?: ReferenceImage[];
   tilemap?: TilemapData;
   animationFrames?: ProjectAnimationFrameData[];
+  brushes?: BrushDefinition[];
+  metadata?: ProjectMetadata;
+  customPalettes?: Palette[];
 }
 
 /** Файл не является корректным проектом; message можно показывать пользователю. */
@@ -139,6 +170,24 @@ export function serializeProject(project: ProjectData): string {
   const references = project.references;
   const tilemap = project.tilemap;
   const animationFrames = project.animationFrames;
+  const brushes = project.brushes === undefined ? undefined : parseProjectBrushes(project.brushes);
+  const metadata = project.metadata;
+  let customPalettes: Palette[] | undefined;
+  if (project.customPalettes !== undefined) {
+    try {
+      customPalettes = parseCustomPalettes(project.customPalettes);
+    } catch (error) {
+      throw new ProjectFormatError(error instanceof Error ? error.message : 'Некорректные пользовательские палитры.');
+    }
+  }
+  const paletteIds = new Set([
+    ...PALETTES.map((entry) => entry.id),
+    ...(customPalettes ?? []).map((entry) => entry.id),
+  ]);
+  if (!paletteIds.has(project.paletteId)) {
+    throw new ProjectFormatError('В проекте выбрана неизвестная палитра.');
+  }
+  if (metadata !== undefined) validateProjectMetadata(metadata);
   const hasLayerAnimationFrames = canvases?.some((canvas) =>
     canvas.layers?.some((layer) => layer.animationFrames !== undefined),
   ) ?? false;
@@ -308,8 +357,12 @@ export function serializeProject(project: ProjectData): string {
   }
   const common = {
     format: PROJECT_FORMAT,
-    version: animationFrames !== undefined || hasLayerAnimationFrames
-      ? PROJECT_VERSION
+    version: customPalettes !== undefined
+      ? 11
+      : brushes !== undefined || metadata !== undefined
+      ? 10
+      : animationFrames !== undefined || hasLayerAnimationFrames
+      ? 9
       : tilemap !== undefined
       ? 8
       : canvases?.some((canvas) => canvas.layers?.some((layer) => (layer.filters?.length ?? 0) > 0))
@@ -319,6 +372,9 @@ export function serializeProject(project: ProjectData): string {
     palette: { id: project.paletteId, freeColor: project.freeColor },
     colors: { primary: colorToArray(project.primary), secondary: colorToArray(project.secondary) },
     recent: project.recent.map(colorToArray),
+    ...(brushes !== undefined ? { brushes } : {}),
+    ...(metadata !== undefined ? { metadata } : {}),
+    ...(customPalettes !== undefined ? { customPalettes } : {}),
   };
   if (canvases !== undefined) {
     const serialized = JSON.stringify({
@@ -402,6 +458,80 @@ export function serializeProject(project: ProjectData): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parseProjectBrushes(value: unknown): BrushDefinition[] {
+  if (!Array.isArray(value) || value.length > MAX_BRUSH_LIBRARY_SIZE) {
+    throw new ProjectFormatError(`Проект может содержать не больше ${MAX_BRUSH_LIBRARY_SIZE} кистей.`);
+  }
+  try {
+    return parseBrushLibrary(JSON.stringify(value));
+  } catch (error) {
+    throw new ProjectFormatError(
+      `В проекте указаны некорректные данные кистей: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+function isProjectMetadataValue(
+  value: unknown,
+  depth: number,
+  counter: { count: number },
+): value is ProjectMetadataValue {
+  counter.count++;
+  if (counter.count > MAX_PROJECT_METADATA_VALUES || depth > MAX_PROJECT_METADATA_DEPTH) return false;
+  if (value === null || typeof value === 'boolean') return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (typeof value === 'string') return value.length <= 8192;
+  if (Array.isArray(value)) {
+    if (value.length > 512) return false;
+    for (let index = 0; index < value.length; index++) {
+      if (!Object.prototype.hasOwnProperty.call(value, index) ||
+        !isProjectMetadataValue(value[index], depth + 1, counter)) return false;
+    }
+    return true;
+  }
+  if (!isRecord(value) || Object.getPrototypeOf(value) !== Object.prototype) return false;
+  const entries = Object.entries(value);
+  return entries.length <= 512 && entries.every(([key, item]) =>
+    key.length > 0 &&
+    key.length <= 256 &&
+    key !== '__proto__' &&
+    key !== 'prototype' &&
+    key !== 'constructor' &&
+    isProjectMetadataValue(item, depth + 1, counter),
+  );
+}
+
+function validateProjectMetadata(value: unknown): asserts value is ProjectMetadata {
+  if (!isRecord(value) || Object.getPrototypeOf(value) !== Object.prototype) {
+    throw new ProjectFormatError('Метаданные проекта должны быть JSON-объектом.');
+  }
+  if (!isProjectMetadataValue(value, 0, { count: 0 })) {
+    throw new ProjectFormatError('В метаданных проекта есть недопустимое или слишком большое значение.');
+  }
+  try {
+    if (JSON.stringify(value).length > MAX_PROJECT_METADATA_LENGTH) {
+      throw new ProjectFormatError('Метаданные проекта превышают допустимый размер.');
+    }
+  } catch (error) {
+    if (error instanceof ProjectFormatError) throw error;
+    throw new ProjectFormatError('Метаданные проекта невозможно сохранить в JSON.');
+  }
+}
+
+export function parseProjectMetadataJson(json: string): ProjectMetadata {
+  if (json.length > MAX_PROJECT_METADATA_LENGTH) {
+    throw new ProjectFormatError('Метаданные проекта превышают допустимый размер.');
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(json);
+  } catch {
+    throw new ProjectFormatError('Метаданные должны содержать корректный JSON.');
+  }
+  validateProjectMetadata(value);
+  return value;
 }
 
 function validateProjectAnimationFrames(
@@ -508,6 +638,9 @@ export function parseProject(text: string): ProjectData {
   let references: ReferenceImage[] | undefined;
   let tilemap: TilemapData | undefined;
   let animationFrames: ProjectAnimationFrameData[] | undefined;
+  let brushes: BrushDefinition[] | undefined;
+  let metadata: ProjectMetadata | undefined;
+  let customPalettes: Palette[] | undefined;
 
   if ((version >= 2 && version <= 5) || (version >= 6 && raw.canvases !== undefined)) {
     if (!Array.isArray(raw.canvases) || raw.canvases.length === 0 || raw.canvases.length > MAX_PROJECT_CANVASES) {
@@ -801,10 +934,29 @@ export function parseProject(text: string): ProjectData {
     });
   }
 
+  if (version >= 10) {
+    if (raw.brushes !== undefined) brushes = parseProjectBrushes(raw.brushes);
+    if (raw.metadata !== undefined) {
+      validateProjectMetadata(raw.metadata);
+      metadata = raw.metadata;
+    }
+  }
+  if (version >= 11 && raw.customPalettes !== undefined) {
+    try {
+      customPalettes = parseCustomPalettes(raw.customPalettes);
+    } catch (error) {
+      throw new ProjectFormatError(error instanceof Error ? error.message : 'Некорректные пользовательские палитры.');
+    }
+  }
+
   const paletteInfo = isRecord(raw.palette) ? raw.palette : {};
-  const known = typeof paletteInfo.id === 'string' && PALETTES.some((p) => p.id === paletteInfo.id);
+  const known = typeof paletteInfo.id === 'string' &&
+    (PALETTES.some((p) => p.id === paletteInfo.id) ||
+      (customPalettes ?? []).some((p) => p.id === paletteInfo.id));
   const paletteId = known ? (paletteInfo.id as string) : DEFAULT_PALETTE_ID;
-  const palette = getPalette(paletteId);
+  const palette = PALETTES.find((entry) => entry.id === paletteId) ??
+    customPalettes?.find((entry) => entry.id === paletteId) ??
+    getPalette(DEFAULT_PALETTE_ID);
   const freeColor = paletteInfo.freeColor === true;
 
   const colorInfo = isRecord(raw.colors) ? raw.colors : {};
@@ -826,7 +978,7 @@ export function parseProject(text: string): ProjectData {
 
   return {
     width, height, pixels, paletteId, freeColor, primary, secondary, recent, canvases,
-    activeCanvasId, references, tilemap, animationFrames,
+    activeCanvasId, references, tilemap, animationFrames, brushes, metadata, customPalettes,
   };
 }
 

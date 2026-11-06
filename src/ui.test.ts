@@ -5,6 +5,7 @@ import App from './App.svelte';
 import { AutosaveRepository } from './core/autosave';
 import { AUTOSAVE_KEY } from './core/storage';
 import { parseProject, type ProjectData } from './core/project';
+import { computeFloodFillOutput, type FloodFillWorkerRequest } from './core/tools/floodFillWorker';
 
 /** Заглушки того, чего нет в jsdom: canvas, ImageData, ResizeObserver, захват указателя. */
 interface PutCall {
@@ -239,6 +240,87 @@ describe('приложение целиком (jsdom)', () => {
     flushSync();
     pointer('pointerdown', screenOf(0, 0));
     expect(document.querySelector<HTMLInputElement>('.big.primary input')?.value).toBe('#0c2238');
+  });
+
+  it('выполняет заливку через Worker, блокирует ввод и сохраняет Undo', async () => {
+    class FakeWorker {
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onerror: ((event: ErrorEvent) => void) | null = null;
+      onmessageerror: (() => void) | null = null;
+
+      postMessage(request: FloodFillWorkerRequest): void {
+        const pixels = computeFloodFillOutput(request);
+        queueMicrotask(() => this.onmessage?.({ data: { pixels: pixels.buffer } } as MessageEvent));
+      }
+
+      terminate(): void {}
+    }
+    vi.stubGlobal('Worker', FakeWorker);
+    await frame();
+    document.querySelector<HTMLButtonElement>('[aria-label="Заливка (B)"]')!.click();
+    flushSync();
+    pointer('pointerdown', screenOf(4, 4));
+    expect(document.querySelector('.fill-overlay')?.textContent).toContain('Выполняется заливка');
+    await frame();
+    await frame();
+    expect(document.querySelector('.fill-overlay')).toBeNull();
+    expect(canvasAlpha(4, 4)).toBe(255);
+    key('KeyZ', { ctrlKey: true });
+    await frame();
+    expect(canvasAlpha(4, 4)).toBe(0);
+  });
+
+  it('сохраняет созданную пользовательскую палитру и метаданные в проекте', async () => {
+    vi.useFakeTimers();
+    document.querySelector<HTMLElement>('.custom-palette summary')!.click();
+    flushSync();
+    const name = document.querySelector<HTMLInputElement>('[aria-label="Название пользовательской палитры"]')!;
+    const colors = document.querySelector<HTMLTextAreaElement>('[aria-label="Цвета пользовательской палитры"]')!;
+    name.value = 'UI Palette';
+    name.dispatchEvent(new Event('input', { bubbles: true }));
+    colors.value = '#112233\n#445566';
+    colors.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    document.querySelector<HTMLButtonElement>('.custom-palette button')!.click();
+    flushSync();
+    expect((document.querySelector('[aria-label="Пресет палитры"]') as HTMLSelectElement).value).toMatch(/^custom-/);
+
+    document.querySelector<HTMLButtonElement>('.panel-tabs button:nth-child(4)')!.click();
+    flushSync();
+    const metadata = document.querySelector<HTMLTextAreaElement>('#project-metadata')!;
+    metadata.value = '{"title":"UI test"}';
+    metadata.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    document.querySelector<HTMLButtonElement>('.metadata-panel button')!.click();
+    flushSync();
+
+    await vi.advanceTimersByTimeAsync(1000);
+    const saved = parseProject(localStorage.getItem(AUTOSAVE_KEY)!);
+    expect(saved.customPalettes?.[0]?.name).toBe('UI Palette');
+    expect(saved.metadata).toEqual({ title: 'UI test' });
+  });
+
+  it('назначает последовательность клавиш инструменту и распознаёт её', async () => {
+    document.querySelector<HTMLButtonElement>('button[aria-label="Настройки"]')!.click();
+    await tick();
+    document.querySelector<HTMLButtonElement>('#settings-hotkeys-tab')!.click();
+    await tick();
+    const row = Array.from(document.querySelectorAll<HTMLElement>('.shortcut-row'))
+      .find((entry) => entry.textContent?.includes('Инструмент: Пипетка'))!;
+    row.querySelector<HTMLButtonElement>('.assign[aria-label*="последовательность"]')!.click();
+    flushSync();
+    key('KeyQ');
+    key('KeyW');
+    Array.from(row.querySelectorAll<HTMLButtonElement>('.assign'))
+      .find((button) => button.textContent?.includes('Завершить'))?.click();
+    flushSync();
+    expect(row.textContent).toContain('Q → W');
+    document.querySelector<HTMLButtonElement>('[role="dialog"] header button')!.click();
+    flushSync();
+    key('KeyQ');
+    expect(document.querySelector('.shortcut-sequence-hint')?.textContent).toContain('Q');
+    key('KeyW');
+    expect(document.querySelector<HTMLButtonElement>('[aria-label^="Пипетка"]')?.getAttribute('aria-pressed')).toBe('true');
   });
 
   it('первая отрисовка — весь холст; штрих перерисовывает только свою область', async () => {
@@ -739,5 +821,40 @@ describe('приложение целиком (jsdom)', () => {
     key('KeyE');
     await tick();
     expect(document.querySelector('.statusbar')?.textContent).toContain('Ластик');
+  });
+
+  it('позволяет переназначить клавишу инструмента и сохраняет контекстную подсказку', async () => {
+    (document.querySelector('button[aria-label="Настройки"]') as HTMLButtonElement).click();
+    await tick();
+    (document.querySelector('#settings-hotkeys-tab') as HTMLButtonElement).click();
+    await tick();
+    (document.querySelector('[aria-label="Назначить сочетание для действия «Инструмент: Ластик»"]') as HTMLButtonElement).click();
+    key('KeyQ');
+    await tick();
+
+    expect(localStorage.getItem('pixel-editor:hotkeys')).toContain('"code": "KeyQ"');
+    expect(Array.from(document.querySelectorAll('.tool')).map((element) => element.getAttribute('aria-label')).join('|')).toContain('Ластик (E; Q)');
+    (document.querySelector('[role="dialog"] button') as HTMLButtonElement).click();
+    await tick();
+    key('KeyQ');
+    expect(document.querySelector('.statusbar')?.textContent).toContain('Ластик');
+  });
+
+  it('не применяет конфликтующее назначение клавиши', async () => {
+    (document.querySelector('button[aria-label="Настройки"]') as HTMLButtonElement).click();
+    await tick();
+    (document.querySelector('#settings-hotkeys-tab') as HTMLButtonElement).click();
+    await tick();
+    (document.querySelector('[aria-label="Назначить сочетание для действия «Инструмент: Ластик»"]') as HTMLButtonElement).click();
+    key('KeyP');
+    await tick();
+
+    expect(document.querySelector('[role="status"]')?.textContent).toMatch(/уже назначено/i);
+    expect(localStorage.getItem('pixel-editor:hotkeys')).toBeNull();
+  });
+
+  it('сохраняет клавиши быстрого выбора размера кисти', () => {
+    key('Digit7');
+    expect((document.querySelector('#brush-size') as HTMLInputElement).value).toBe('7');
   });
 });

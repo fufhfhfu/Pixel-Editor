@@ -25,6 +25,7 @@
     includeReferencesInExport: boolean;
     hasVisibleReferences: boolean;
     customSizes: readonly CanvasSize[];
+    undoShortcut: string;
     ontogglegrid: () => void;
     ongridmode: (mode: GridMode) => void;
     ongridspacing: (spacing: number) => void;
@@ -64,6 +65,7 @@
     includeReferencesInExport,
     hasVisibleReferences,
     customSizes,
+    undoShortcut,
     ontogglegrid,
     ongridmode,
     ongridspacing,
@@ -305,7 +307,7 @@
     <button type="button" class="btn" title="Открыть активный холст в отдельном окне предпросмотра" onclick={onpreview}>
       Окно предпросмотра
     </button>
-    <button type="button" class="btn" title="Очистить холст; действие можно отменить (Ctrl+Z)" onclick={onclear}>
+    <button type="button" class="btn" title={`Очистить холст; действие можно отменить (${undoShortcut})`} onclick={onclear}>
       Очистить
     </button>
   </div>

@@ -74,6 +74,11 @@ export class PixelBuffer {
   private clipMask: Uint8Array | null = null;
   private locked = false;
   private alphaLock = false;
+  private batchDepth = 0;
+  private batchMinX = 0;
+  private batchMinY = 0;
+  private batchMaxX = -1;
+  private batchMaxY = -1;
 
   // Грязная область: границы включительно; minX > maxX означает «изменений нет»
   private dirtyMinX = 0;
@@ -124,6 +129,11 @@ export class PixelBuffer {
    * Полностью прозрачный цвет всегда записывается как (0, 0, 0, 0).
    */
   setPixel(x: number, y: number, color: RGBA): boolean {
+    return this.setPixelChannels(x, y, color.r, color.g, color.b, color.a);
+  }
+
+  /** Записывает RGBA-каналы без временного объекта цвета. */
+  setPixelChannels(x: number, y: number, r: number, g: number, b: number, a: number): boolean {
     if (!this.inBounds(x, y)) return false;
     const pixel = y * this.width + x;
     if (this.locked) return false;
@@ -132,24 +142,47 @@ export class PixelBuffer {
     const i = this.index(x, y);
     const d = this.data;
     if (this.alphaLock) {
-      if (d[i + 3] === 0 || color.a === 0) return false;
-      const opacity = color.a / 255;
-      d[i] = Math.round(d[i] + (color.r - d[i]) * opacity);
-      d[i + 1] = Math.round(d[i + 1] + (color.g - d[i + 1]) * opacity);
-      d[i + 2] = Math.round(d[i + 2] + (color.b - d[i + 2]) * opacity);
-    } else if (color.a === 0) {
+      if (d[i + 3] === 0 || a === 0) return false;
+      const opacity = a / 255;
+      d[i] = Math.round(d[i] + (r - d[i]) * opacity);
+      d[i + 1] = Math.round(d[i + 1] + (g - d[i + 1]) * opacity);
+      d[i + 2] = Math.round(d[i + 2] + (b - d[i + 2]) * opacity);
+    } else if (a === 0) {
       d[i] = 0;
       d[i + 1] = 0;
       d[i + 2] = 0;
       d[i + 3] = 0;
     } else {
-      d[i] = color.r;
-      d[i + 1] = color.g;
-      d[i + 2] = color.b;
-      d[i + 3] = color.a;
+      d[i] = r;
+      d[i + 1] = g;
+      d[i + 2] = b;
+      d[i + 3] = a;
     }
     this.markDirty(x, y);
     return true;
+  }
+
+  /** Объединяет грязные области нескольких записей и инвалидирует кэши один раз. */
+  batchUpdates<T>(operation: () => T): T {
+    if (this.batchDepth === 0) {
+      this.batchMinX = 0;
+      this.batchMinY = 0;
+      this.batchMaxX = -1;
+      this.batchMaxY = -1;
+    }
+    this.batchDepth++;
+    try {
+      return operation();
+    } finally {
+      this.batchDepth--;
+      if (this.batchDepth === 0 && this.batchMinX <= this.batchMaxX) {
+        this.mergeDirtyBounds(this.batchMinX, this.batchMinY, this.batchMaxX, this.batchMaxY);
+        this.batchMinX = 0;
+        this.batchMinY = 0;
+        this.batchMaxX = -1;
+        this.batchMaxY = -1;
+      }
+    }
   }
 
   setClipMask(mask: Uint8Array | null): void {
@@ -221,16 +254,21 @@ export class PixelBuffer {
   /** Помечает один пиксель изменённым; координаты вне холста игнорируются. */
   markDirty(x: number, y: number): void {
     if (x < 0 || y < 0 || x >= this.width || y >= this.height) return;
-    this.contentRevision++;
-    if (this.dirtyMinX > this.dirtyMaxX) {
-      this.dirtyMinX = this.dirtyMaxX = x;
-      this.dirtyMinY = this.dirtyMaxY = y;
+    if (this.batchDepth > 0) {
+      if (this.batchMinX > this.batchMaxX) {
+        this.batchMinX = this.batchMaxX = x;
+        this.batchMinY = this.batchMaxY = y;
+        this.contentRevision++;
+      } else {
+        this.batchMinX = Math.min(this.batchMinX, x);
+        this.batchMinY = Math.min(this.batchMinY, y);
+        this.batchMaxX = Math.max(this.batchMaxX, x);
+        this.batchMaxY = Math.max(this.batchMaxY, y);
+      }
       return;
     }
-    if (x < this.dirtyMinX) this.dirtyMinX = x;
-    if (x > this.dirtyMaxX) this.dirtyMaxX = x;
-    if (y < this.dirtyMinY) this.dirtyMinY = y;
-    if (y > this.dirtyMaxY) this.dirtyMaxY = y;
+    this.contentRevision++;
+    this.mergeDirtyBounds(x, y, x, y);
   }
 
   /** Помечает прямоугольник изменённым; часть за границами холста отсекается. */
@@ -245,11 +283,16 @@ export class PixelBuffer {
   }
 
   markAllDirty(): void {
+    if (this.batchDepth > 0) {
+      if (this.batchMinX > this.batchMaxX) this.contentRevision++;
+      this.batchMinX = 0;
+      this.batchMinY = 0;
+      this.batchMaxX = this.width - 1;
+      this.batchMaxY = this.height - 1;
+      return;
+    }
     this.contentRevision++;
-    this.dirtyMinX = 0;
-    this.dirtyMinY = 0;
-    this.dirtyMaxX = this.width - 1;
-    this.dirtyMaxY = this.height - 1;
+    this.mergeDirtyBounds(0, 0, this.width - 1, this.height - 1);
   }
 
   /** Есть ли изменения, которые ещё не отрисованы. */
@@ -271,6 +314,20 @@ export class PixelBuffer {
     this.dirtyMaxX = -1;
     this.dirtyMaxY = -1;
     return rect;
+  }
+
+  private mergeDirtyBounds(minX: number, minY: number, maxX: number, maxY: number): void {
+    if (this.dirtyMinX > this.dirtyMaxX) {
+      this.dirtyMinX = minX;
+      this.dirtyMinY = minY;
+      this.dirtyMaxX = maxX;
+      this.dirtyMaxY = maxY;
+      return;
+    }
+    this.dirtyMinX = Math.min(this.dirtyMinX, minX);
+    this.dirtyMinY = Math.min(this.dirtyMinY, minY);
+    this.dirtyMaxX = Math.max(this.dirtyMaxX, maxX);
+    this.dirtyMaxY = Math.max(this.dirtyMaxY, maxY);
   }
 
   clone(): PixelBuffer {

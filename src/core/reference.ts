@@ -1,7 +1,7 @@
 import { CHANNELS, isValidCanvasSize, type PixelBuffer, type RGBA } from './state';
 
-export const MAX_PROJECT_REFERENCES = 16;
-export const MAX_REFERENCE_TOTAL_PIXELS = 1_000_000;
+export const MAX_PROJECT_REFERENCES = 32;
+export const MAX_REFERENCE_TOTAL_PIXELS = 4_194_304;
 export const MAX_REFERENCE_COMPOSITE_PIXELS = 16_000_000;
 export const MIN_REFERENCE_SCALE = 0.05;
 export const MAX_REFERENCE_SCALE = 32;

@@ -51,6 +51,34 @@ describe('PixelBuffer: грязная область', () => {
     expect(b.isDirty).toBe(false);
   });
 
+  it('объединяет батч изменений и обновляет content revision один раз', () => {
+    const b = new PixelBuffer(8, 8);
+    b.takeDirty();
+    const revision = b.revision;
+
+    b.batchUpdates(() => {
+      b.setPixel(1, 2, RED);
+      b.batchUpdates(() => {
+        b.setPixel(6, 5, RED);
+      });
+    });
+
+    expect(b.revision).toBe(revision + 1);
+    expect(b.takeDirty()).toEqual({ x: 1, y: 2, width: 6, height: 4 });
+  });
+
+  it('сохраняет грязную область, если батч завершается исключением', () => {
+    const b = new PixelBuffer(4, 4);
+    b.takeDirty();
+
+    expect(() => b.batchUpdates(() => {
+      b.setPixel(2, 1, RED);
+      throw new Error('stop');
+    })).toThrow('stop');
+
+    expect(b.takeDirty()).toEqual({ x: 2, y: 1, width: 1, height: 1 });
+  });
+
   it('resized и clone возвращают полностью грязные буферы', () => {
     const b = new PixelBuffer(8, 8);
     b.takeDirty();

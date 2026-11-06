@@ -10,6 +10,10 @@
     /** Размер изображения в пикселях при выбранном масштабе (для подписи кнопки). */
     exportWidth: number;
     exportHeight: number;
+    undoShortcut: string;
+    redoShortcut: string;
+    saveShortcut: string;
+    helpShortcut: string;
     onundo: () => void;
     onredo: () => void;
     onopen: (file: File) => void;
@@ -29,6 +33,10 @@
     availableExportScales,
     exportWidth,
     exportHeight,
+    undoShortcut,
+    redoShortcut,
+    saveShortcut,
+    helpShortcut,
     onundo,
     onredo,
     onopen,
@@ -157,13 +165,13 @@
   </div>
 
   <div class="group">
-    <button type="button" class="btn icon" disabled={!canUndo} title="Отменить (Ctrl+Z)" aria-label="Отменить" onclick={onundo}>
+    <button type="button" class="btn icon" disabled={!canUndo} title={`Отменить (${undoShortcut})`} aria-label="Отменить" aria-keyshortcuts={undoShortcut} onclick={onundo}>
       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M9 14L4 9l5-5" />
         <path d="M4 9h10a6 6 0 0 1 0 12h-3" />
       </svg>
     </button>
-    <button type="button" class="btn icon" disabled={!canRedo} title="Повторить (Ctrl+Shift+Z)" aria-label="Повторить" onclick={onredo}>
+    <button type="button" class="btn icon" disabled={!canRedo} title={`Повторить (${redoShortcut})`} aria-label="Повторить" aria-keyshortcuts={redoShortcut} onclick={onredo}>
       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M15 14l5-5-5-5" />
         <path d="M20 9H10a6 6 0 0 0 0 12h3" />
@@ -189,12 +197,13 @@
     <button
       type="button"
       class="btn icon"
-      title="Горячие клавиши (H)"
+      title={`Горячие клавиши (${helpShortcut})`}
       aria-label="Горячие клавиши"
+      aria-keyshortcuts={helpShortcut}
       onclick={(event) => onhelp(event.currentTarget)}
     >?</button>
-    <button type="button" class="btn" title="Сохранить проект в файл JSON (Ctrl+S)" onclick={onsave}>
-      Сохранить <span class="kbd save-hint">Ctrl+S</span>
+    <button type="button" class="btn" title={`Сохранить проект в файл JSON (${saveShortcut})`} aria-keyshortcuts={saveShortcut} onclick={onsave}>
+      Сохранить <span class="kbd save-hint">{saveShortcut}</span>
     </button>
   </div>
 </header>

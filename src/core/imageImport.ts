@@ -1,4 +1,5 @@
 import { DEFAULT_PALETTE_ID } from './palette';
+import type { Palette } from './palette';
 import type { ProjectData } from './project';
 import { isValidCanvasSize } from './state';
 
@@ -17,6 +18,7 @@ export interface RasterImportOptions {
   primary: ProjectData['primary'];
   secondary: ProjectData['secondary'];
   recent: ProjectData['recent'];
+  customPalettes?: Palette[];
 }
 
 interface DecodedImageSource {
@@ -70,12 +72,25 @@ async function decodeBitmap(file: File): Promise<DecodedImageSource> {
   };
 }
 
-export async function decodeRasterImage(file: File): Promise<DecodedRasterImage> {
+export async function decodeRasterImage(
+  file: File,
+  options: { maxPixels?: number } = {},
+): Promise<DecodedRasterImage> {
   assertImageFile(file);
+  const maxPixels = options.maxPixels ?? MAX_DECODED_IMAGE_PIXELS;
+  if (!Number.isSafeInteger(maxPixels) || maxPixels < 1) {
+    throw new RangeError('Недопустимый лимит пикселей изображения.');
+  }
   const bitmap = await decodeBitmap(file);
 
   try {
-    if (bitmap.width * bitmap.height > MAX_DECODED_IMAGE_PIXELS) {
+    const pixelCount = bitmap.width * bitmap.height;
+    if (pixelCount > maxPixels && options.maxPixels !== undefined) {
+      throw new RangeError(
+        `Изображение превышает доступный лимит пикселей (${maxPixels.toLocaleString('ru-RU')}).`,
+      );
+    }
+    if (pixelCount > MAX_DECODED_IMAGE_PIXELS) {
       throw new RangeError('Изображение слишком большое для безопасной обработки.');
     }
 
@@ -107,5 +122,6 @@ export function rasterImageToProject(image: DecodedRasterImage, options: RasterI
     primary: options.primary,
     secondary: options.secondary,
     recent: [...options.recent],
+    ...(options.customPalettes?.length ? { customPalettes: options.customPalettes } : {}),
   };
 }

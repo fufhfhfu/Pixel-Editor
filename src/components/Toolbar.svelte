@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { CanvasSize } from '../core/preferences';
+  import { GRID_SPACINGS, type CanvasSize, type GridMode } from '../core/preferences';
   import {
     DEFAULT_GRID_SIZE,
     GRID_PRESETS,
@@ -13,9 +13,31 @@
     width: number;
     height: number;
     showGrid: boolean;
+    gridMode: GridMode;
+    gridSpacing: number;
+    snapToGrid: boolean;
+    checkerboard: boolean;
+    tiledMode: boolean;
+    symmetryX: boolean;
+    symmetryY: boolean;
+    referencesOpen: boolean;
+    includeReferencesInExport: boolean;
+    hasVisibleReferences: boolean;
     customSizes: readonly CanvasSize[];
     ontogglegrid: () => void;
+    ongridmode: (mode: GridMode) => void;
+    ongridspacing: (spacing: number) => void;
+    onsnaptogrid: (enabled: boolean) => void;
+    oncheckerboard: (enabled: boolean) => void;
+    ontiledmode: (enabled: boolean) => void;
+    onsymmetryx: (enabled: boolean) => void;
+    onsymmetryy: (enabled: boolean) => void;
+    ontogglereferences: () => void;
+    onincludeReferencesInExport: (include: boolean) => void;
+    onpreview: () => void;
     onfit: () => void;
+    oncenter: () => void;
+    onactualsize: () => void;
     onzoomin: () => void;
     onzoomout: () => void;
     onresize: (width: number, height: number) => void;
@@ -28,9 +50,31 @@
     width,
     height,
     showGrid,
+    gridMode,
+    gridSpacing,
+    snapToGrid,
+    checkerboard,
+    tiledMode,
+    symmetryX,
+    symmetryY,
+    referencesOpen,
+    includeReferencesInExport,
+    hasVisibleReferences,
     customSizes,
     ontogglegrid,
+    ongridmode,
+    ongridspacing,
+    onsnaptogrid,
+    oncheckerboard,
+    ontiledmode,
+    onsymmetryx,
+    onsymmetryy,
+    ontogglereferences,
+    onincludeReferencesInExport,
+    onpreview,
     onfit,
+    oncenter,
+    onactualsize,
     onzoomin,
     onzoomout,
     onresize,
@@ -87,6 +131,16 @@
   function selectPresetSize(e: Event & { currentTarget: HTMLSelectElement }): void {
     const [presetWidth, presetHeight] = e.currentTarget.value.split('x').map(Number);
     if (isValidCanvasSize(presetWidth, presetHeight)) onresize(presetWidth, presetHeight);
+  }
+
+  function selectGridMode(e: Event & { currentTarget: HTMLSelectElement }): void {
+    const mode = e.currentTarget.value;
+    if (mode === 'pixel' || mode === 'square' || mode === 'isometric') ongridmode(mode);
+  }
+
+  function selectGridSpacing(e: Event & { currentTarget: HTMLSelectElement }): void {
+    const spacing = Number(e.currentTarget.value);
+    if (GRID_SPACINGS.includes(spacing as (typeof GRID_SPACINGS)[number])) ongridspacing(spacing);
   }
 </script>
 
@@ -166,8 +220,28 @@
   <div class="spacer"></div>
 
   <div class="group">
+    <button
+      type="button"
+      class="btn"
+      class:active={referencesOpen}
+      aria-pressed={referencesOpen}
+      title="Открыть менеджер референсов"
+      onclick={ontogglereferences}
+    >Референсы</button>
+    <label class="check-setting" title="По умолчанию референсы не включаются в экспорт">
+      <input
+        type="checkbox"
+        aria-label="Включать референсы в экспорт"
+        checked={includeReferencesInExport}
+        disabled={!hasVisibleReferences}
+        onchange={(event) => onincludeReferencesInExport(event.currentTarget.checked)}
+      />
+      Экспортировать референсы
+    </label>
+    <button type="button" class="btn" title="Центрировать активный холст" onclick={oncenter}>Центр</button>
     <button type="button" class="btn icon" title="Уменьшить (−)" aria-label="Уменьшить" onclick={onzoomout}>−</button>
     <button type="button" class="btn icon" title="Увеличить (+)" aria-label="Увеличить" onclick={onzoomin}>+</button>
+    <button type="button" class="btn" title="Показать активный холст в масштабе 100%" onclick={onactualsize}>100%</button>
     <button type="button" class="btn" title="Вписать холст в окно (F)" onclick={onfit}>
       Вписать <span class="kbd">F</span>
     </button>
@@ -180,6 +254,50 @@
       onclick={ontogglegrid}
     >
       Сетка <span class="kbd">G</span>
+    </button>
+    <label class="inline-setting">
+      <span class="sr-only">Тип сетки</span>
+      <select aria-label="Тип сетки" value={gridMode} onchange={selectGridMode}>
+        <option value="pixel">Пиксельная</option>
+        <option value="square">Квадратная</option>
+        <option value="isometric">Изометрическая</option>
+      </select>
+    </label>
+    <label class="inline-setting">
+      <span class="sr-only">Шаг сетки</span>
+      <select aria-label="Шаг сетки" value={gridSpacing} onchange={selectGridSpacing}>
+        {#each GRID_SPACINGS as spacing}
+          <option value={spacing}>{spacing} px</option>
+        {/each}
+      </select>
+    </label>
+    <details class="view-settings">
+      <summary class="btn view-settings-tab" aria-label="Вид" title="Настройки отображения">Вид</summary>
+      <div class="view-settings-panel" role="group" aria-label="Настройки отображения">
+        <label class="check-setting" title="Привязка перемещаемых холстов к выбранному шагу сетки">
+          <input type="checkbox" checked={snapToGrid} onchange={(event) => onsnaptogrid(event.currentTarget.checked)} />
+          Привязка
+        </label>
+        <label class="check-setting" title="Шахматный фон для прозрачных пикселей">
+          <input type="checkbox" checked={checkerboard} onchange={(event) => oncheckerboard(event.currentTarget.checked)} />
+          Шахматный фон
+        </label>
+        <label class="check-setting" title="Повторять активный холст по горизонтали и вертикали">
+          <input type="checkbox" checked={tiledMode} onchange={(event) => ontiledmode(event.currentTarget.checked)} />
+          Повтор
+        </label>
+        <label class="check-setting" title="Показать вертикальную ось симметрии">
+          <input type="checkbox" checked={symmetryX} onchange={(event) => onsymmetryx(event.currentTarget.checked)} />
+          Симметрия X
+        </label>
+        <label class="check-setting" title="Показать горизонтальную ось симметрии">
+          <input type="checkbox" checked={symmetryY} onchange={(event) => onsymmetryy(event.currentTarget.checked)} />
+          Симметрия Y
+        </label>
+      </div>
+    </details>
+    <button type="button" class="btn" title="Открыть активный холст в отдельном окне предпросмотра" onclick={onpreview}>
+      Окно предпросмотра
     </button>
     <button type="button" class="btn" title="Очистить холст; действие можно отменить (Ctrl+Z)" onclick={onclear}>
       Очистить
@@ -205,6 +323,36 @@
     gap: 6px;
   }
 
+  .view-settings {
+    position: relative;
+    z-index: 30;
+  }
+
+  .view-settings-tab {
+    display: flex;
+    align-items: center;
+    min-height: 30px;
+    list-style: none;
+  }
+
+  .view-settings-tab::-webkit-details-marker {
+    display: none;
+  }
+
+  .view-settings-panel {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    display: grid;
+    gap: 10px;
+    min-width: max-content;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--panel);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  }
+
   .label {
     margin-right: 4px;
     color: var(--text-dim);
@@ -227,6 +375,45 @@
     width: 34px;
     padding: 0;
     font-size: 16px;
+  }
+
+  @media (max-width: 1100px) {
+    .toolbar > .spacer {
+      display: none;
+    }
+
+    .toolbar > .group:last-child {
+      flex: 1 1 100%;
+      flex-wrap: wrap;
+    }
+  }
+
+  .inline-setting select {
+    min-height: 30px;
+    padding: 0 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--panel-2);
+    color: var(--text);
+    font: inherit;
+  }
+
+  .check-setting {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--text-dim);
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
   }
 
   @media (max-width: 720px) {

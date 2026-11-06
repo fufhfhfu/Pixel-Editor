@@ -32,12 +32,21 @@
     type PixelPos,
     type ViewState,
   } from '../core/viewport';
+  import type { GridMode } from '../core/preferences';
+  import { referenceAtPoint, sampleReferenceColor, type ReferenceImage } from '../core/reference';
 
   interface Board {
     id: string;
     x: number;
     y: number;
     buffer: PixelBuffer;
+  }
+
+  export interface ViewportGuide {
+    id: string;
+    boardId: string;
+    axis: 'x' | 'y';
+    position: number;
   }
 
   function drawSelectionOverlay(id: string): void {
@@ -73,6 +82,155 @@
     }
     context.putImageData(image, 0, 0);
   }
+
+  export function openPreviewWindow(): void {
+    if (previewWindow && !previewWindow.closed) {
+      previewWindow.focus();
+      void updatePreviewWindow();
+      return;
+    }
+
+    const opened = window.open('', 'pixel-editor-preview', 'popup,width=800,height=700,resizable=yes');
+    if (!opened) throw new Error('Браузер заблокировал окно предпросмотра.');
+    previewWindow = opened;
+    opened.document.open();
+    opened.document.write(`<!doctype html>
+      <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+      <title>Предпросмотр Pixel Editor</title>
+      <style>
+        *{box-sizing:border-box}html,body{width:100%;height:100%;margin:0}
+        body{display:grid;place-items:center;overflow:hidden;background-color:#30323a;
+          background-image:linear-gradient(45deg,#454751 25%,transparent 25%),linear-gradient(-45deg,#454751 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#454751 75%),linear-gradient(-45deg,transparent 75%,#454751 75%);
+          background-position:0 0,0 8px,8px -8px,-8px 0;background-size:16px 16px}
+        canvas{max-width:96vw;max-height:90vh;width:auto;height:auto;image-rendering:pixelated;box-shadow:0 8px 32px #0009}
+        #size{position:fixed;left:12px;top:10px;padding:5px 8px;border-radius:4px;background:#171820cc;color:#fff;font:12px system-ui}
+      </style></head><body><span id="size">Ожидание холста…</span><canvas></canvas>
+      <script>
+        let sequence=0,currentWidth=1,currentHeight=1;
+        const canvas=document.querySelector('canvas'),ctx=canvas.getContext('2d');
+        function layout(){const scale=Math.min(8,innerWidth*.9/currentWidth,innerHeight*.9/currentHeight);canvas.style.width=Math.max(1,Math.floor(currentWidth*scale))+'px';canvas.style.height=Math.max(1,Math.floor(currentHeight*scale))+'px'}
+        addEventListener('resize',layout);
+        addEventListener('message',event=>{
+          if(event.source!==opener||event.data?.type!=='pixel-editor-preview'||!(event.data.bitmap instanceof ImageBitmap))return;
+          const bitmap=event.data.bitmap;
+          if(event.data.sequence<=sequence){bitmap.close();return}
+          sequence=event.data.sequence;
+          currentWidth=bitmap.width;currentHeight=bitmap.height;
+          canvas.width=bitmap.width;canvas.height=bitmap.height;ctx.imageSmoothingEnabled=false;
+          ctx.clearRect(0,0,canvas.width,canvas.height);ctx.drawImage(bitmap,0,0);bitmap.close();
+          layout();
+          document.title='Предпросмотр '+canvas.width+'×'+canvas.height;
+          document.querySelector('#size').textContent=canvas.width+'×'+canvas.height;
+        });
+        addEventListener('keydown',event=>{if(event.key==='Escape')close()});
+      <\/script></body></html>`);
+    opened.document.close();
+    if (previewWindowTimer) clearInterval(previewWindowTimer);
+    previewWindowTimer = setInterval(() => {
+      if (!previewWindow || previewWindow.closed) {
+        previewWindow = null;
+        clearInterval(previewWindowTimer);
+        previewWindowTimer = undefined;
+      }
+    }, 1000);
+    opened.focus();
+    void updatePreviewWindow();
+  }
+
+  async function updatePreviewWindow(): Promise<void> {
+    const target = previewWindow;
+    if (!target || target.closed) return;
+    const source = canvasElements.get(activeBoardId);
+    if (!source) return;
+    const sequence = ++previewSequence;
+    try {
+      const bitmap = await createImageBitmap(source);
+      if (target !== previewWindow || target.closed || sequence !== previewSequence) {
+        bitmap.close();
+        return;
+      }
+      target.postMessage(
+        { type: 'pixel-editor-preview', sequence, bitmap },
+        window.location.origin,
+        [bitmap],
+      );
+    } catch (error) {
+      if (target === previewWindow) {
+        target.close();
+        previewWindow = null;
+        onpreviewerror(error instanceof Error ? error.message : 'Не удалось обновить окно предпросмотра.');
+      }
+    }
+  }
+
+  function renderTiledPreview(): void {
+    const canvas = tiledPreviewCanvas;
+    const board = boards.find((entry) => entry.id === activeBoardId);
+    const source = board ? canvasElements.get(board.id) : undefined;
+    if (!canvas || !board || !source || !tiledMode || !viewW || !viewH) return;
+    const ratio = window.devicePixelRatio || 1;
+    const width = Math.max(1, Math.round(viewW * ratio));
+    const height = Math.max(1, Math.round(viewH * ratio));
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+    const context = canvas.getContext('2d');
+    if (!context) {
+      onpreviewerror('Не удалось создать контекст режима повторения.');
+      return;
+    }
+    context.clearRect(0, 0, width, height);
+    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    context.imageSmoothingEnabled = false;
+    const tileWidth = board.buffer.width * view.zoom;
+    const tileHeight = board.buffer.height * view.zoom;
+    if (tileWidth < 1 || tileHeight < 1) return;
+    const originX = view.offsetX + board.x * view.zoom;
+    const originY = view.offsetY + board.y * view.zoom;
+    const minColumn = Math.floor(-originX / tileWidth) - 1;
+    const maxColumn = Math.ceil((viewW - originX) / tileWidth) + 1;
+    const minRow = Math.floor(-originY / tileHeight) - 1;
+    const maxRow = Math.ceil((viewH - originY) / tileHeight) + 1;
+    if ((maxColumn - minColumn + 1) * (maxRow - minRow + 1) > 2500) return;
+    for (let row = minRow; row <= maxRow; row++) {
+      for (let column = minColumn; column <= maxColumn; column++) {
+        context.drawImage(
+          source,
+          originX + column * tileWidth,
+          originY + row * tileHeight,
+          tileWidth,
+          tileHeight,
+        );
+      }
+    }
+  }
+
+  function scheduleTiledPreview(): void {
+    if (tiledRenderFrame) cancelAnimationFrame(tiledRenderFrame);
+    tiledRenderFrame = requestAnimationFrame(() => {
+      tiledRenderFrame = 0;
+      renderTiledPreview();
+    });
+  }
+
+  $effect(() => {
+    void tiledMode;
+    void view.offsetX;
+    void view.offsetY;
+    void view.zoom;
+    void activeBoardId;
+    void boards;
+    if (tiledMode) scheduleTiledPreview();
+  });
+
+  $effect(() => {
+    void activeBoardId;
+    void boards;
+    if (previewWindow && !previewWindow.closed) {
+      requestAnimationFrame(() => void updatePreviewWindow());
+    }
+  });
 
   function drawTransformPreview(id: string): void {
     const canvas = transformPreviewCanvases.get(id);
@@ -134,10 +292,20 @@
   interface Props {
     buffer: PixelBuffer;
     boards: readonly Board[];
+    references: readonly ReferenceImage[];
+    selectedReferenceId: string | null;
     activeBoardId: string;
     view: ViewState;
     cursor: PixelPos | null;
     showGrid: boolean;
+    gridMode: GridMode;
+    gridSpacing: number;
+    snapToGrid: boolean;
+    checkerboard: boolean;
+    tiledMode: boolean;
+    symmetryX: boolean;
+    symmetryY: boolean;
+    guides: readonly ViewportGuide[];
     panMode: boolean;
     canvasBackground: string;
     workspaceBackground: string;
@@ -166,7 +334,15 @@
     onrender: () => void;
     onselectboard: (id: string) => void;
     onmoveboard: (id: string, x: number, y: number) => void;
+    onmoveboards: (positions: Array<{ id: string; x: number; y: number }>) => void;
+    onselectreference: (id: string) => void;
+    onreferencemovestart: () => void;
+    onreferencemove: (id: string, x: number, y: number) => void;
+    onreferencemoveend: () => void;
+    onreferencemovecancel: () => void;
     onselection: (selection: SelectionMask | null) => void;
+    onguideschange: (guides: ViewportGuide[]) => void;
+    onpreviewerror: (message: string) => void;
     previewBuffer: PixelBuffer | null;
     onconfirmtransform: () => void;
     oncanceltransform: () => void;
@@ -175,10 +351,20 @@
   let {
     buffer,
     boards,
+    references,
+    selectedReferenceId,
     activeBoardId,
     view = $bindable(),
     cursor = $bindable(),
     showGrid,
+    gridMode,
+    gridSpacing,
+    snapToGrid,
+    checkerboard,
+    tiledMode,
+    symmetryX,
+    symmetryY,
+    guides,
     panMode,
     canvasBackground,
     workspaceBackground,
@@ -203,7 +389,15 @@
     onrender,
     onselectboard,
     onmoveboard,
+    onmoveboards,
+    onselectreference,
+    onreferencemovestart,
+    onreferencemove,
+    onreferencemoveend,
+    onreferencemovecancel,
     onselection,
+    onguideschange,
+    onpreviewerror,
     onconfirmtransform,
     oncanceltransform,
   }: Props = $props();
@@ -236,6 +430,7 @@
 
   let viewportEl: HTMLDivElement | undefined = $state();
   let horizontalScrollEl: HTMLDivElement | undefined = $state();
+  let tiledPreviewCanvas: HTMLCanvasElement | undefined = $state();
   let panning = $state(false);
   let focused = $state(false);
   let keyboardCursorShown = $state(false);
@@ -248,6 +443,10 @@
   const selectionCanvases = new Map<string, HTMLCanvasElement>();
   const transformPreviewCanvases = new Map<string, HTMLCanvasElement>();
   let frame = 0;
+  let previewWindow: Window | null = null;
+  let previewWindowTimer: ReturnType<typeof setInterval> | undefined;
+  let previewSequence = 0;
+  let tiledRenderFrame = 0;
 
   let viewW = 0;
   let viewH = 0;
@@ -260,7 +459,21 @@
   let rightPanPointerId = -1;
   let movingPointerId = -1;
   let movingBoardId: string | null = null;
-  let dragPreview = $state.raw<{ id: string; x: number; y: number } | null>(null);
+  let movingBoardIds: string[] = [];
+  let movingBoardPositions: Array<{ id: string; x: number; y: number }> = [];
+  let boardDragStarted = false;
+  let boardWasSelected = false;
+  let selectedBoardIds = $state.raw<Set<string>>(new Set());
+  let movingReference: {
+    id: string;
+    pointerId: number;
+    startClientX: number;
+    startClientY: number;
+    referenceX: number;
+    referenceY: number;
+  } | null = null;
+  let draggingGuide: { id: string; pointerId: number } | null = null;
+  let dragPreview = $state.raw<Array<{ id: string; x: number; y: number }>>([]);
   let alignmentGuides = $state.raw<AlignmentGuide[]>([]);
   let movingBoardStart = { x: 0, y: 0, boardX: 0, boardY: 0 };
   let rightClickBoardId: string | null = null;
@@ -324,6 +537,8 @@
     frame = requestAnimationFrame(() => {
       frame = 0;
       renderBoard(activeBoardId);
+      renderTiledPreview();
+      void updatePreviewWindow();
     });
   }
 
@@ -336,6 +551,22 @@
         renderers.delete(id);
       },
     };
+  }
+
+  function registerReferenceCanvas(element: HTMLCanvasElement, reference: ReferenceImage) {
+    let pixels: Uint8ClampedArray | null = null;
+    function draw(next: ReferenceImage): void {
+      if (pixels === next.pixels) return;
+      element.width = next.width;
+      element.height = next.height;
+      const context = element.getContext('2d');
+      if (!context) throw new Error('Не удалось создать контекст отображения референса.');
+      context.imageSmoothingEnabled = false;
+      context.putImageData(new ImageData(next.pixels, next.width, next.height), 0, 0);
+      pixels = next.pixels;
+    }
+    draw(reference);
+    return { update: draw };
   }
 
   function renderBoard(id: string): void {
@@ -402,6 +633,30 @@
     });
   }
 
+  export function centerActiveBoard(): void {
+    const board = boards.find((entry) => entry.id === activeBoardId);
+    if (!board) return;
+    const centered = centerView(view.zoom, board.buffer.width, board.buffer.height, viewW, viewH);
+    view = {
+      ...centered,
+      offsetX: centered.offsetX - board.x * view.zoom,
+      offsetY: centered.offsetY - board.y * view.zoom,
+    };
+    updateCursor();
+  }
+
+  export function actualSize(): void {
+    const board = boards.find((entry) => entry.id === activeBoardId);
+    if (!board) return;
+    const centered = centerView(1, board.buffer.width, board.buffer.height, viewW, viewH);
+    view = {
+      ...centered,
+      offsetX: centered.offsetX - board.x,
+      offsetY: centered.offsetY - board.y,
+    };
+    updateCursor();
+  }
+
   /** Меняет зум на steps уровней вокруг центра области просмотра (кнопки и клавиши +/−). */
   export function zoomBy(steps: number): void {
     view = clampSceneView(zoomAt(view, steps, viewW / 2, viewH / 2));
@@ -420,7 +675,7 @@
     return `${buffer.width}x${buffer.height}`;
   }
 
-  function snapBoardPosition(board: Board, x: number, y: number): {
+  function snapBoardPosition(board: Board, x: number, y: number, ignoredBoardIds: ReadonlySet<string> = new Set([board.id])): {
     x: number;
     y: number;
     guides: AlignmentGuide[];
@@ -430,7 +685,7 @@
     const threshold = Math.max(1, ALIGNMENT_SNAP_DISTANCE / view.zoom);
 
     for (const other of boards) {
-      if (other.id === board.id) continue;
+      if (ignoredBoardIds.has(other.id)) continue;
       for (const movingEdge of ['left', 'right'] as const) {
         const movingCoordinate = x + (movingEdge === 'right' ? board.buffer.width : 0);
         for (const stationaryEdge of ['left', 'right'] as const) {
@@ -453,12 +708,16 @@
       }
     }
 
-    const snappedX = bestX
+    let snappedX = bestX
       ? bestX.coordinate - (bestX.edge === 'right' ? board.buffer.width : 0)
       : x;
-    const snappedY = bestY
+    let snappedY = bestY
       ? bestY.coordinate - (bestY.edge === 'bottom' ? board.buffer.height : 0)
       : y;
+    if (snapToGrid) {
+      snappedX = Math.round(snappedX / gridSpacing) * gridSpacing;
+      snappedY = Math.round(snappedY / gridSpacing) * gridSpacing;
+    }
     const guides: AlignmentGuide[] = [];
 
     if (bestX) {
@@ -726,6 +985,17 @@
     refreshOrigin();
     keyboardCursorShown = false;
 
+    const guideElement = e.target instanceof Element
+      ? e.target.closest<HTMLElement>('[data-guide-id]')
+      : null;
+    const guideId = guideElement?.dataset.guideId;
+    if (guideId && e.button === 0 && !session.isActive) {
+      e.preventDefault();
+      draggingGuide = { id: guideId, pointerId: e.pointerId };
+      viewportEl.setPointerCapture(e.pointerId);
+      return;
+    }
+
     if (e.pointerType === 'touch') {
       touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (touches.size >= 2) {
@@ -735,15 +1005,53 @@
       if (touchLocked) return;
     }
 
+    const worldPoint = pixelAt(e.clientX, e.clientY);
+    const reference = referenceAtPoint(references, worldPoint.x, worldPoint.y);
+    const picker = temporaryPicker || e.altKey || tool.id === 'picker';
+    const colorSlot: ColorSlot | null = e.button === 0 ? 'primary' : e.button === 2 ? 'secondary' : null;
+    if (reference && picker && colorSlot) {
+      e.preventDefault();
+      const color = sampleReferenceColor(reference, worldPoint.x, worldPoint.y);
+      if (color) onpickcolor(colorSlot, color);
+      return;
+    }
+    if (reference && e.button === 0 && !panMode && !selectionMode && !picker && !reference.locked) {
+      e.preventDefault();
+      onreferencemovestart();
+      onselectreference(reference.id);
+      movingReference = {
+        id: reference.id,
+        pointerId: e.pointerId,
+        startClientX: e.clientX,
+        startClientY: e.clientY,
+        referenceX: reference.x,
+        referenceY: reference.y,
+      };
+      viewportEl.setPointerCapture(e.pointerId);
+      return;
+    }
+
     const board = boardAt(e.clientX, e.clientY);
+    if (e.button === 0 && !board && selectedBoardIds.size > 0) {
+      selectedBoardIds = new Set();
+    }
+
     if (e.button === 2 && e.ctrlKey && board) {
       if (session.isActive) return;
       e.preventDefault();
       onselectboard(board.id);
+      boardWasSelected = selectedBoardIds.has(board.id);
+      movingBoardIds = boardWasSelected
+        ? [...selectedBoardIds]
+        : [board.id];
+      movingBoardPositions = boards
+        .filter((entry) => movingBoardIds.includes(entry.id))
+        .map((entry) => ({ id: entry.id, x: entry.x, y: entry.y }));
       movingBoardId = board.id;
       movingPointerId = e.pointerId;
       movingBoardStart = { x: e.clientX, y: e.clientY, boardX: board.x, boardY: board.y };
-      dragPreview = { id: board.id, x: board.x, y: board.y };
+      boardDragStarted = false;
+      dragPreview = [];
       viewportEl.setPointerCapture(e.pointerId);
       return;
     }
@@ -821,6 +1129,28 @@
   function onPointerMove(e: PointerEvent): void {
     lastClient = { x: e.clientX, y: e.clientY };
 
+    if (movingReference?.pointerId === e.pointerId) {
+      onreferencemove(
+        movingReference.id,
+        movingReference.referenceX + (e.clientX - movingReference.startClientX) / view.zoom,
+        movingReference.referenceY + (e.clientY - movingReference.startClientY) / view.zoom,
+      );
+      return;
+    }
+
+    if (draggingGuide?.pointerId === e.pointerId) {
+      const guide = guides.find((entry) => entry.id === draggingGuide?.id);
+      const board = guide && boards.find((entry) => entry.id === guide.boardId);
+      if (guide && board) {
+        const point = pixelAtBoard(board, e.clientX, e.clientY);
+        const position = guide.axis === 'x'
+          ? Math.max(0, Math.min(board.buffer.width, point.x))
+          : Math.max(0, Math.min(board.buffer.height, point.y));
+        onguideschange(guides.map((entry) => entry.id === guide.id ? { ...entry, position } : entry));
+      }
+      return;
+    }
+
     if (e.pointerType === 'touch') {
       const known = touches.get(e.pointerId);
       if (known) {
@@ -834,16 +1164,29 @@
     }
 
     if (movingBoardId !== null && movingPointerId === e.pointerId) {
-      const dx = Math.round((e.clientX - movingBoardStart.x) / view.zoom);
-      const dy = Math.round((e.clientY - movingBoardStart.y) / view.zoom);
-      const movingBoard = boards.find((board) => board.id === movingBoardId);
-      if (movingBoard) {
+      if (!boardDragStarted && Math.hypot(e.clientX - movingBoardStart.x, e.clientY - movingBoardStart.y) >= 4) {
+        boardDragStarted = true;
+        if (!boardWasSelected) selectedBoardIds = new Set([movingBoardId]);
+      }
+      if (boardDragStarted) {
+        const dx = Math.round((e.clientX - movingBoardStart.x) / view.zoom);
+        const dy = Math.round((e.clientY - movingBoardStart.y) / view.zoom);
+        const movingBoard = boards.find((entry) => entry.id === movingBoardId);
+        const initialPosition = movingBoardPositions.find((entry) => entry.id === movingBoardId);
+        if (!movingBoard || !initialPosition) return;
         const snapped = snapBoardPosition(
           movingBoard,
-          movingBoardStart.boardX + dx,
-          movingBoardStart.boardY + dy,
+          initialPosition.x + dx,
+          initialPosition.y + dy,
+          new Set(movingBoardIds),
         );
-        dragPreview = { id: movingBoardId, x: snapped.x, y: snapped.y };
+        const offsetX = snapped.x - initialPosition.x;
+        const offsetY = snapped.y - initialPosition.y;
+        dragPreview = movingBoardPositions.map((entry) => ({
+          id: entry.id,
+          x: entry.x + offsetX,
+          y: entry.y + offsetY,
+        }));
         alignmentGuides = snapped.guides;
       }
       updateCursor();
@@ -867,13 +1210,11 @@
     }
 
     if (panning && e.pointerId === panPointerId) {
-      view = clampSceneView(
-        {
-          zoom: view.zoom,
-          offsetX: panStart.offsetX + (e.clientX - panStart.x),
-          offsetY: panStart.offsetY + (e.clientY - panStart.y),
-        },
-      );
+      view = {
+        zoom: view.zoom,
+        offsetX: Math.round(panStart.offsetX + (e.clientX - panStart.x)),
+        offsetY: Math.round(panStart.offsetY + (e.clientY - panStart.y)),
+      };
     } else if (session.isActiveFor(e.pointerId)) {
       // Объединённые события дают все промежуточные позиции быстрого движения;
       // оставшиеся разрывы закрывает Брезенхэм внутри инструмента
@@ -903,14 +1244,43 @@
   function onPointerUp(e: PointerEvent): void {
     if (e.pointerType === 'touch') forgetTouch(e.pointerId);
 
+    if (movingReference?.pointerId === e.pointerId) {
+      movingReference = null;
+      onreferencemoveend();
+      releasePointer(e.pointerId);
+      return;
+    }
+
+    if (draggingGuide?.pointerId === e.pointerId) {
+      draggingGuide = null;
+      releasePointer(e.pointerId);
+      return;
+    }
+
     if (movingBoardId !== null && movingPointerId === e.pointerId) {
       const movedId = movingBoardId;
-      const preview = dragPreview;
+      const previews = dragPreview;
+      const didDrag = boardDragStarted;
+      if (!didDrag) {
+        const nextSelection = new Set(selectedBoardIds);
+        if (boardWasSelected) nextSelection.delete(movedId);
+        else nextSelection.add(movedId);
+        selectedBoardIds = nextSelection;
+      }
       movingBoardId = null;
       movingPointerId = -1;
-      dragPreview = null;
+      movingBoardIds = [];
+      movingBoardPositions = [];
+      boardDragStarted = false;
+      boardWasSelected = false;
+      dragPreview = [];
       alignmentGuides = [];
-      if (preview?.id === movedId) onmoveboard(movedId, preview.x, preview.y);
+      if (didDrag && previews.length === 1) {
+        const preview = previews[0]!;
+        onmoveboard(preview.id, preview.x, preview.y);
+      } else if (didDrag && previews.length > 1) {
+        onmoveboards(previews);
+      }
       releasePointer(e.pointerId);
       return;
     }
@@ -966,6 +1336,15 @@
   /** Браузер забрал ввод (системный жест, ладонь на экране): штрих отменяется целиком. */
   function onPointerCancel(e: PointerEvent): void {
     if (e.pointerType === 'touch') forgetTouch(e.pointerId);
+    if (movingReference?.pointerId === e.pointerId) {
+      movingReference = null;
+      onreferencemovecancel();
+      releasePointer(e.pointerId);
+    }
+    if (draggingGuide?.pointerId === e.pointerId) {
+      draggingGuide = null;
+      releasePointer(e.pointerId);
+    }
     if (rightPanPointerId === e.pointerId) rightPanPointerId = -1;
     if (selectionDrag?.pointerId === e.pointerId) {
       onselection(selectionDrag.original);
@@ -975,7 +1354,11 @@
     if (movingBoardId !== null && movingPointerId === e.pointerId) {
       movingBoardId = null;
       movingPointerId = -1;
-      dragPreview = null;
+      movingBoardIds = [];
+      movingBoardPositions = [];
+      boardDragStarted = false;
+      boardWasSelected = false;
+      dragPreview = [];
       alignmentGuides = [];
     }
 
@@ -996,6 +1379,11 @@
    * без этого штрих «залипал» бы и блокировал рисование до перезагрузки страницы.
    */
   function onLostPointerCapture(e: PointerEvent): void {
+    if (movingReference?.pointerId === e.pointerId) {
+      movingReference = null;
+      onreferencemovecancel();
+    }
+    if (draggingGuide?.pointerId === e.pointerId) draggingGuide = null;
     if (rightPanPointerId === e.pointerId) rightPanPointerId = -1;
     if (selectionDrag?.pointerId === e.pointerId) {
       onselection(selectionDrag.original);
@@ -1004,7 +1392,11 @@
     if (movingBoardId !== null && movingPointerId === e.pointerId) {
       movingBoardId = null;
       movingPointerId = -1;
-      dragPreview = null;
+      movingBoardIds = [];
+      movingBoardPositions = [];
+      boardDragStarted = false;
+      boardWasSelected = false;
+      dragPreview = [];
       alignmentGuides = [];
     }
     if (panning && e.pointerId === panPointerId) {
@@ -1101,6 +1493,11 @@
 
   function onBlur(): void {
     focused = false;
+    if (movingReference) {
+      movingReference = null;
+      onreferencemovecancel();
+    }
+    movingReference = null;
     if (session.isActiveFor('keyboard')) {
       session.finish('keyboard');
       keyboardPenDown = false;
@@ -1128,6 +1525,9 @@
     return () => {
       observer.disconnect();
       el.removeEventListener('wheel', onWheel);
+      if (tiledRenderFrame) cancelAnimationFrame(tiledRenderFrame);
+      if (previewWindowTimer) clearInterval(previewWindowTimer);
+      previewWindow?.close();
     };
   });
 </script>
@@ -1143,7 +1543,7 @@
     bind:this={viewportEl}
     role="application"
     tabindex="0"
-    aria-label="Рабочее поле холстов. Ctrl и правая кнопка мыши выделяют и перемещают холст."
+    aria-label="Рабочее поле. Перетаскивайте пустое пространство правой кнопкой мыши, чтобы перемещаться. Ctrl и клик правой кнопкой выделяют холсты; перетаскивание выделенного холста перемещает группу."
     oncontextmenu={(e) => e.preventDefault()}
     onpointerdown={onPointerDown}
     onpointermove={onPointerMove}
@@ -1155,6 +1555,9 @@
     onfocus={onFocus}
     onblur={onBlur}
   >
+    {#if tiledMode}
+      <canvas class="tiled-background" bind:this={tiledPreviewCanvas} aria-hidden="true"></canvas>
+    {/if}
     <div
       class="stage"
       style:transform="translate({view.offsetX}px, {view.offsetY}px)"
@@ -1163,18 +1566,27 @@
         <div
           class="board"
           class:selected={board.id === activeBoardId}
+          class:group-selected={selectedBoardIds.has(board.id) && board.id !== activeBoardId}
+          class:checkerboard={checkerboard}
+          class:zoomed-out={view.zoom < 1}
           style:left="{board.x * view.zoom}px"
           style:top="{board.y * view.zoom}px"
           style:width="{board.buffer.width * view.zoom}px"
           style:height="{board.buffer.height * view.zoom}px"
-          style:background={canvasBackground}
+          style:background-color={canvasBackground}
         >
           <canvas
             use:registerBoardCanvas={board.id}
             style:display={board.id === activeBoardId && previewBuffer ? 'none' : 'block'}
           ></canvas>
-          {#if showGrid && view.zoom >= GRID_MIN_ZOOM}
-            <div class="grid" style:background-size="{view.zoom}px {view.zoom}px"></div>
+          {#if showGrid && view.zoom * (gridMode === 'pixel' ? 1 : gridSpacing) >= GRID_MIN_ZOOM}
+            <div
+              class="grid"
+              class:pixel-grid={gridMode === 'pixel'}
+              class:square-grid={gridMode === 'square'}
+              class:isometric-grid={gridMode === 'isometric'}
+              style:--grid-size="{(gridMode === 'pixel' ? 1 : gridSpacing) * view.zoom}px"
+            ></div>
           {/if}
           <canvas
             use:registerTransformPreviewCanvas={board.id}
@@ -1193,7 +1605,38 @@
               <polyline points={polygonPoints.map((point) => `${point.x + 0.5},${point.y + 0.5}`).join(' ')} />
             </svg>
           {/if}
+          {#each guides.filter((guide) => guide.boardId === board.id) as guide (guide.id)}
+            <div
+              class="user-guide"
+              class:vertical={guide.axis === 'x'}
+              class:horizontal={guide.axis === 'y'}
+              data-guide-id={guide.id}
+              style:left={guide.axis === 'x' ? `${guide.position * view.zoom}px` : undefined}
+              style:top={guide.axis === 'y' ? `${guide.position * view.zoom}px` : undefined}
+              title="Перетащите направляющую, чтобы переместить"
+            ></div>
+          {/each}
+          {#if board.id === activeBoardId && symmetryX}
+            <div class="symmetry-guide vertical" aria-label="Вертикальная ось симметрии" style:left="{board.buffer.width * view.zoom / 2}px"></div>
+          {/if}
+          {#if board.id === activeBoardId && symmetryY}
+            <div class="symmetry-guide horizontal" aria-label="Горизонтальная ось симметрии" style:top="{board.buffer.height * view.zoom / 2}px"></div>
+          {/if}
         </div>
+      {/each}
+      {#each references.filter((reference) => reference.visible) as reference (reference.id)}
+        <canvas
+          use:registerReferenceCanvas={reference}
+          class="reference-image"
+          class:selected={reference.id === selectedReferenceId}
+          style:left="{reference.x * view.zoom}px"
+          style:top="{reference.y * view.zoom}px"
+          style:width="{reference.width * reference.scale * view.zoom}px"
+          style:height="{reference.height * reference.scale * view.zoom}px"
+          style:transform="rotate({reference.rotation}deg)"
+          style:opacity={reference.opacity}
+          aria-label="Референс: {reference.name}"
+        ></canvas>
       {/each}
       {#if cursor && tool.usesBrush}
         {@const activeBoard = boards.find((board) => board.id === activeBoardId)}
@@ -1209,19 +1652,19 @@
           ></div>
         {/if}
       {/if}
-      {#if dragPreview}
-        {@const previewBoard = boards.find((board) => board.id === dragPreview?.id)}
-        {#if previewBoard && (previewBoard.x !== dragPreview.x || previewBoard.y !== dragPreview.y)}
+      {#each dragPreview as preview (preview.id)}
+        {@const previewBoard = boards.find((board) => board.id === preview.id)}
+        {#if previewBoard && (previewBoard.x !== preview.x || previewBoard.y !== preview.y)}
           <div
             class="drop-preview"
-            style:left="{dragPreview.x * view.zoom}px"
-            style:top="{dragPreview.y * view.zoom}px"
+            style:left="{preview.x * view.zoom}px"
+            style:top="{preview.y * view.zoom}px"
             style:width="{previewBoard.buffer.width * view.zoom}px"
             style:height="{previewBoard.buffer.height * view.zoom}px"
             aria-hidden="true"
           ></div>
         {/if}
-      {/if}
+      {/each}
       {#each alignmentGuides as guide, index (`${guide.x1}:${guide.y1}:${guide.x2}:${guide.y2}:${index}`)}
         {@const box = guideBox(guide)}
         {@const line = guideLine(guide)}
@@ -1319,15 +1762,54 @@
     will-change: transform;
   }
 
+  .tiled-background {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    image-rendering: pixelated;
+  }
+
   .board {
     position: absolute;
+    background-color: #fff;
     box-shadow:
       0 0 0 1px #4a4e60,
       0 12px 40px rgba(0, 0, 0, 0.55);
   }
 
+  .reference-image {
+    position: absolute;
+    z-index: 3;
+    max-width: none;
+    transform-origin: center center;
+    image-rendering: pixelated;
+    pointer-events: none;
+  }
+
+  .reference-image.selected {
+    outline: 1px dashed #fff;
+    outline-offset: -1px;
+  }
+
+  .board.checkerboard {
+    background-image:
+      linear-gradient(45deg, #c9cbd1 25%, transparent 25%),
+      linear-gradient(-45deg, #c9cbd1 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #c9cbd1 75%),
+      linear-gradient(-45deg, transparent 75%, #c9cbd1 75%);
+    background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+    background-size: 16px 16px;
+  }
+
   .board.selected {
     outline: 2px solid var(--accent);
+    outline-offset: 3px;
+  }
+
+  .board.group-selected {
+    outline: 2px dashed var(--accent);
     outline-offset: 3px;
   }
 
@@ -1365,6 +1847,10 @@
     image-rendering: pixelated;
   }
 
+  .board.zoomed-out canvas {
+    image-rendering: auto;
+  }
+
   .grid {
     position: absolute;
     inset: 0;
@@ -1372,6 +1858,83 @@
     background-image:
       linear-gradient(to right, rgba(150, 155, 175, 0.4) 1px, transparent 1px),
       linear-gradient(to bottom, rgba(150, 155, 175, 0.4) 1px, transparent 1px);
+    background-size: var(--grid-size) var(--grid-size);
+  }
+
+  .grid.isometric-grid {
+    background-image:
+      repeating-linear-gradient(30deg, rgba(150, 155, 175, 0.4) 0 1px, transparent 1px var(--grid-size)),
+      repeating-linear-gradient(90deg, rgba(150, 155, 175, 0.4) 0 1px, transparent 1px var(--grid-size)),
+      repeating-linear-gradient(150deg, rgba(150, 155, 175, 0.4) 0 1px, transparent 1px var(--grid-size));
+  }
+
+  .grid.pixel-grid,
+  .grid.square-grid {
+    background-size: var(--grid-size) var(--grid-size);
+  }
+
+  .user-guide,
+  .symmetry-guide {
+    position: absolute;
+    z-index: 8;
+    pointer-events: none;
+  }
+
+  .user-guide {
+    pointer-events: auto;
+    touch-action: none;
+  }
+
+  .user-guide.vertical,
+  .symmetry-guide.vertical {
+    top: 0;
+    bottom: 0;
+    width: 9px;
+    transform: translateX(-50%);
+    cursor: ew-resize;
+  }
+
+  .user-guide.horizontal,
+  .symmetry-guide.horizontal {
+    left: 0;
+    right: 0;
+    height: 9px;
+    transform: translateY(-50%);
+    cursor: ns-resize;
+  }
+
+  .user-guide::after,
+  .symmetry-guide::after {
+    position: absolute;
+    content: '';
+    background: #35c9ff;
+    opacity: 0.9;
+    box-shadow: 0 0 2px #00131d;
+  }
+
+  .user-guide.vertical::after,
+  .symmetry-guide.vertical::after {
+    top: 0;
+    bottom: 0;
+    left: 4px;
+    width: 1px;
+  }
+
+  .user-guide.horizontal::after,
+  .symmetry-guide.horizontal::after {
+    top: 4px;
+    right: 0;
+    left: 0;
+    height: 1px;
+  }
+
+  .symmetry-guide {
+    z-index: 7;
+  }
+
+  .symmetry-guide::after {
+    background: #ff6b92;
+    opacity: 0.8;
   }
 
   .selection-overlay {

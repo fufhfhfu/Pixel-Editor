@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { compositeLayers, createLayerGroup, createRasterLayer, updateRasterLayer } from './layers';
+import { createLayerEffect } from './effects';
 import { PixelBuffer, type RGBA } from './state';
 
 const RED: RGBA = { r: 255, g: 0, b: 0, a: 255 };
@@ -119,6 +120,27 @@ describe('raster layer compositing', () => {
     expect(updateRasterLayer(layer, { role: 'reference', locked: false, alphaLock: true }))
       .toMatchObject({ role: 'reference', locked: true, alphaLock: false });
     expect(() => updateRasterLayer(layer, { effects: { contrast: 101 } })).toThrow(/contrast/);
+  });
+
+  it('composites non-destructive spatial effects into neighboring pixels', () => {
+    const layer = createRasterLayer('effect-layer', 'Effect', 5, 5);
+    layer.buffer.setPixel(2, 2, { r: 255, g: 255, b: 255, a: 255 });
+    const original = layer.buffer.data.slice();
+    const effected = updateRasterLayer(layer, {
+      filters: [{
+        ...createLayerEffect('outline', 'outline'),
+        color: { r: 255, g: 0, b: 0, a: 255 },
+      }],
+    });
+    const composite = compositeLayers(5, 5, [effected]);
+    expect(composite.getPixel(1, 2)).toEqual({ r: 255, g: 0, b: 0, a: 255 });
+    expect(composite.getPixel(2, 2)).toEqual({ r: 255, g: 255, b: 255, a: 255 });
+    expect(layer.buffer.data).toEqual(original);
+
+    layer.buffer.setPixel(2, 2, BLUE);
+    compositeLayers(5, 5, [effected], composite, { x: 2, y: 2, width: 1, height: 1 });
+    expect(composite.getPixel(2, 2)).toEqual(BLUE);
+    expect(composite.getPixel(1, 2)).toEqual({ r: 255, g: 0, b: 0, a: 255 });
   });
 
   it('PixelBuffer lock prevents writes and alpha lock preserves existing silhouette', () => {

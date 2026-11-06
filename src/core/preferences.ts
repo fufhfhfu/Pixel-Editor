@@ -4,11 +4,17 @@ export const CUSTOM_SIZES_KEY = 'pixel-editor:custom-sizes';
 export const CANVAS_BACKGROUND_KEY = 'pixel-editor:canvas-background';
 export const WORKSPACE_BACKGROUND_KEY = 'pixel-editor:workspace-background';
 export const THEME_KEY = 'pixel-editor:theme';
+export const GRID_MODE_KEY = 'pixel-editor:grid-mode';
+export const GRID_SPACING_KEY = 'pixel-editor:grid-spacing';
+export const SNAP_TO_GRID_KEY = 'pixel-editor:snap-to-grid';
+export const CHECKERBOARD_KEY = 'pixel-editor:checkerboard';
 export const DEFAULT_CANVAS_BACKGROUND = '#ffffff';
 export const DEFAULT_WORKSPACE_BACKGROUND = '#34363f';
 export const MAX_CUSTOM_SIZES = 16;
+export const GRID_SPACINGS = [1, 2, 4, 8, 16, 32] as const;
 
 export type ThemePreference = 'system' | 'dark' | 'light';
+export type GridMode = 'pixel' | 'square' | 'isometric';
 
 export interface CanvasSize {
   width: number;
@@ -26,6 +32,10 @@ export interface EditorPreferences {
   canvasBackground: string;
   workspaceBackground: string;
   theme: ThemePreference;
+  gridMode: GridMode;
+  gridSpacing: number;
+  snapToGrid: boolean;
+  checkerboard: boolean;
   error: string | null;
 }
 
@@ -35,6 +45,10 @@ function isBuiltInSize(size: CanvasSize): boolean {
 
 function isHexColor(value: string): boolean {
   return /^#[\da-f]{6}$/i.test(value);
+}
+
+function isGridMode(value: string | null): value is GridMode {
+  return value === 'pixel' || value === 'square' || value === 'isometric';
 }
 
 function parseSizes(value: string | null): CanvasSize[] {
@@ -74,6 +88,10 @@ export function loadEditorPreferences(storage: PreferenceStorage | null): Editor
     canvasBackground: DEFAULT_CANVAS_BACKGROUND,
     workspaceBackground: DEFAULT_WORKSPACE_BACKGROUND,
     theme: 'dark' as ThemePreference,
+    gridMode: 'pixel' as GridMode,
+    gridSpacing: 1,
+    snapToGrid: false,
+    checkerboard: true,
     error: null as string | null,
   };
   if (!storage) return defaults;
@@ -83,6 +101,10 @@ export function loadEditorPreferences(storage: PreferenceStorage | null): Editor
     const savedBackground = storage.getItem(CANVAS_BACKGROUND_KEY);
     const savedWorkspaceBackground = storage.getItem(WORKSPACE_BACKGROUND_KEY);
     const savedTheme = storage.getItem(THEME_KEY);
+    const savedGridMode = storage.getItem(GRID_MODE_KEY);
+    const savedGridSpacing = Number(storage.getItem(GRID_SPACING_KEY));
+    const savedSnapToGrid = storage.getItem(SNAP_TO_GRID_KEY);
+    const savedCheckerboard = storage.getItem(CHECKERBOARD_KEY);
     const canvasBackground =
       savedBackground && isHexColor(savedBackground) ? savedBackground : DEFAULT_CANVAS_BACKGROUND;
     return {
@@ -93,6 +115,12 @@ export function loadEditorPreferences(storage: PreferenceStorage | null): Editor
           ? savedWorkspaceBackground
           : DEFAULT_WORKSPACE_BACKGROUND,
       theme: isThemePreference(savedTheme) ? savedTheme : defaults.theme,
+      gridMode: isGridMode(savedGridMode) ? savedGridMode : defaults.gridMode,
+      gridSpacing: GRID_SPACINGS.includes(savedGridSpacing as (typeof GRID_SPACINGS)[number])
+        ? savedGridSpacing
+        : defaults.gridSpacing,
+      snapToGrid: savedSnapToGrid === 'true',
+      checkerboard: savedCheckerboard !== 'false',
       error: null,
     };
   } catch {
@@ -142,6 +170,46 @@ export function saveThemePreference(storage: PreferenceStorage | null, theme: Th
   if (!storage || !isThemePreference(theme)) return false;
   try {
     storage.setItem(THEME_KEY, theme);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function saveGridMode(storage: PreferenceStorage | null, mode: GridMode): boolean {
+  if (!storage || !isGridMode(mode)) return false;
+  try {
+    storage.setItem(GRID_MODE_KEY, mode);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function saveGridSpacing(storage: PreferenceStorage | null, spacing: number): boolean {
+  if (!storage || !GRID_SPACINGS.includes(spacing as (typeof GRID_SPACINGS)[number])) return false;
+  try {
+    storage.setItem(GRID_SPACING_KEY, String(spacing));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function saveSnapToGrid(storage: PreferenceStorage | null, enabled: boolean): boolean {
+  if (!storage || typeof enabled !== 'boolean') return false;
+  try {
+    storage.setItem(SNAP_TO_GRID_KEY, String(enabled));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function saveCheckerboard(storage: PreferenceStorage | null, enabled: boolean): boolean {
+  if (!storage || typeof enabled !== 'boolean') return false;
+  try {
+    storage.setItem(CHECKERBOARD_KEY, String(enabled));
     return true;
   } catch {
     return false;

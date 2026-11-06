@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App.svelte';
 import { AutosaveRepository } from './core/autosave';
 import { AUTOSAVE_KEY } from './core/storage';
-import { parseProject } from './core/project';
+import { parseProject, type ProjectData } from './core/project';
 
 /** Заглушки того, чего нет в jsdom: canvas, ImageData, ResizeObserver, захват указателя. */
 interface PutCall {
@@ -21,7 +21,7 @@ function installBrowserStubs(): void {
     return {
       putImageData(image: { data: Uint8ClampedArray }, _dx: number, _dy: number, x: number, y: number, w: number, h: number) {
         if (canvas.classList.contains('thumbnail') || canvas.classList.contains('selection-overlay') ||
-          canvas.classList.contains('transform-preview')) return;
+          canvas.classList.contains('transform-preview') || canvas.classList.contains('reference-image')) return;
         canvasData = image.data;
         putCalls.push({ dirty: [x, y, w, h] });
       },
@@ -75,13 +75,13 @@ function installBrowserStubs(): void {
 
 let app: ReturnType<typeof mount> | null = null;
 
-async function mountApp(): Promise<void> {
+async function mountApp(initialProject?: ProjectData): Promise<void> {
   const repository = new AutosaveRepository(null, localStorage);
   const startup = await repository.load();
   app = mount(App, {
     target: document.getElementById('app')!,
     props: {
-      initialProject: startup.project,
+      initialProject: initialProject ?? startup.project,
       initialLoadError: startup.error,
       initialStorageMode: startup.mode,
       autosaveRepository: repository,
@@ -174,6 +174,71 @@ describe('приложение целиком (jsdom)', () => {
     expect(Array.from((document.querySelector('#canvas-preset') as HTMLSelectElement).options).map((option) => option.value))
       .toEqual(['8x8', '16x16', '32x32', '64x64', '128x128', '256x256', '512x512', '1024x1024']);
     expect((document.querySelector('.board') as HTMLElement).style.backgroundColor).toBe('rgb(255, 255, 255)');
+  });
+
+  it('группирует фигуры в безымянной кнопке и закрывает меню после выбора', () => {
+    const menu = document.querySelector<HTMLElement>('.shape-menu')!;
+    const folder = menu.querySelector<HTMLButtonElement>('.shape-folder')!;
+    expect(folder.textContent?.trim()).toBe('');
+    expect(folder.getAttribute('aria-expanded')).toBe('false');
+
+    folder.click();
+    flushSync();
+    expect(folder.getAttribute('aria-expanded')).toBe('true');
+    expect(menu.querySelectorAll('.shape-menu-panel button')).toHaveLength(11);
+
+    menu.querySelector<HTMLButtonElement>('[aria-label="Эллипс (O)"]')!.click();
+    flushSync();
+    expect(folder.getAttribute('aria-expanded')).toBe('false');
+    expect(menu.querySelector('.shape-menu-panel')).toBeNull();
+    expect(folder.classList.contains('active')).toBe(true);
+  });
+
+  it('открывает менеджер референсов из панели холста', () => {
+    const toggle = Array.from(document.querySelectorAll<HTMLButtonElement>('.toolbar button'))
+      .find((button) => button.textContent?.trim() === 'Референсы');
+    expect(toggle).toBeTruthy();
+    toggle!.click();
+    flushSync();
+    expect(document.querySelector('[aria-label="Менеджер референсов"]')).toBeTruthy();
+    document.querySelector<HTMLButtonElement>('[aria-label="Закрыть панель референсов"]')!.click();
+    flushSync();
+    expect(document.querySelector('[aria-label="Менеджер референсов"]')).toBeNull();
+  });
+
+  it('пипетка выбирает точный цвет с видимого референса', async () => {
+    const project: ProjectData = {
+      width: 32,
+      height: 32,
+      pixels: new Uint8ClampedArray(32 * 32 * 4),
+      paletteId: 'pico8',
+      freeColor: true,
+      primary: { r: 0, g: 0, b: 0, a: 255 },
+      secondary: { r: 255, g: 255, b: 255, a: 255 },
+      recent: [],
+      references: [{
+        id: 'ref',
+        name: 'swatches.png',
+        width: 2,
+        height: 1,
+        pixels: new Uint8ClampedArray([12, 34, 56, 255, 78, 90, 123, 128]),
+        x: 0,
+        y: 0,
+        scale: 1,
+        rotation: 0,
+        opacity: 1,
+        visible: true,
+        locked: false,
+      }],
+    };
+    if (app) unmount(app);
+    app = null;
+    await mountApp(project);
+    await frame();
+    document.querySelector<HTMLButtonElement>('[aria-label^="Пипетка"]')!.click();
+    flushSync();
+    pointer('pointerdown', screenOf(0, 0));
+    expect(document.querySelector<HTMLInputElement>('.big.primary input')?.value).toBe('#0c2238');
   });
 
   it('первая отрисовка — весь холст; штрих перерисовывает только свою область', async () => {
@@ -457,28 +522,39 @@ describe('приложение целиком (jsdom)', () => {
     const boards = [...document.querySelectorAll<HTMLElement>('.board')];
     expect(boards).toHaveLength(2);
 
+    const secondBoardPoint = screenOf(5, 5, 1);
+    const zoom = parseFloat(boards[1].style.width) / 32;
+    expect(boards[1].style.left).toBe(`${56 * zoom}px`);
+    const originalPositions = boards.map((board) => ({ left: board.style.left, top: board.style.top }));
+    const start = secondBoardPoint;
+    pointer('pointerdown', start, { button: 2, ctrlKey: true });
+    const singleMove = { x: start.x + zoom * 5, y: start.y + zoom * 3 };
+    pointer('pointermove', singleMove, { button: -1, ctrlKey: true });
+    pointer('pointerup', singleMove, { button: 2, ctrlKey: true });
+    await tick();
+    expect(boards[0]!.style.left).toBe(originalPositions[0]!.left);
+    expect(boards[0]!.style.top).toBe(originalPositions[0]!.top);
+    expect(boards[1]!.style.left).toBe(`${61 * zoom}px`);
+    expect(boards[1]!.style.top).toBe(`${3 * zoom}px`);
+
+    key('KeyZ', { ctrlKey: true });
+    await tick();
+    expect(boards[1]!.style.left).toBe(originalPositions[1]!.left);
+    expect(boards[1]!.style.top).toBe(originalPositions[1]!.top);
+
     const firstBoardPoint = screenOf(5, 5, 0);
     pointer('pointerdown', firstBoardPoint, { button: 2, ctrlKey: true });
     pointer('pointerup', firstBoardPoint, { button: 2, ctrlKey: true });
     await tick();
-    expect(undoButton.disabled).toBe(false);
+    expect(document.querySelectorAll('.board.group-selected')).toHaveLength(1);
 
-    const secondBoardPoint = screenOf(5, 5, 1);
-    pointer('pointerdown', secondBoardPoint, { button: 2, ctrlKey: true });
-    pointer('pointerup', secondBoardPoint, { button: 2, ctrlKey: true });
-    await tick();
-    expect(undoButton.disabled).toBe(false);
-
-    const zoom = parseFloat(boards[1].style.width) / 32;
-    expect(boards[1].style.left).toBe(`${56 * zoom}px`);
-    const start = screenOf(5, 5, 1);
-    const originalLeft = boards[1].style.left;
-    const originalTop = boards[1].style.top;
-    pointer('pointerdown', start, { button: 2, ctrlKey: true });
-    const moved = { x: start.x + zoom * 5, y: start.y + zoom * 3 };
+    const groupStart = screenOf(5, 5, 1);
+    pointer('pointerdown', groupStart, { button: 2, ctrlKey: true });
+    const moved = { x: groupStart.x + zoom * 5, y: groupStart.y + zoom * 3 };
     pointer('pointermove', moved, { button: -1, ctrlKey: true });
-    expect(document.querySelectorAll<HTMLElement>('.board')[1].style.left).toBe(originalLeft);
-    expect(document.querySelectorAll<HTMLElement>('.board')[1].style.top).toBe(originalTop);
+    expect(boards[1]!.style.left).toBe(originalPositions[1]!.left);
+    expect(boards[1]!.style.top).toBe(originalPositions[1]!.top);
+    expect(document.querySelectorAll('.drop-preview')).toHaveLength(2);
     expect(document.querySelector('.drop-preview')).toBeTruthy();
     pointer('pointerup', moved, { button: 2, ctrlKey: true });
     await tick();
@@ -487,29 +563,23 @@ describe('приложение целиком (jsdom)', () => {
     expect(movedBoard.classList.contains('selected')).toBe(true);
     expect(movedBoard.style.left).toBe(`${61 * zoom}px`);
     expect(movedBoard.style.top).toBe(`${3 * zoom}px`);
+    expect(boards[0]!.style.left).toBe(`${5 * zoom}px`);
+    expect(boards[0]!.style.top).toBe(`${3 * zoom}px`);
+    pointer('pointerdown', { x: 790, y: 590 }, { button: 0 });
+    pointer('pointerup', { x: 790, y: 590 }, { button: 0 });
+    await tick();
+    expect(document.querySelectorAll('.board.group-selected')).toHaveLength(0);
 
     key('KeyZ', { ctrlKey: true });
     await tick();
-    expect(document.querySelectorAll<HTMLElement>('.board')[1].style.left).toBe(originalLeft);
-    expect(document.querySelectorAll<HTMLElement>('.board')[1].style.top).toBe(originalTop);
+    expect(boards[0]!.style.left).toBe(originalPositions[0]!.left);
+    expect(boards[0]!.style.top).toBe(originalPositions[0]!.top);
+    expect(boards[1]!.style.left).toBe(originalPositions[1]!.left);
+    expect(boards[1]!.style.top).toBe(originalPositions[1]!.top);
     key('KeyY', { ctrlKey: true });
     await tick();
     expect(document.querySelectorAll<HTMLElement>('.board')[1].style.left).toBe(`${61 * zoom}px`);
 
-    key('KeyZ', { ctrlKey: true });
-    key('KeyZ', { ctrlKey: true });
-    await tick();
-    expect(document.querySelectorAll('.board')).toHaveLength(1);
-    key('KeyZ', { ctrlKey: true });
-    await tick();
-    expect(undoButton.disabled).toBe(true);
-
-    key('KeyY', { ctrlKey: true });
-    key('KeyY', { ctrlKey: true });
-    key('KeyY', { ctrlKey: true });
-    await tick();
-    expect(document.querySelectorAll('.board')).toHaveLength(2);
-    expect(document.querySelectorAll<HTMLElement>('.board')[1].style.left).toBe(`${61 * zoom}px`);
   });
 
   it('swaps board positions when a dropped board covers at least half the other board', async () => {

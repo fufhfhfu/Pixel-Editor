@@ -43,8 +43,32 @@ function createWindow() {
 
   mainWindow.once('ready-to-show', () => mainWindow.show());
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (url === 'about:blank') {
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          width: 800,
+          height: 700,
+          minWidth: 320,
+          minHeight: 240,
+          backgroundColor: '#30323a',
+          webPreferences: {
+            nodeIntegration: false,
+            contextIsolation: true,
+            sandbox: true,
+            webSecurity: true,
+          },
+        },
+      };
+    }
     if (url.startsWith('https://')) void shell.openExternal(url);
     return { action: 'deny' };
+  });
+  mainWindow.webContents.on('did-create-window', (childWindow) => {
+    childWindow.webContents.on('will-navigate', (event, url) => {
+      if (url !== 'about:blank') event.preventDefault();
+    });
+    childWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   });
   mainWindow.webContents.on('will-navigate', (event, url) => {
     if (!isAllowedPage(url)) event.preventDefault();

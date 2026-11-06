@@ -8,7 +8,8 @@
  *   "pixels": "<RGBA в base64>",
  *   "palette": { "id": "pico8", "freeColor": false },
  *   "colors": { "primary": [r, g, b, a], "secondary": [r, g, b, a] },
- *   "recent": [[r, g, b, a], …]
+ *   "recent": [[r, g, b, a], …],
+ *   "references": [{ "id": "…", "pixels": "<RGBA в base64>", "…" : "…" }]
  * }
  */
 
@@ -25,9 +26,16 @@ import {
   type LayerGroup,
   type LayerRole,
 } from './layers';
+import { isValidLayerEffectStack, type LayerEffect } from './effects';
+import {
+  isValidReference,
+  MAX_PROJECT_REFERENCES,
+  MAX_REFERENCE_TOTAL_PIXELS,
+  type ReferenceImage,
+} from './reference';
 
 export const PROJECT_FORMAT = 'pixel-editor-project';
-export const PROJECT_VERSION = 5;
+export const PROJECT_VERSION = 7;
 export const MAX_PROJECT_CANVASES = 32;
 export const MAX_PROJECT_TOTAL_PIXELS = 4_194_304;
 export const MAX_PROJECT_LAYERS = 64;
@@ -59,6 +67,7 @@ export interface ProjectLayerData {
   clippingMask: boolean;
   role?: LayerRole;
   effects?: LayerEffects;
+  filters?: readonly LayerEffect[];
   groupId?: string | null;
 }
 
@@ -74,6 +83,7 @@ export interface ProjectData {
   recent: RGBA[];
   canvases?: ProjectCanvasData[];
   activeCanvasId?: string;
+  references?: ReferenceImage[];
 }
 
 /** Файл не является корректным проектом; message можно показывать пользователю. */
@@ -110,6 +120,24 @@ export function serializeProject(project: ProjectData): string {
   const canvases = project.canvases;
   const multiCanvas = canvases !== undefined;
   const layered = canvases?.some((canvas) => canvas.layers !== undefined) ?? false;
+  const references = project.references;
+  if (references !== undefined) {
+    if (!Array.isArray(references) || references.length > MAX_PROJECT_REFERENCES) {
+      throw new ProjectFormatError(`В проекте может быть не больше ${MAX_PROJECT_REFERENCES} референсов.`);
+    }
+    let referencePixels = 0;
+    const referenceIds = new Set<string>();
+    for (const reference of references) {
+      if (!isValidReference(reference) || referenceIds.has(reference.id)) {
+        throw new ProjectFormatError('В проекте указаны некорректные данные референса.');
+      }
+      referenceIds.add(reference.id);
+      referencePixels += reference.width * reference.height;
+      if (referencePixels > MAX_REFERENCE_TOTAL_PIXELS) {
+        throw new ProjectFormatError('Общая площадь изображений референсов превышает допустимый лимит.');
+      }
+    }
+  }
   if (canvases !== undefined && (canvases.length === 0 || canvases.length > MAX_PROJECT_CANVASES)) {
     throw new ProjectFormatError(`Проект должен содержать от 1 до ${MAX_PROJECT_CANVASES} холстов.`);
   }
@@ -155,6 +183,7 @@ export function serializeProject(project: ProjectData): string {
               const value = layer.effects?.[key as keyof LayerEffects];
               return typeof value === 'number' && Number.isFinite(value) && value >= -100 && value <= 100;
             })) ||
+            (layer.filters !== undefined && !isValidLayerEffectStack(layer.filters)) ||
             (layer.groupId !== undefined && layer.groupId !== null &&
               (typeof layer.groupId !== 'string' || layer.groupId.length === 0 || layer.groupId.length > 80)) ||
             layer.pixels.length !== canvas.width * canvas.height * CHANNELS
@@ -227,16 +256,21 @@ export function serializeProject(project: ProjectData): string {
   }
   const common = {
     format: PROJECT_FORMAT,
-    version: multiCanvas ? (layered ? PROJECT_VERSION : 2) : 1,
+    version: canvases?.some((canvas) => canvas.layers?.some((layer) => (layer.filters?.length ?? 0) > 0))
+      ? PROJECT_VERSION
+      : references !== undefined ? 6 : multiCanvas ? (layered ? 5 : 2) : 1,
     savedAt: new Date().toISOString(),
     palette: { id: project.paletteId, freeColor: project.freeColor },
     colors: { primary: colorToArray(project.primary), secondary: colorToArray(project.secondary) },
     recent: project.recent.map(colorToArray),
   };
   if (canvases !== undefined) {
-    return JSON.stringify({
+    const serialized = JSON.stringify({
       ...common,
       activeCanvasId: project.activeCanvasId,
+      ...(references !== undefined
+        ? { references: references.map((reference) => ({ ...reference, pixels: bytesToBase64(reference.pixels) })) }
+        : {}),
       canvases: canvases.map((canvas) => layered
         ? {
             id: canvas.id,
@@ -246,26 +280,41 @@ export function serializeProject(project: ProjectData): string {
             height: canvas.height,
             activeLayerId: canvas.activeLayerId,
             groups: canvas.groups ?? [],
-            layers: canvas.layers!.map((layer) => ({
-              ...layer,
-              role: layer.role ?? 'paint',
-              effects: layer.effects ?? { ...DEFAULT_LAYER_EFFECTS },
-              groupId: layer.groupId ?? null,
-              pixels: bytesToBase64(layer.pixels),
-            })),
+            layers: canvas.layers!.map((layer) => {
+              const { filters, ...savedLayer } = layer;
+              return {
+                ...savedLayer,
+                role: layer.role ?? 'paint',
+                effects: layer.effects ?? { ...DEFAULT_LAYER_EFFECTS },
+                ...(filters && filters.length > 0 ? { filters } : {}),
+                groupId: layer.groupId ?? null,
+                pixels: bytesToBase64(layer.pixels),
+              };
+            }),
           }
         : {
             ...canvas,
             pixels: bytesToBase64(canvas.pixels),
           }),
     });
+    if (serialized.length > MAX_PROJECT_JSON_LENGTH) {
+      throw new ProjectFormatError('Файл проекта превышает допустимый размер.');
+    }
+    return serialized;
   }
-  return JSON.stringify({
+  const serialized = JSON.stringify({
     ...common,
     width: project.width,
     height: project.height,
     pixels: bytesToBase64(project.pixels),
+    ...(references !== undefined
+      ? { references: references.map((reference) => ({ ...reference, pixels: bytesToBase64(reference.pixels) })) }
+      : {}),
   });
+  if (serialized.length > MAX_PROJECT_JSON_LENGTH) {
+    throw new ProjectFormatError('Файл проекта превышает допустимый размер.');
+  }
+  return serialized;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -318,8 +367,9 @@ export function parseProject(text: string): ProjectData {
   let pixels: Uint8ClampedArray;
   let canvases: ProjectCanvasData[] | undefined;
   let activeCanvasId: string | undefined;
+  let references: ReferenceImage[] | undefined;
 
-  if (version === 2 || version === 3 || version === 4 || version === 5) {
+  if ((version >= 2 && version <= 5) || (version >= 6 && raw.canvases !== undefined)) {
     if (!Array.isArray(raw.canvases) || raw.canvases.length === 0 || raw.canvases.length > MAX_PROJECT_CANVASES) {
       throw new ProjectFormatError(`Проект должен содержать от 1 до ${MAX_PROJECT_CANVASES} холстов.`);
     }
@@ -350,7 +400,7 @@ export function parseProject(text: string): ProjectData {
       let layerData: ProjectLayerData[] | undefined;
       let groupData: LayerGroup[] = [];
       let activeLayerId: string | undefined;
-      if (version >= 3) {
+      if (version >= 3 && (version <= 5 || entry.layers !== undefined)) {
         if (!Array.isArray(entry.layers) || entry.layers.length === 0 || entry.layers.length > MAX_PROJECT_LAYERS) {
           throw new ProjectFormatError(`Каждый холст должен содержать от 1 до ${MAX_PROJECT_LAYERS} слоёв.`);
         }
@@ -365,6 +415,7 @@ export function parseProject(text: string): ProjectData {
           const blendMode = item.blendMode;
           const role = item.role;
           const rawEffects = item.effects;
+          const rawFilters = item.filters;
           const groupId = item.groupId;
           if (
             typeof item.visible !== 'boolean' || typeof item.locked !== 'boolean' ||
@@ -377,6 +428,7 @@ export function parseProject(text: string): ProjectData {
               !['brightness', 'contrast', 'saturation'].every((key) =>
                 typeof rawEffects[key] === 'number' && Number.isFinite(rawEffects[key]) &&
                 (rawEffects[key] as number) >= -100 && (rawEffects[key] as number) <= 100))) ||
+            (version >= 7 && rawFilters !== undefined && !isValidLayerEffectStack(rawFilters)) ||
             (version >= 5 && groupId !== null &&
               (typeof groupId !== 'string' || groupId.length === 0 || groupId.length > 80))
           ) {
@@ -397,6 +449,7 @@ export function parseProject(text: string): ProjectData {
             blendMode,
             role: version >= 4 ? role as LayerRole : 'paint',
             effects: version >= 4 ? rawEffects as LayerEffects : { ...DEFAULT_LAYER_EFFECTS },
+            filters: version >= 7 ? (rawFilters as LayerEffect[] | undefined) ?? [] : [],
             groupId: version >= 5 ? groupId as string | null : null,
             pixels: parsePixelData(item.pixels, canvasWidth, canvasHeight),
           };
@@ -476,6 +529,7 @@ export function parseProject(text: string): ProjectData {
                 clippingMask: layer.clippingMask,
                 role: layer.role,
                 effects: layer.effects,
+                filters: layer.filters,
                 groupId: layer.groupId,
               },
             )),
@@ -515,6 +569,64 @@ export function parseProject(text: string): ProjectData {
     pixels = parsePixelData(raw.pixels, width, height);
   }
 
+  if (version >= 6) {
+    if (raw.references !== undefined && !Array.isArray(raw.references)) {
+      throw new ProjectFormatError('В проекте указаны некорректные референсы.');
+    }
+    const rawReferences = raw.references ?? [];
+    if (rawReferences.length > MAX_PROJECT_REFERENCES) {
+      throw new ProjectFormatError(`В проекте может быть не больше ${MAX_PROJECT_REFERENCES} референсов.`);
+    }
+    let referencePixels = 0;
+    const referenceIds = new Set<string>();
+    references = rawReferences.map((value): ReferenceImage => {
+      if (!isRecord(value) || typeof value.pixels !== 'string') {
+        throw new ProjectFormatError('В проекте указаны некорректные данные референса.');
+      }
+      const { id, name, width, height, x, y, scale, rotation, opacity, visible, locked, pixels: encodedPixels } = value;
+      if (
+        typeof id !== 'string' ||
+        typeof name !== 'string' ||
+        typeof width !== 'number' ||
+        typeof height !== 'number' ||
+        typeof x !== 'number' ||
+        typeof y !== 'number' ||
+        typeof scale !== 'number' ||
+        typeof rotation !== 'number' ||
+        typeof opacity !== 'number' ||
+        typeof visible !== 'boolean' ||
+        typeof locked !== 'boolean' ||
+        typeof encodedPixels !== 'string' ||
+        !isValidCanvasSize(width, height)
+      ) {
+        throw new ProjectFormatError('В проекте указаны некорректные данные референса.');
+      }
+      const reference: ReferenceImage = {
+        id,
+        name,
+        width,
+        height,
+        x,
+        y,
+        scale,
+        rotation,
+        opacity,
+        visible,
+        locked,
+        pixels: parsePixelData(encodedPixels, width, height),
+      };
+      if (!isValidReference(reference) || referenceIds.has(reference.id)) {
+        throw new ProjectFormatError('В проекте указаны некорректные данные референса.');
+      }
+      referenceIds.add(reference.id);
+      referencePixels += reference.width * reference.height;
+      if (referencePixels > MAX_REFERENCE_TOTAL_PIXELS) {
+        throw new ProjectFormatError('Общая площадь изображений референсов превышает допустимый лимит.');
+      }
+      return reference;
+    });
+  }
+
   const paletteInfo = isRecord(raw.palette) ? raw.palette : {};
   const known = typeof paletteInfo.id === 'string' && PALETTES.some((p) => p.id === paletteInfo.id);
   const paletteId = known ? (paletteInfo.id as string) : DEFAULT_PALETTE_ID;
@@ -538,7 +650,7 @@ export function parseProject(text: string): ProjectData {
     }
   }
 
-  return { width, height, pixels, paletteId, freeColor, primary, secondary, recent, canvases, activeCanvasId };
+  return { width, height, pixels, paletteId, freeColor, primary, secondary, recent, canvases, activeCanvasId, references };
 }
 
 function parsePixelData(value: unknown, width: number, height: number): Uint8ClampedArray {

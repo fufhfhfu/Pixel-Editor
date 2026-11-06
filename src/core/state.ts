@@ -80,6 +80,7 @@ export class PixelBuffer {
   private dirtyMinY = 0;
   private dirtyMaxX = -1;
   private dirtyMaxY = -1;
+  private contentRevision = 0;
 
   constructor(width: number, height: number, data?: Uint8ClampedArray) {
     if (!isValidCanvasSize(width, height)) {
@@ -178,6 +179,11 @@ export class PixelBuffer {
     return this.alphaLock;
   }
 
+  /** Changes whenever pixel data is marked dirty; useful for derived render caches. */
+  get revision(): number {
+    return this.contentRevision;
+  }
+
   /** Делает весь холст прозрачным. */
   clear(): void {
     if (this.locked || this.alphaLock) return;
@@ -215,6 +221,7 @@ export class PixelBuffer {
   /** Помечает один пиксель изменённым; координаты вне холста игнорируются. */
   markDirty(x: number, y: number): void {
     if (x < 0 || y < 0 || x >= this.width || y >= this.height) return;
+    this.contentRevision++;
     if (this.dirtyMinX > this.dirtyMaxX) {
       this.dirtyMinX = this.dirtyMaxX = x;
       this.dirtyMinY = this.dirtyMaxY = y;
@@ -238,6 +245,7 @@ export class PixelBuffer {
   }
 
   markAllDirty(): void {
+    this.contentRevision++;
     this.dirtyMinX = 0;
     this.dirtyMinY = 0;
     this.dirtyMaxX = this.width - 1;

@@ -121,6 +121,14 @@
 
   const brushEnabled = $derived(tools.find((t) => t.id === activeToolId)?.usesBrush ?? false);
   const selectedBrush = $derived(brushes.find((brush) => brush.id === selectedBrushId) ?? null);
+  const shapeToolIds: readonly ToolId[] = [
+    'line', 'rect', 'filledRect', 'circle', 'filledCircle', 'ellipse',
+    'filledEllipse', 'triangle', 'filledTriangle', 'polygon', 'filledPolygon',
+  ];
+  const shapeTools = $derived(tools.filter((tool) => shapeToolIds.includes(tool.id)));
+  const activeShapeTool = $derived(shapeTools.find((tool) => tool.id === activeToolId));
+  let shapeMenuOpen = $state(false);
+  let shapeMenuContainer = $state<HTMLDivElement | null>(null);
   let brushName = $state('');
   let brushType = $state<BrushType>('custom');
   let importInput: HTMLInputElement;
@@ -250,7 +258,25 @@
     link.click();
     URL.revokeObjectURL(url);
   }
+
+  function closeShapeMenuOnOutsidePointer(event: PointerEvent): void {
+    if (shapeMenuOpen && shapeMenuContainer && event.target instanceof Node && !shapeMenuContainer.contains(event.target)) {
+      shapeMenuOpen = false;
+    }
+  }
+
+  function closeShapeMenuOnEscape(event: KeyboardEvent): void {
+    if (event.key === 'Escape' && shapeMenuOpen) {
+      shapeMenuOpen = false;
+      shapeMenuContainer?.querySelector<HTMLButtonElement>('.shape-folder')?.focus();
+    }
+  }
 </script>
+
+<svelte:window
+  onpointerdown={closeShapeMenuOnOutsidePointer}
+  onkeydown={closeShapeMenuOnEscape}
+/>
 
 {#snippet tip(title: string, key: string, hint?: string)}
   <span class="tip" role="tooltip">
@@ -322,20 +348,62 @@
 
   <div class="section">
     {#each tools as tool (tool.id)}
-      <div class="slot">
-        <button
-          type="button"
-          class="tool"
-          class:active={tool.id === activeToolId}
-          aria-pressed={tool.id === activeToolId}
-          aria-label="{tool.label} ({tool.hotkeyLabel})"
-          aria-keyshortcuts={tool.hotkeyLabel}
-          onclick={() => onselect(tool.id)}
-        >
-          {@render icon(tool.id)}
-        </button>
-        {@render tip(tool.label, tool.hotkeyLabel, tool.hint)}
-      </div>
+      {#if tool.id === 'line'}
+        <div class="shape-menu" class:open={shapeMenuOpen} bind:this={shapeMenuContainer}>
+          <button
+            type="button"
+            class="tool shape-folder"
+            class:active={activeShapeTool !== undefined}
+            aria-label="Фигуры"
+            aria-expanded={shapeMenuOpen}
+            title="Фигуры"
+            onclick={() => (shapeMenuOpen = !shapeMenuOpen)}
+          >
+            {@render icon(activeShapeTool?.id ?? 'rect')}
+            <svg class="shape-chevron" viewBox="0 0 8 12" aria-hidden="true">
+              <path d="m2 1 5 5-5 5" />
+            </svg>
+          </button>
+          {#if shapeMenuOpen}
+            <div class="shape-menu-panel" role="group" aria-label="Фигуры">
+              {#each shapeTools as shape (shape.id)}
+                <div class="slot">
+                  <button
+                    type="button"
+                    class="tool"
+                    class:active={shape.id === activeToolId}
+                    aria-pressed={shape.id === activeToolId}
+                    aria-label="{shape.label} ({shape.hotkeyLabel})"
+                    aria-keyshortcuts={shape.hotkeyLabel}
+                    onclick={() => {
+                      onselect(shape.id);
+                      shapeMenuOpen = false;
+                    }}
+                  >
+                    {@render icon(shape.id)}
+                  </button>
+                  {@render tip(shape.label, shape.hotkeyLabel, shape.hint)}
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {:else if !shapeToolIds.includes(tool.id)}
+        <div class="slot">
+          <button
+            type="button"
+            class="tool"
+            class:active={tool.id === activeToolId}
+            aria-pressed={tool.id === activeToolId}
+            aria-label="{tool.label} ({tool.hotkeyLabel})"
+            aria-keyshortcuts={tool.hotkeyLabel}
+            onclick={() => onselect(tool.id)}
+          >
+            {@render icon(tool.id)}
+          </button>
+          {@render tip(tool.label, tool.hotkeyLabel, tool.hint)}
+        </div>
+      {/if}
     {/each}
   </div>
 
@@ -727,9 +795,17 @@
     align-items: center;
     gap: 10px;
     width: 60px;
+    min-height: 0;
     padding: 12px 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
     background: var(--panel);
     border-right: 1px solid var(--border);
+  }
+
+  .panel > * {
+    flex-shrink: 0;
   }
 
   .section {
@@ -760,6 +836,46 @@
   .slot {
     position: relative;
     display: flex;
+  }
+
+  .shape-menu {
+    position: relative;
+    z-index: 1;
+  }
+
+  .shape-menu.open {
+    z-index: 70;
+  }
+
+  .shape-folder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+  }
+
+  .shape-chevron {
+    width: 7px;
+    height: 11px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .shape-menu-panel {
+    position: absolute;
+    top: 0;
+    left: calc(100% + 6px);
+    display: grid;
+    grid-template-columns: repeat(5, 40px);
+    gap: 4px;
+    padding: 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--panel);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
   }
 
   .tool {
@@ -820,6 +936,11 @@
     .tip {
       display: none;
     }
+
+    .shape-menu-panel {
+      top: calc(100% + 6px);
+      left: 0;
+    }
   }
 
   @media (max-width: 859px) {
@@ -829,6 +950,7 @@
       width: auto;
       padding: 6px 12px;
       overflow-x: auto;
+      overflow-y: hidden;
       border-right: 0;
       border-bottom: 1px solid var(--border);
     }

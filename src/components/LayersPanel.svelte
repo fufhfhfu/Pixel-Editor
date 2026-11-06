@@ -1,4 +1,13 @@
 <script lang="ts">
+  import { hexToRgba, rgbaToHex } from '../core/color';
+  import {
+    createLayerEffect,
+    LAYER_EFFECT_TYPES,
+    MAX_EFFECT_RADIUS,
+    MAX_LAYER_EFFECTS,
+    type LayerEffect,
+    type LayerEffectType,
+  } from '../core/effects';
   import type {
     LayerBlendMode,
     LayerGroup,
@@ -50,7 +59,23 @@
 
   const activeLayer = $derived(layers.find((layer) => layer.id === activeLayerId) ?? null);
   const groupById = $derived(new Map(groups.map((group) => [group.id, group])));
+  let effectSequence = 1;
   let draggedLayerId: string | null = null;
+  const layerEffectOptions: readonly { value: LayerEffectType; label: string }[] = [
+    { value: 'outline', label: 'Обводка' },
+    { value: 'drop-shadow', label: 'Тень' },
+    { value: 'glow', label: 'Свечение' },
+    { value: 'gradient-map', label: 'Карта градиента' },
+    { value: 'hue-shift', label: 'Сдвиг оттенка' },
+    { value: 'brightness', label: 'Яркость' },
+    { value: 'contrast', label: 'Контраст' },
+    { value: 'posterize', label: 'Постеризация' },
+    { value: 'colorize', label: 'Тонирование' },
+    { value: 'noise', label: 'Шум' },
+    { value: 'pixelate', label: 'Пикселизация' },
+    { value: 'blur', label: 'Размытие' },
+    { value: 'sharpen', label: 'Резкость' },
+  ];
   const blendModes: readonly { value: LayerBlendMode; label: string }[] = [
     { value: 'normal', label: 'Обычный' },
     { value: 'multiply', label: 'Умножение' },
@@ -61,7 +86,7 @@
   const layerRoles: readonly { value: LayerRole; label: string }[] = [
     { value: 'paint', label: 'Рисующий' },
     { value: 'background', label: 'Фон (фиксированный)' },
-    { value: 'reference', label: 'Референс (не экспортируется)' },
+    { value: 'reference', label: 'Слой-референс (не экспортируется)' },
   ];
 
   function groupDepth(group: LayerGroup): number {
@@ -98,6 +123,47 @@
       groupId = group.parentGroupId;
     }
     return path.reverse().join(' / ');
+  }
+
+  function effectLabel(type: LayerEffectType): string {
+    return layerEffectOptions.find((option) => option.value === type)?.label ?? type;
+  }
+
+  function addLayerEffect(event: Event): void {
+    if (!activeLayer) return;
+    const select = event.currentTarget as HTMLSelectElement;
+    const type = select.value as LayerEffectType;
+    if (!LAYER_EFFECT_TYPES.includes(type) || (activeLayer.filters?.length ?? 0) >= MAX_LAYER_EFFECTS) return;
+    const id = `${activeLayer.id}-effect-${Date.now().toString(36)}-${effectSequence++}`;
+    onupdate(activeLayer.id, { filters: [...(activeLayer.filters ?? []), createLayerEffect(type, id)] });
+    select.value = '';
+  }
+
+  function updateLayerEffect(id: string, update: Partial<LayerEffect>): void {
+    if (!activeLayer) return;
+    onupdate(activeLayer.id, {
+      filters: (activeLayer.filters ?? []).map((effect) => effect.id === id ? { ...effect, ...update } : effect),
+    });
+  }
+
+  function removeLayerEffect(id: string): void {
+    if (!activeLayer) return;
+    onupdate(activeLayer.id, { filters: (activeLayer.filters ?? []).filter((effect) => effect.id !== id) });
+  }
+
+  function moveLayerEffect(index: number, direction: -1 | 1): void {
+    if (!activeLayer) return;
+    const filters = [...(activeLayer.filters ?? [])];
+    const destination = index + direction;
+    if (destination < 0 || destination >= filters.length) return;
+    [filters[index], filters[destination]] = [filters[destination]!, filters[index]!];
+    onupdate(activeLayer.id, { filters });
+  }
+
+  function updateEffectColor(effect: LayerEffect, secondary: boolean, value: string): void {
+    const color = hexToRgba(value);
+    if (!color) return;
+    updateLayerEffect(effect.id, secondary ? { secondaryColor: color } : { color });
   }
 
   function thumbnail(node: HTMLCanvasElement, initialLayer: RasterLayer) {
@@ -159,7 +225,7 @@
       <button type="button" aria-label="Добавить слой" title="Добавить слой" onclick={onadd}>＋</button>
       <button type="button" aria-label="Создать группу" title="Создать группу из активного слоя" onclick={onaddgroup}>▱</button>
       <button type="button" aria-label="Добавить фон" title="Добавить белый фон" onclick={onaddbackground}>▰</button>
-      <button type="button" aria-label="Создать референс" title="Создать референс из композиции" onclick={onaddreference}>◇</button>
+      <button type="button" aria-label="Создать слой-референс" title="Создать неэкспортируемый слой из текущей композиции" onclick={onaddreference}>◇</button>
       <button type="button" aria-label="Дублировать слой" title="Дублировать слой" disabled={!activeLayer}
         onclick={() => activeLayer && onduplicate(activeLayer.id)}>⧉</button>
       <button type="button" aria-label="Удалить слой" title="Удалить слой" disabled={!activeLayer || layers.length <= 1}
@@ -303,7 +369,7 @@
         Clipping Mask
       </label>
       <fieldset class="effects">
-        <legend>Цветовые эффекты (неразрушающие)</legend>
+        <legend>Базовая цветокоррекция</legend>
         {#each [
           { key: 'brightness', label: 'Яркость' },
           { key: 'contrast', label: 'Контраст' },
@@ -317,6 +383,154 @@
               })} />
           </label>
         {/each}
+      </fieldset>
+      <fieldset class="effects effect-stack">
+        <legend>Эффекты слоя ({activeLayer.filters?.length ?? 0})</legend>
+        <label>Добавить эффект
+          <select aria-label="Добавить эффект" value="" disabled={(activeLayer.filters?.length ?? 0) >= MAX_LAYER_EFFECTS}
+            onchange={addLayerEffect}>
+            <option value="">Выбрать эффект…</option>
+            {#each layerEffectOptions as option (option.value)}
+              <option value={option.value}>{option.label}</option>
+            {/each}
+          </select>
+        </label>
+        {#each activeLayer.filters ?? [] as effect, index (effect.id)}
+          <fieldset class="effect-item">
+            <legend>{effectLabel(effect.type)}</legend>
+            <div class="effect-item-actions">
+              <label class="check">
+                <input type="checkbox" checked={effect.enabled} aria-label={`Включить эффект ${effectLabel(effect.type)}`}
+                  onchange={(event) => updateLayerEffect(effect.id, { enabled: event.currentTarget.checked })} />
+                Включен
+              </label>
+              <button type="button" class="icon" aria-label={`Эффект ${effectLabel(effect.type)} выше`}
+                disabled={index === 0} onclick={() => moveLayerEffect(index, -1)}>↑</button>
+              <button type="button" class="icon" aria-label={`Эффект ${effectLabel(effect.type)} ниже`}
+                disabled={index === (activeLayer.filters?.length ?? 0) - 1}
+                onclick={() => moveLayerEffect(index, 1)}>↓</button>
+              <button type="button" class="icon" aria-label={`Удалить эффект ${effectLabel(effect.type)}`}
+                onclick={() => removeLayerEffect(effect.id)}>Удалить</button>
+            </div>
+            {#if effect.type === 'outline'}
+              <label>Цвет обводки
+                <input type="color" aria-label="Цвет обводки слоя" value={rgbaToHex(effect.color)}
+                  oninput={(event) => updateEffectColor(effect, false, event.currentTarget.value)} />
+              </label>
+              <label>Толщина {effect.radius}px
+                <input type="range" min="1" max={MAX_EFFECT_RADIUS} value={effect.radius} aria-label="Толщина обводки слоя"
+                  onchange={(event) => updateLayerEffect(effect.id, { radius: Number(event.currentTarget.value) })} />
+              </label>
+              <label>Расположение
+                <select aria-label="Расположение обводки слоя" value={effect.placement}
+                  onchange={(event) => updateLayerEffect(effect.id, { placement: event.currentTarget.value as LayerEffect['placement'] })}>
+                  <option value="outside">Снаружи</option><option value="inside">Внутри</option><option value="center">По центру</option>
+                </select>
+              </label>
+            {:else if effect.type === 'drop-shadow'}
+              <label>Цвет тени
+                <input type="color" aria-label="Цвет тени слоя" value={rgbaToHex(effect.color)}
+                  oninput={(event) => updateEffectColor(effect, false, event.currentTarget.value)} />
+              </label>
+              <label>Размытие {effect.radius}px
+                <input type="range" min="0" max={MAX_EFFECT_RADIUS} value={effect.radius} aria-label="Размытие тени слоя"
+                  onchange={(event) => updateLayerEffect(effect.id, { radius: Number(event.currentTarget.value) })} />
+              </label>
+              <label>Смещение X {effect.offsetX}px
+                <input type="range" min="-32" max="32" value={effect.offsetX} aria-label="Смещение тени X слоя"
+                  onchange={(event) => updateLayerEffect(effect.id, { offsetX: Number(event.currentTarget.value) })} />
+              </label>
+              <label>Смещение Y {effect.offsetY}px
+                <input type="range" min="-32" max="32" value={effect.offsetY} aria-label="Смещение тени Y слоя"
+                  onchange={(event) => updateLayerEffect(effect.id, { offsetY: Number(event.currentTarget.value) })} />
+              </label>
+              <label>Непрозрачность {effect.amount}%
+                <input type="range" min="0" max="100" value={effect.amount} aria-label="Непрозрачность тени слоя"
+                  onchange={(event) => updateLayerEffect(effect.id, { amount: Number(event.currentTarget.value) })} />
+              </label>
+            {:else if effect.type === 'glow'}
+              <label>Цвет свечения
+                <input type="color" aria-label="Цвет свечения слоя" value={rgbaToHex(effect.color)}
+                  oninput={(event) => updateEffectColor(effect, false, event.currentTarget.value)} />
+              </label>
+              <label>Радиус {effect.radius}px
+                <input type="range" min="1" max={MAX_EFFECT_RADIUS} value={effect.radius} aria-label="Радиус свечения слоя"
+                  onchange={(event) => updateLayerEffect(effect.id, { radius: Number(event.currentTarget.value) })} />
+              </label>
+              <label>Интенсивность {effect.amount}%
+                <input type="range" min="0" max="100" value={effect.amount} aria-label="Интенсивность свечения слоя"
+                  onchange={(event) => updateLayerEffect(effect.id, { amount: Number(event.currentTarget.value) })} />
+              </label>
+            {:else if effect.type === 'gradient-map'}
+              <label>Цвет теней
+                <input type="color" aria-label="Цвет теней карты градиента" value={rgbaToHex(effect.color)}
+                  oninput={(event) => updateEffectColor(effect, false, event.currentTarget.value)} />
+              </label>
+              <label>Цвет светов
+                <input type="color" aria-label="Цвет светов карты градиента" value={rgbaToHex(effect.secondaryColor)}
+                  oninput={(event) => updateEffectColor(effect, true, event.currentTarget.value)} />
+              </label>
+              <label>Смешивание {effect.amount}%
+                <input type="range" min="0" max="100" value={effect.amount} aria-label="Смешивание карты градиента слоя"
+                  onchange={(event) => updateLayerEffect(effect.id, { amount: Number(event.currentTarget.value) })} />
+              </label>
+            {:else if effect.type === 'hue-shift'}
+              <label>Сдвиг оттенка {effect.amount}°
+                <input type="range" min="-180" max="180" value={effect.amount} aria-label="Сдвиг оттенка слоя"
+                  onchange={(event) => updateLayerEffect(effect.id, { amount: Number(event.currentTarget.value) })} />
+              </label>
+            {:else if effect.type === 'brightness' || effect.type === 'contrast'}
+              <label>{effect.type === 'brightness' ? 'Яркость' : 'Контраст'} {effect.amount}
+                <input type="range" min="-100" max="100" value={effect.amount}
+                  aria-label={`${effect.type === 'brightness' ? 'Яркость' : 'Контраст'} эффекта слоя`}
+                  onchange={(event) => updateLayerEffect(effect.id, { amount: Number(event.currentTarget.value) })} />
+              </label>
+            {:else if effect.type === 'posterize'}
+              <label>Уровни {effect.levels}
+                <input type="range" min="2" max="32" value={effect.levels} aria-label="Уровни постеризации слоя"
+                  onchange={(event) => updateLayerEffect(effect.id, { levels: Number(event.currentTarget.value) })} />
+              </label>
+            {:else if effect.type === 'colorize'}
+              <label>Цвет тонирования
+                <input type="color" aria-label="Цвет тонирования слоя" value={rgbaToHex(effect.color)}
+                  oninput={(event) => updateEffectColor(effect, false, event.currentTarget.value)} />
+              </label>
+              <label>Сила {effect.amount}%
+                <input type="range" min="0" max="100" value={effect.amount} aria-label="Сила тонирования слоя"
+                  onchange={(event) => updateLayerEffect(effect.id, { amount: Number(event.currentTarget.value) })} />
+              </label>
+            {:else if effect.type === 'noise'}
+              <label>Количество шума {effect.amount}%
+                <input type="range" min="0" max="100" value={effect.amount} aria-label="Количество шума слоя"
+                  onchange={(event) => updateLayerEffect(effect.id, { amount: Number(event.currentTarget.value) })} />
+              </label>
+              <label>Случайное зерно
+                <input type="number" min="0" max="4294967295" step="1" value={effect.seed} aria-label="Зерно шума слоя"
+                  onchange={(event) => updateLayerEffect(effect.id, { seed: Number(event.currentTarget.value) })} />
+              </label>
+            {:else if effect.type === 'pixelate'}
+              <label>Размер блока {effect.size}px
+                <input type="range" min="2" max="32" value={effect.size} aria-label="Размер пикселизации слоя"
+                  onchange={(event) => updateLayerEffect(effect.id, { size: Number(event.currentTarget.value) })} />
+              </label>
+            {:else if effect.type === 'blur'}
+              <label>Радиус размытия {effect.radius}px
+                <input type="range" min="1" max={MAX_EFFECT_RADIUS} value={effect.radius} aria-label="Радиус размытия слоя"
+                  onchange={(event) => updateLayerEffect(effect.id, { radius: Number(event.currentTarget.value) })} />
+              </label>
+            {:else if effect.type === 'sharpen'}
+              <label>Сила резкости {effect.amount}%
+                <input type="range" min="0" max="100" value={effect.amount} aria-label="Сила резкости слоя"
+                  onchange={(event) => updateLayerEffect(effect.id, { amount: Number(event.currentTarget.value) })} />
+              </label>
+              <label>Радиус резкости {effect.radius}px
+                <input type="range" min="1" max={MAX_EFFECT_RADIUS} value={effect.radius} aria-label="Радиус резкости слоя"
+                  onchange={(event) => updateLayerEffect(effect.id, { radius: Number(event.currentTarget.value) })} />
+              </label>
+            {/if}
+          </fieldset>
+        {/each}
+        <span class="note">Эффекты применяются сверху вниз и не изменяют исходные пиксели слоя.</span>
       </fieldset>
       <button type="button" class="create-selection-layer" disabled={!hasSelection}
         onclick={oncreatefromselection}>Создать слой из выделения</button>
@@ -414,6 +628,30 @@
   .effects legend {
     color: var(--text-dim);
     font-size: 11px;
+  }
+
+  .effect-item {
+    display: grid;
+    gap: 7px;
+    margin: 0;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+
+  .effect-item legend {
+    color: var(--text);
+    font-size: 11px;
+  }
+
+  .effect-item-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .effect-item-actions .check {
+    flex: 1;
   }
 
   .note {

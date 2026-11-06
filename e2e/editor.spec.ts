@@ -35,6 +35,401 @@ async function importPng(page: import('@playwright/test').Page, width = 1024, he
   await expect(page.getByText(`${width}×${height}`, { exact: true }).first()).toBeVisible();
 }
 
+test('groups shape tools in a five-column popout', async ({ page }) => {
+  await page.goto('/');
+
+  const shapeFolder = page.getByRole('button', { name: 'Фигуры' });
+  await expect(shapeFolder).toHaveAttribute('aria-expanded', 'false');
+  await shapeFolder.click();
+
+  const shapePanel = page.getByRole('group', { name: 'Фигуры' });
+  await expect(shapePanel.locator('button')).toHaveCount(11);
+  const columnCount = await shapePanel.evaluate((element) =>
+    getComputedStyle(element).gridTemplateColumns.trim().split(/\s+/).length,
+  );
+  expect(columnCount).toBe(5);
+
+  await page.getByRole('button', { name: 'Эллипс (O)' }).click();
+  await expect(shapeFolder).toHaveAttribute('aria-expanded', 'false');
+  await expect(shapeFolder).toHaveClass(/active/);
+});
+
+test('pans the workspace from empty space and scrolls the vertical tool panel', async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 520 });
+  await page.goto('/');
+
+  const toolPanel = page.getByRole('complementary', { name: 'Инструменты' });
+  const desktopOverflow = await toolPanel.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { x: style.overflowX, y: style.overflowY };
+  });
+  expect(desktopOverflow).toEqual({ x: 'hidden', y: 'auto' });
+
+  await expect.poll(() => toolPanel.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+  await toolPanel.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await expect.poll(() => toolPanel.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+
+  await page.setViewportSize({ width: 800, height: 600 });
+  const mobileOverflow = await toolPanel.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { x: style.overflowX, y: style.overflowY };
+  });
+  expect(mobileOverflow).toEqual({ x: 'auto', y: 'hidden' });
+  await expect.poll(() => toolPanel.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
+
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.getByRole('button', { name: 'Увеличить' }).click();
+  await page.getByRole('button', { name: 'Увеличить' }).click();
+  await page.getByRole('button', { name: 'Увеличить' }).click();
+  const viewport = page.locator('.viewport');
+  const emptyPoint = await viewport.evaluate((element) => {
+    const viewportBounds = element.getBoundingClientRect();
+    const boardBounds = element.querySelector<HTMLElement>('.board')!.getBoundingClientRect();
+    const point = { x: viewportBounds.right - 24, y: viewportBounds.bottom - 24 };
+    if (point.x >= boardBounds.left && point.x <= boardBounds.right &&
+      point.y >= boardBounds.top && point.y <= boardBounds.bottom) {
+      throw new Error('Не удалось найти свободное место рядом с холстом.');
+    }
+    return point;
+  });
+  const stage = page.locator('.stage');
+  const before = await stage.getAttribute('style');
+  await page.mouse.move(emptyPoint.x, emptyPoint.y);
+  await page.mouse.down({ button: 'right' });
+  await page.mouse.move(emptyPoint.x - 60, emptyPoint.y - 40);
+  await page.mouse.up({ button: 'right' });
+  await expect.poll(() => stage.getAttribute('style')).not.toBe(before);
+});
+
+test('moves a single board independently and moves a Ctrl+right-click selection as a group', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Добавить холст' }).click();
+  await page.getByRole('button', { name: 'Центр', exact: true }).click();
+  for (let step = 0; step < 4; step++) {
+    await page.getByRole('button', { name: 'Уменьшить' }).click();
+  }
+  const boards = page.locator('.board');
+  await expect(boards).toHaveCount(2);
+
+  const position = (index: number) => boards.nth(index).evaluate((element) => ({
+    left: Number.parseFloat((element as HTMLElement).style.left),
+    top: Number.parseFloat((element as HTMLElement).style.top),
+  }));
+  const center = (index: number) => boards.nth(index).evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    const viewport = element.closest('.stage')!.parentElement!.getBoundingClientRect();
+    const left = Math.max(bounds.left, viewport.left);
+    const right = Math.min(bounds.right, viewport.right);
+    const top = Math.max(bounds.top, viewport.top);
+    const bottom = Math.min(bounds.bottom, viewport.bottom);
+    if (left >= right || top >= bottom) throw new Error('Холст не виден в рабочей области.');
+    return { x: (left + right) / 2, y: (top + bottom) / 2 };
+  });
+  const initial = [await position(0), await position(1)];
+  const singleStart = await center(1);
+  await page.keyboard.down('Control');
+  await page.mouse.move(singleStart.x, singleStart.y);
+  await page.mouse.down({ button: 'right' });
+  await page.mouse.move(singleStart.x + 45, singleStart.y + 35);
+  await page.mouse.up({ button: 'right' });
+  await page.keyboard.up('Control');
+
+  const singleMoved = [await position(0), await position(1)];
+  expect(singleMoved[0]).toEqual(initial[0]);
+  expect(singleMoved[1]).not.toEqual(initial[1]);
+  await page.keyboard.press('Control+z');
+  await expect.poll(async () => [await position(0), await position(1)]).toEqual(initial);
+
+  const firstCenter = await center(0);
+  await page.keyboard.down('Control');
+  await page.mouse.click(firstCenter.x, firstCenter.y, { button: 'right' });
+  await page.keyboard.up('Control');
+  await expect(boards.nth(1)).toHaveClass(/group-selected/);
+
+  const groupStart = await center(0);
+  await page.keyboard.down('Control');
+  await page.mouse.move(groupStart.x, groupStart.y);
+  await page.mouse.down({ button: 'right' });
+  await page.mouse.move(groupStart.x + 45, groupStart.y + 35);
+  await page.mouse.up({ button: 'right' });
+  await page.keyboard.up('Control');
+
+  const groupMoved = [await position(0), await position(1)];
+  expect(groupMoved[0]).not.toEqual(initial[0]);
+  expect(groupMoved[1]).not.toEqual(initial[1]);
+  expect(groupMoved[0]!.left - initial[0]!.left).toBe(groupMoved[1]!.left - initial[1]!.left);
+  expect(groupMoved[0]!.top - initial[0]!.top).toBe(groupMoved[1]!.top - initial[1]!.top);
+  await page.keyboard.press('Control+z');
+  await expect.poll(async () => [await position(0), await position(1)]).toEqual(initial);
+
+  const emptyPoint = await page.locator('.viewport').evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    const boardBounds = [...element.querySelectorAll<HTMLElement>('.board')]
+      .map((board) => board.getBoundingClientRect());
+    for (let y = bounds.top + 8; y < bounds.bottom - 8; y += 16) {
+      for (let x = bounds.left + 8; x < bounds.right - 8; x += 16) {
+        if (boardBounds.every((board) => x < board.left || x > board.right || y < board.top || y > board.bottom)) {
+          return { x, y };
+        }
+      }
+    }
+    throw new Error('Не удалось найти пустое место в рабочей области.');
+  });
+  await page.mouse.click(emptyPoint.x, emptyPoint.y);
+  await expect(boards.nth(1)).not.toHaveClass(/group-selected/);
+});
+
+test('smoothly minifies canvas artwork below 100% and keeps pixelated rendering when enlarged', async ({ page }) => {
+  await page.goto('/');
+  const zoomOut = page.getByRole('button', { name: 'Уменьшить' });
+  const zoomIn = page.getByRole('button', { name: 'Увеличить' });
+  const canvas = page.locator('.board > canvas:not(.selection-overlay):not(.transform-preview)');
+
+  for (let step = 0; step < 20; step++) {
+    const zoom = await canvas.evaluate((element: HTMLCanvasElement) =>
+      element.getBoundingClientRect().width / element.width,
+    );
+    if (zoom < 1) break;
+    await zoomOut.click();
+  }
+
+  await expect(page.locator('.board')).toHaveClass(/zoomed-out/);
+  await expect.poll(() => canvas.evaluate((element) => getComputedStyle(element).imageRendering)).toBe('auto');
+  await zoomIn.click();
+  await expect(page.locator('.board')).not.toHaveClass(/zoomed-out/);
+  await expect.poll(() => canvas.evaluate((element) => getComputedStyle(element).imageRendering)).toBe('pixelated');
+});
+
+test('applies non-destructive layer effects that can be toggled, removed, undone, and restored', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Вписать F' }).click();
+  const canvas = page.locator('.board > canvas:not(.selection-overlay):not(.transform-preview)');
+  const point = await canvas.evaluate((element: HTMLCanvasElement) => {
+    const bounds = element.getBoundingClientRect();
+    return {
+      x: bounds.left + (16.5 / element.width) * bounds.width,
+      y: bounds.top + (16.5 / element.height) * bounds.height,
+    };
+  });
+  await page.mouse.click(point.x, point.y);
+  await page.locator('.layers-panel > summary').click();
+
+  const addEffect = page.getByRole('combobox', { name: 'Добавить эффект' });
+  await expect(addEffect.locator('option')).toHaveCount(14);
+  await addEffect.selectOption('outline');
+  const effectToggle = page.getByRole('checkbox', { name: 'Включить эффект Обводка' });
+  const alphaAt = (x: number, y: number) => canvas.evaluate(
+    (element: HTMLCanvasElement, pixel: { x: number; y: number }) =>
+      element.getContext('2d')!.getImageData(pixel.x, pixel.y, 1, 1).data[3],
+    { x, y },
+  );
+  await expect.poll(() => alphaAt(15, 16)).toBe(255);
+  await effectToggle.uncheck();
+  await expect.poll(() => alphaAt(15, 16)).toBe(0);
+  await effectToggle.check();
+  await page.getByRole('button', { name: 'Удалить эффект Обводка' }).click();
+  await expect.poll(() => alphaAt(15, 16)).toBe(0);
+  await page.keyboard.press('Control+z');
+  await expect.poll(() => alphaAt(15, 16)).toBe(255);
+
+  await page.waitForTimeout(900);
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.locator('.layers-panel > summary').click();
+  await expect(page.getByRole('button', { name: 'Удалить эффект Обводка' })).toBeVisible();
+});
+
+test('configures viewport grid and transparency, persists preferences, and uses actual-size zoom', async ({ page }) => {
+  await page.goto('/');
+
+  await expect(page.locator('.board.checkerboard')).toHaveCount(1);
+  await page.getByLabel('Тип сетки').selectOption('isometric');
+  await page.getByLabel('Шаг сетки').selectOption('8');
+  await expect(page.locator('.grid.isometric-grid')).toBeVisible();
+  await page.locator('.view-settings > summary').click();
+  await expect(page.getByRole('group', { name: 'Настройки отображения' }).locator('input[type="checkbox"]')).toHaveCount(5);
+  await page.getByRole('checkbox', { name: 'Привязка' }).check();
+  await page.getByRole('checkbox', { name: 'Шахматный фон' }).uncheck();
+  await expect(page.locator('.board.checkerboard')).toHaveCount(0);
+
+  await page.getByRole('button', { name: '100%' }).click();
+  const scale = await page.locator('.board > canvas:not(.selection-overlay):not(.transform-preview)').evaluate(
+    (canvas: HTMLCanvasElement) => canvas.getBoundingClientRect().width / canvas.width,
+  );
+  expect(scale).toBe(1);
+
+  await page.reload();
+  await expect(page.getByLabel('Тип сетки')).toHaveValue('isometric');
+  await expect(page.getByLabel('Шаг сетки')).toHaveValue('8');
+  await page.locator('.view-settings > summary').click();
+  await expect(page.getByRole('checkbox', { name: 'Привязка' })).toBeChecked();
+  await expect(page.getByRole('checkbox', { name: 'Шахматный фон' })).not.toBeChecked();
+  await expect(page.locator('.board.checkerboard')).toHaveCount(0);
+});
+
+test('removes guide buttons while keeping symmetry, tiled previews, and live preview available', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByRole('button', { name: 'Напр. X+' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Напр. Y+' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Напр. очистить' })).toHaveCount(0);
+
+  await page.locator('.view-settings > summary').click();
+  await page.getByRole('checkbox', { name: 'Симметрия X' }).check();
+  await page.getByRole('checkbox', { name: 'Симметрия Y' }).check();
+  await expect(page.locator('.symmetry-guide')).toHaveCount(2);
+  await page.getByRole('checkbox', { name: 'Повтор' }).check();
+  await expect(page.locator('.tiled-background')).toBeVisible();
+
+  const popupPromise = page.waitForEvent('popup');
+  await page.getByRole('button', { name: 'Окно предпросмотра' }).click();
+  const popup = await popupPromise;
+  await expect(popup.locator('canvas')).toHaveJSProperty('width', 32);
+  await expect(popup.locator('#size')).toHaveText('32×32');
+  const boardCanvas = page.locator('.board > canvas:not(.selection-overlay):not(.transform-preview)');
+  const drawPoint = await boardCanvas.evaluate((canvas: HTMLCanvasElement) => {
+    const bounds = canvas.getBoundingClientRect();
+    return { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 };
+  });
+  await page.mouse.click(drawPoint.x, drawPoint.y);
+  await expect.poll(() => popup.locator('canvas').evaluate((canvas: HTMLCanvasElement) =>
+    canvas.getContext('2d')!.getImageData(16, 16, 1, 1).data[3],
+  )).toBe(255);
+  await popup.close();
+});
+
+test('imports, transforms, samples, and autosaves external references independently from canvas pixels', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Вписать F' }).click();
+  await page.getByRole('button', { name: 'Референсы' }).click();
+  const png = await createPng(page, 8, 8);
+  await page.getByLabel('Импортировать изображение референса').setInputFiles({
+    name: 'reference.png',
+    mimeType: 'image/png',
+    buffer: png,
+  });
+  const reference = page.locator('canvas.reference-image');
+  await expect(reference).toHaveCount(1);
+  const includeReferences = page.getByRole('checkbox', { name: 'Включать референсы в экспорт' });
+  await expect(includeReferences).not.toBeChecked();
+  await expect(includeReferences).toBeEnabled();
+  await page.evaluate(() => {
+    window.pixelEditorDesktop = {
+      saveFile: async (request) => {
+        let binary = '';
+        for (let offset = 0; offset < request.data.length; offset += 0x8000) {
+          binary += String.fromCharCode(...request.data.subarray(offset, offset + 0x8000));
+        }
+        localStorage.setItem('reference-export', btoa(binary));
+        return 'saved';
+      },
+    };
+  });
+  await page.getByRole('button', { name: 'Действия с файлом' }).click();
+  await page.getByRole('button', { name: /Экспорт 128×128/ }).click();
+  await expect(page.locator('.toast')).toContainText('PNG сохранён');
+  const defaultExportPixel = await page.evaluate(async () => {
+    const bytes = Uint8Array.from(atob(localStorage.getItem('reference-export')!), (value) => value.charCodeAt(0));
+    const bitmap = await createImageBitmap(new Blob([bytes], { type: 'image/png' }));
+    const canvas = document.createElement('canvas');
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const context = canvas.getContext('2d')!;
+    context.drawImage(bitmap, 0, 0);
+    const pixel = Array.from(context.getImageData(65, 65, 1, 1).data);
+    bitmap.close();
+    return pixel;
+  });
+  expect(defaultExportPixel[3]).toBe(0);
+  await includeReferences.check();
+  await page.getByRole('button', { name: 'Действия с файлом' }).click();
+  await page.getByRole('button', { name: /Экспорт 128×128/ }).click();
+  await expect(page.locator('.toast')).toContainText('PNG сохранён');
+  const optedInExportPixel = await page.evaluate(async () => {
+    const bytes = Uint8Array.from(atob(localStorage.getItem('reference-export')!), (value) => value.charCodeAt(0));
+    const bitmap = await createImageBitmap(new Blob([bytes], { type: 'image/png' }));
+    const canvas = document.createElement('canvas');
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const context = canvas.getContext('2d')!;
+    context.drawImage(bitmap, 0, 0);
+    const pixel = Array.from(context.getImageData(65, 65, 1, 1).data);
+    bitmap.close();
+    return pixel;
+  });
+  expect(Math.abs(optedInExportPixel[0]! - 124)).toBeLessThanOrEqual(1);
+  expect(Math.abs(optedInExportPixel[1]! - 92)).toBeLessThanOrEqual(1);
+  expect(Math.abs(optedInExportPixel[2]! - 255)).toBeLessThanOrEqual(1);
+  expect(optedInExportPixel[3]).toBe(153);
+  const boardPixelBefore = await page.locator('.board canvas').first().evaluate((canvas: HTMLCanvasElement) =>
+    Array.from(canvas.getContext('2d')!.getImageData(16, 16, 1, 1).data),
+  );
+
+  await page.getByRole('button', { name: 'Закрыть панель референсов' }).click();
+  const beforeMove = parseFloat(await reference.evaluate((canvas) => getComputedStyle(canvas).left));
+  const box = await reference.boundingBox();
+  expect(box).not.toBeNull();
+  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box!.x + box!.width / 2 + 32, box!.y + box!.height / 2 + 16, { steps: 3 });
+  await page.mouse.up();
+  await expect.poll(async () => parseFloat(await reference.evaluate((canvas) => getComputedStyle(canvas).left)))
+    .toBeGreaterThan(beforeMove);
+  await page.getByRole('button', { name: 'Отменить' }).click();
+  await expect.poll(async () => parseFloat(await reference.evaluate((canvas) => getComputedStyle(canvas).left)))
+    .toBe(beforeMove);
+  await page.getByRole('button', { name: 'Повторить' }).click();
+  await expect.poll(async () => parseFloat(await reference.evaluate((canvas) => getComputedStyle(canvas).left)))
+    .toBeGreaterThan(beforeMove);
+
+  await page.getByRole('button', { name: 'Референсы' }).click();
+  const transformInputs = page.locator('.references-panel input[type="number"]');
+  await transformInputs.nth(2).fill('2');
+  await transformInputs.nth(3).fill('90');
+  await page.getByRole('slider', { name: 'Непрозрачность референса' }).evaluate((input: HTMLInputElement) => {
+    input.value = '25';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await expect(reference).toHaveCSS('opacity', '0.25');
+  await expect(reference).not.toHaveCSS('transform', 'none');
+
+  await page.getByRole('button', { name: 'Заблокировать reference.png' }).click();
+  await expect(page.getByRole('button', { name: 'Разблокировать reference.png' })).toHaveAttribute('aria-pressed', 'true');
+  await page.getByRole('button', { name: 'Скрыть reference.png' }).click();
+  await expect(reference).toHaveCount(0);
+  await page.getByRole('button', { name: 'Показать reference.png' }).click();
+  await expect(reference).toHaveCount(1);
+  await page.getByRole('button', { name: 'Закрыть панель референсов' }).click();
+
+  await page.getByRole('switch', { name: 'Свободный цвет' }).click();
+  await page.getByRole('button', { name: 'Пипетка (I)' }).click();
+  const sampleBox = await reference.boundingBox();
+  expect(sampleBox).not.toBeNull();
+  await page.mouse.click(sampleBox!.x + sampleBox!.width / 2, sampleBox!.y + sampleBox!.height / 2);
+  await expect(page.locator('.big.primary input')).toHaveValue('#7c5cff');
+  expect(await page.locator('.board canvas').first().evaluate((canvas: HTMLCanvasElement) =>
+    Array.from(canvas.getContext('2d')!.getImageData(16, 16, 1, 1).data),
+  )).toEqual(boardPixelBefore);
+  await page.waitForFunction(async () => new Promise<boolean>((resolve) => {
+    const request = indexedDB.open('pixel-editor', 2);
+    request.onerror = () => resolve(false);
+    request.onsuccess = () => {
+      const database = request.result;
+      const get = database.transaction('projects', 'readonly').objectStore('projects').get('latest');
+      get.onsuccess = () => {
+        database.close();
+        try {
+          resolve(JSON.parse(get.result).references?.length === 1);
+        } catch {
+          resolve(false);
+        }
+      };
+      get.onerror = () => {
+        database.close();
+        resolve(false);
+      };
+    };
+  }));
+});
+
 test('imports exact dimensions, autosaves to IndexedDB, restores and exports lossless PNG to a chosen location', async ({ page }) => {
   await page.goto('/');
   await importPng(page);
@@ -204,7 +599,7 @@ test('supports nested groups and roles, persists them, and excludes reference pi
   await clickPixel(9, 9);
   await expect.poll(() => activeLayerAlphaAt(9, 9)).toBe(0);
   await page.getByRole('button', { name: 'Разблокировать группу Группа 1' }).click();
-  await page.getByRole('button', { name: 'Создать референс' }).click();
+  await page.getByRole('button', { name: 'Создать слой-референс' }).click();
   await page.getByLabel('Группа активного слоя').selectOption({ label: 'Группа 1' });
   await page.getByRole('button', { name: 'Создать группу' }).click();
   await expect(page.getByRole('list', { name: 'Группы слоёв' }).locator('li')).toHaveCount(2);

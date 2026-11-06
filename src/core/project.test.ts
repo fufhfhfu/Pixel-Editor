@@ -15,6 +15,7 @@ import {
   saveAutosave,
   type KeyValueStorage,
 } from './storage';
+import { createLayerEffect } from './effects';
 
 function sample(): ProjectData {
   const pixels = new Uint8ClampedArray(5 * 4 * 4);
@@ -186,6 +187,118 @@ describe('проект JSON', () => {
       ...project,
       canvases: project.canvases?.map((canvas) => ({ ...canvas, activeLayerId: 'missing' })),
     })).toThrow(/неизвестный активный слой/);
+  });
+
+  it('сохраняет стек неразрушающих эффектов слоя в версии 7 формата', () => {
+    const base = sample();
+    const filters = [
+      { ...createLayerEffect('outline', 'outline-1'), radius: 3 },
+      { ...createLayerEffect('noise', 'noise-1'), enabled: false, amount: 24, seed: 9876 },
+    ];
+    const project: ProjectData = {
+      ...base,
+      canvases: [{
+        id: 'canvas',
+        x: 0,
+        y: 0,
+        width: base.width,
+        height: base.height,
+        pixels: base.pixels,
+        layers: [{
+          id: 'layer',
+          name: 'Эффекты',
+          pixels: base.pixels,
+          visible: true,
+          locked: false,
+          opacity: 1,
+          blendMode: 'normal',
+          alphaLock: false,
+          clippingMask: false,
+          filters,
+        }],
+      }],
+      activeCanvasId: 'canvas',
+    };
+
+    const json = serializeProject(project);
+    expect(JSON.parse(json).version).toBe(7);
+    const restored = parseProject(json);
+    expect(restored.canvases?.[0]?.layers?.[0]?.filters).toEqual(filters);
+
+    const legacy = JSON.parse(json) as Record<string, unknown>;
+    legacy.version = 6;
+    const canvas = (legacy.canvases as Array<Record<string, unknown>>)[0]!;
+    const layer = (canvas.layers as Array<Record<string, unknown>>)[0]!;
+    delete layer.filters;
+    expect(parseProject(JSON.stringify(legacy)).canvases?.[0]?.layers?.[0]?.filters).toEqual([]);
+  });
+
+  it('сохраняет и проверяет референсы в версии 6 проекта', () => {
+    const project = sample();
+    const reference = {
+      id: 'ref-1',
+      name: 'character.png',
+      width: 2,
+      height: 1,
+      pixels: new Uint8ClampedArray([255, 0, 0, 255, 0, 255, 0, 128]),
+      x: -12,
+      y: 35,
+      scale: 1.5,
+      rotation: 90,
+      opacity: 0.4,
+      visible: false,
+      locked: true,
+    };
+    const json = serializeProject({ ...project, references: [reference] });
+    expect(JSON.parse(json).version).toBe(6);
+    const restored = parseProject(json);
+    expect(restored.references).toEqual([reference]);
+
+    const raw = JSON.parse(json) as { references: Array<Record<string, unknown>> };
+    raw.references[0]!.opacity = 2;
+    expect(() => parseProject(JSON.stringify(raw))).toThrow(ProjectFormatError);
+    expect(() => serializeProject({ ...project, references: [{ ...reference, id: '' }] })).toThrow(ProjectFormatError);
+    expect(() => serializeProject({ ...project, references: [reference, { ...reference }] })).toThrow(/некорректные данные референса/);
+  });
+
+  it('сохраняет референсы с несколькими холстами без слоёв', () => {
+    const base = sample();
+    const reference = {
+      id: 'ref',
+      name: 'ref.png',
+      width: 1,
+      height: 1,
+      pixels: new Uint8ClampedArray([40, 50, 60, 255]),
+      x: 4,
+      y: 8,
+      scale: 1,
+      rotation: 0,
+      opacity: 1,
+      visible: true,
+      locked: false,
+    };
+    const project: ProjectData = {
+      ...base,
+      canvases: [{
+        id: 'canvas',
+        x: 0,
+        y: 0,
+        width: base.width,
+        height: base.height,
+        pixels: base.pixels,
+      }, {
+        id: 'canvas-2',
+        x: 40,
+        y: 0,
+        width: 3,
+        height: 2,
+        pixels: new Uint8ClampedArray(3 * 2 * 4),
+      }],
+      references: [reference],
+    };
+    const restored = parseProject(serializeProject(project));
+    expect(restored.canvases?.[0]?.pixels).toEqual(base.pixels);
+    expect(restored.references).toEqual([reference]);
   });
 
   it('мигрирует v3 слои к типу paint и нейтральным эффектам', () => {

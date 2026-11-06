@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onDestroy, tick, untrack } from 'svelte';
-  import Canvas from './components/Canvas.svelte';
+  import Canvas, { type ViewportGuide } from './components/Canvas.svelte';
   import ConfirmDialog from './components/ConfirmDialog.svelte';
   import HelpDialog from './components/HelpDialog.svelte';
   import SettingsDialog from './components/SettingsDialog.svelte';
+  import ReferencesPanel from './components/ReferencesPanel.svelte';
   import PalettePanel from './components/PalettePanel.svelte';
   import ProjectBar from './components/ProjectBar.svelte';
   import StatusBar from './components/StatusBar.svelte';
@@ -21,6 +22,14 @@
     type ExportScale,
   } from './core/export';
   import { decodeRasterImage, MAX_IMAGE_FILE_BYTES, rasterImageToProject } from './core/imageImport';
+  import {
+    MAX_PROJECT_REFERENCES,
+    MAX_REFERENCE_TOTAL_PIXELS,
+    MAX_REFERENCE_SCALE,
+    MIN_REFERENCE_SCALE,
+    applyReferencesToBuffer,
+    type ReferenceImage,
+  } from './core/reference';
   import { History } from './core/history';
   import {
     DEFAULT_PALETTE_ID,
@@ -47,11 +56,16 @@
     loadEditorPreferences,
     saveCanvasBackground,
     saveWorkspaceBackground,
+    saveGridMode,
+    saveGridSpacing,
+    saveSnapToGrid,
+    saveCheckerboard,
     saveCustomSizes,
     saveThemePreference,
     currentSizeIsBuiltIn,
     MAX_CUSTOM_SIZES,
     type CanvasSize,
+    type GridMode,
     type ThemePreference,
   } from './core/preferences';
   import {
@@ -245,6 +259,7 @@
         beforeSelection?: SelectionMask | null;
         afterSelection?: SelectionMask | null;
       }
+    | { kind: 'references'; before: ReferenceImage[]; after: ReferenceImage[] }
     | { kind: 'board'; action: BoardAction };
 
   /** Пауза после последнего изменения перед сохранением проекта в локальное хранилище. */
@@ -283,6 +298,7 @@
         clippingMask: source.clippingMask,
         role: source.role ?? 'paint',
         effects: source.effects,
+        filters: source.filters,
         groupId: source.groupId ?? null,
       });
       restored.buffer.setLocked(restored.locked || groupHasLock(sourceGroups, restored.groupId));
@@ -336,9 +352,22 @@
   let activeBoardId = $state(initialActiveBoardId);
   let activeLayerId = $state(initialActiveBoard.activeLayerId);
   let buffer = $state.raw(initialActiveBoard.layers.find((layer) => layer.id === activeLayerId)!.buffer);
+  let references = $state.raw<ReferenceImage[]>(start?.references?.map((reference) => ({ ...reference })) ?? []);
+  let selectedReferenceId = $state<string | null>(start?.references?.[0]?.id ?? null);
+  let referencesOpen = $state(false);
+  let includeReferencesInExport = $state(false);
+  let referenceMoveSnapshot: ReferenceImage[] | null = null;
   let view = $state.raw<ViewState>({ zoom: 1, offsetX: 0, offsetY: 0 });
   let cursor = $state.raw<PixelPos | null>(null);
   let showGrid = $state(true);
+  let gridMode = $state<GridMode>(preferences.gridMode);
+  let gridSpacing = $state(preferences.gridSpacing);
+  let snapToGrid = $state(preferences.snapToGrid);
+  let checkerboard = $state(preferences.checkerboard);
+  let tiledMode = $state(false);
+  let symmetryX = $state(false);
+  let symmetryY = $state(false);
+  let guides = $state.raw<ViewportGuide[]>([]);
   let canvasBackground = $state(preferences.canvasBackground);
   let workspaceBackground = $state(preferences.workspaceBackground);
   let customSizes = $state.raw<CanvasSize[]>(preferences.customSizes);
@@ -468,6 +497,7 @@
       primary,
       secondary,
       recent,
+      references,
       canvases: boards.map((board) => ({
         id: board.id,
         x: board.x,
@@ -488,6 +518,7 @@
           clippingMask: layer.clippingMask,
           role: layer.role ?? 'paint',
           effects: layer.effects,
+          filters: layer.filters,
           groupId: layer.groupId ?? null,
         })),
         groups: board.groups,
@@ -643,6 +674,37 @@
           { id: collided.id, x: moving.x, y: moving.y },
         ]
       : [{ id: moving.id, x, y }];
+    applyBoardPositions(after);
+    pushUndoEntry({ kind: 'board', action: { kind: 'move', before, after } });
+    scheduleAutosave();
+  }
+
+  function moveBoards(positions: Array<{ id: string; x: number; y: number }>): void {
+    if (positions.length <= 1) {
+      const position = positions[0];
+      if (position) moveBoard(position.id, position.x, position.y);
+      return;
+    }
+    if (positions.some((position) =>
+      !Number.isSafeInteger(position.x) ||
+      !Number.isSafeInteger(position.y) ||
+      Math.abs(position.x) > MAX_PROJECT_CANVAS_COORDINATE ||
+      Math.abs(position.y) > MAX_PROJECT_CANVAS_COORDINATE
+    )) {
+      notify('Холсты нельзя переместить за пределы рабочего поля.', 'error');
+      return;
+    }
+    const changes = new Map(positions.map((position) => [position.id, position]));
+    const before = boards
+      .filter((board) => changes.has(board.id))
+      .map((board) => ({ id: board.id, x: board.x, y: board.y }));
+    const after = before.map((position) => {
+      const next = changes.get(position.id)!;
+      return { id: position.id, x: next.x, y: next.y };
+    });
+    if (before.length < 2 || before.every((position, index) =>
+      position.x === after[index]!.x && position.y === after[index]!.y
+    )) return;
     applyBoardPositions(after);
     pushUndoEntry({ kind: 'board', action: { kind: 'move', before, after } });
     scheduleAutosave();
@@ -814,6 +876,7 @@
     void primary;
     void secondary;
     void recent;
+    void references;
     if (!autosaveArmed) {
       autosaveArmed = true;
       return;
@@ -948,6 +1011,12 @@
       applyBoardAction(entry.action, 'undo');
     } else if (entry.kind === 'layer-stack') {
       applyLayerStackAction(entry, 'undo');
+    } else if (entry.kind === 'references') {
+      references = entry.before.map((reference) => ({ ...reference }));
+      if (!references.some((reference) => reference.id === selectedReferenceId)) {
+        selectedReferenceId = references[0]?.id ?? null;
+      }
+      scheduleAutosave();
     } else {
       const target = boards.find((board) => board.id === entry.boardId);
       const targetHistory = histories.get(entry.historyKey);
@@ -976,6 +1045,12 @@
       applyBoardAction(entry.action, 'redo');
     } else if (entry.kind === 'layer-stack') {
       applyLayerStackAction(entry, 'redo');
+    } else if (entry.kind === 'references') {
+      references = entry.after.map((reference) => ({ ...reference }));
+      if (!references.some((reference) => reference.id === selectedReferenceId)) {
+        selectedReferenceId = references[0]?.id ?? null;
+      }
+      scheduleAutosave();
     } else {
       const target = boards.find((board) => board.id === entry.boardId);
       const targetHistory = histories.get(entry.historyKey);
@@ -1001,6 +1076,42 @@
 
   function toggleGrid(): void {
     showGrid = !showGrid;
+  }
+
+  function setGridMode(mode: GridMode): void {
+    if (mode === gridMode) return;
+    gridMode = mode;
+    if (!saveGridMode(storage, mode)) notify('Режим сетки применён, но сохранить настройку не удалось.', 'error');
+  }
+
+  function setGridSpacing(spacing: number): void {
+    if (spacing === gridSpacing) return;
+    gridSpacing = spacing;
+    if (!saveGridSpacing(storage, spacing)) notify('Шаг сетки применён, но сохранить настройку не удалось.', 'error');
+  }
+
+  function setSnapToGrid(enabled: boolean): void {
+    if (enabled === snapToGrid) return;
+    snapToGrid = enabled;
+    if (!saveSnapToGrid(storage, enabled)) notify('Привязка включена до закрытия страницы, но не сохранена.', 'error');
+  }
+
+  function setCheckerboard(enabled: boolean): void {
+    if (enabled === checkerboard) return;
+    checkerboard = enabled;
+    if (!saveCheckerboard(storage, enabled)) notify('Фон применён до закрытия страницы, но настройка не сохранена.', 'error');
+  }
+
+  function updateGuides(next: ViewportGuide[]): void {
+    guides = next;
+  }
+
+  function openPreviewWindow(): void {
+    try {
+      canvasApi?.openPreviewWindow();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Не удалось открыть окно предпросмотра.', 'error');
+    }
   }
 
   function saveCurrentSize(): void {
@@ -1250,6 +1361,7 @@
         clippingMask: source.clippingMask,
         role: source.role ?? 'paint',
         effects: source.effects,
+        filters: source.filters,
       },
     );
     const position = board.layers.findIndex((layer) => layer.id === id);
@@ -1548,6 +1660,127 @@
     else secondary = next;
   }
 
+  async function importReference(file: File): Promise<void> {
+    const extension = file.name.split('.').at(-1)?.toLowerCase();
+    if (!extension || !['png', 'jpg', 'jpeg', 'webp', 'bmp'].includes(extension)) {
+      notify('Поддерживаются изображения PNG, JPEG, WebP и BMP.', 'error');
+      return;
+    }
+    if (references.length >= MAX_PROJECT_REFERENCES) {
+      notify(`Можно добавить не больше ${MAX_PROJECT_REFERENCES} референсов.`, 'error');
+      return;
+    }
+
+    try {
+      const image = await decodeRasterImage(file);
+      const totalPixels = references.reduce((sum, reference) => sum + reference.width * reference.height, 0);
+      if (totalPixels + image.width * image.height > MAX_REFERENCE_TOTAL_PIXELS) {
+        notify('Общая площадь изображений референсов превышает допустимый лимит.', 'error');
+        return;
+      }
+
+      const board = boards.find((entry) => entry.id === activeBoardId)!;
+      const scale = Math.max(MIN_REFERENCE_SCALE, Math.min(1, 256 / image.width, 256 / image.height));
+      const id = `reference-${Date.now().toString(36)}-${references.length + 1}`;
+      const reference: ReferenceImage = {
+        id,
+        name: file.name.slice(0, 255) || 'Референс',
+        width: image.width,
+        height: image.height,
+        pixels: image.pixels,
+        x: Math.round(board.x + (board.buffer.width - image.width * scale) / 2),
+        y: Math.round(board.y + (board.buffer.height - image.height * scale) / 2),
+        scale,
+        rotation: 0,
+        opacity: 0.6,
+        visible: true,
+        locked: false,
+      };
+      const before = references.map((entry) => ({ ...entry }));
+      references = [...references, reference];
+      selectedReferenceId = id;
+      referencesOpen = true;
+      recordReferenceChange(before);
+      notify('Референс импортирован.');
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Не удалось импортировать референс.', 'error');
+    }
+  }
+
+  function updateReference(
+    id: string,
+    update: Partial<Pick<ReferenceImage, 'x' | 'y' | 'scale' | 'rotation' | 'opacity' | 'visible' | 'locked'>>,
+    recordHistory = true,
+  ): void {
+    const before = recordHistory ? references.map((reference) => ({ ...reference })) : null;
+    let changed = false;
+    references = references.map((reference) => {
+      if (reference.id !== id) return reference;
+      const next = { ...reference, ...update };
+      next.x = Number.isFinite(next.x) ? Math.max(-1_000_000, Math.min(1_000_000, Math.round(next.x))) : reference.x;
+      next.y = Number.isFinite(next.y) ? Math.max(-1_000_000, Math.min(1_000_000, Math.round(next.y))) : reference.y;
+      next.scale = Number.isFinite(next.scale)
+        ? Math.min(MAX_REFERENCE_SCALE, Math.max(MIN_REFERENCE_SCALE, next.scale))
+        : reference.scale;
+      next.rotation = Number.isFinite(next.rotation) ? Math.max(-360, Math.min(360, next.rotation)) : reference.rotation;
+      next.opacity = Number.isFinite(next.opacity) ? Math.max(0, Math.min(1, next.opacity)) : reference.opacity;
+      changed = true;
+      return next;
+    });
+    if (changed) {
+      if (before) recordReferenceChange(before);
+      else scheduleAutosave();
+    }
+  }
+
+  function removeReference(id: string): void {
+    const before = references.map((reference) => ({ ...reference }));
+    references = references.filter((reference) => reference.id !== id);
+    if (selectedReferenceId === id) selectedReferenceId = references[0]?.id ?? null;
+    recordReferenceChange(before);
+  }
+
+  function recordReferenceChange(before: ReferenceImage[]): void {
+    const unchanged = before.length === references.length && before.every((reference, index) => {
+      const current = references[index]!;
+      return (
+        reference.id === current.id &&
+        reference.name === current.name &&
+        reference.pixels === current.pixels &&
+        reference.x === current.x &&
+        reference.y === current.y &&
+        reference.scale === current.scale &&
+        reference.rotation === current.rotation &&
+        reference.opacity === current.opacity &&
+        reference.visible === current.visible &&
+        reference.locked === current.locked
+      );
+    });
+    if (!unchanged) pushUndoEntry({
+      kind: 'references',
+      before,
+      after: references.map((reference) => ({ ...reference })),
+    });
+    scheduleAutosave();
+  }
+
+  function beginReferenceMove(): void {
+    referenceMoveSnapshot = references.map((reference) => ({ ...reference }));
+  }
+
+  function endReferenceMove(): void {
+    const before = referenceMoveSnapshot;
+    referenceMoveSnapshot = null;
+    if (before) recordReferenceChange(before);
+  }
+
+  function cancelReferenceMove(): void {
+    if (!referenceMoveSnapshot) return;
+    references = referenceMoveSnapshot;
+    referenceMoveSnapshot = null;
+    scheduleAutosave();
+  }
+
   function selectPalette(id: string): void {
     if (id === paletteId) return;
     const next = getPalette(id);
@@ -1671,9 +1904,12 @@
   async function exportImage(): Promise<void> {
     const { width, height } = activeBoard.buffer;
     const exportLayers = activeBoard.layers.filter((layer) => layer.role !== 'reference');
-    const exportBuffer = exportLayers.length
+    const baseExportBuffer = exportLayers.length
       ? compositeLayers(width, height, exportLayers, undefined, undefined, activeBoard.groups)
       : new PixelBuffer(width, height);
+    const exportBuffer = includeReferencesInExport
+      ? applyReferencesToBuffer(baseExportBuffer, activeBoard.x, activeBoard.y, references)
+      : baseExportBuffer;
     const extension = exportFormat === 'jpeg' ? 'jpg' : exportFormat;
     const filename = `pixel-art-${width}x${height}@${exportScale}x.${extension}`;
     const mimeType = exportFormat === 'jpeg' ? 'image/jpeg' : `image/${exportFormat}`;
@@ -1723,6 +1959,8 @@
     primary = project.primary;
     secondary = project.secondary;
     recent = project.recent;
+    references = project.references?.map((reference) => ({ ...reference })) ?? [];
+    selectedReferenceId = references[0]?.id ?? null;
     syncHistory();
     cursor = null;
     scheduleAutosave();
@@ -1982,9 +2220,31 @@
     width={buffer.width}
     height={buffer.height}
     {showGrid}
+    {gridMode}
+    {gridSpacing}
+    {snapToGrid}
+    {checkerboard}
+    {tiledMode}
+    {symmetryX}
+    {symmetryY}
     {customSizes}
     ontogglegrid={toggleGrid}
+    ongridmode={setGridMode}
+    ongridspacing={setGridSpacing}
+    onsnaptogrid={setSnapToGrid}
+    oncheckerboard={setCheckerboard}
+    ontiledmode={(enabled) => (tiledMode = enabled)}
+    onsymmetryx={(enabled) => (symmetryX = enabled)}
+    onsymmetryy={(enabled) => (symmetryY = enabled)}
+    {referencesOpen}
+    {includeReferencesInExport}
+    hasVisibleReferences={references.some((reference) => reference.visible)}
+    ontogglereferences={() => (referencesOpen = !referencesOpen)}
+    onincludeReferencesInExport={(include) => (includeReferencesInExport = include)}
+    onpreview={openPreviewWindow}
     onfit={fitCanvas}
+    oncenter={() => canvasApi?.centerActiveBoard()}
+    onactualsize={() => canvasApi?.actualSize()}
     onzoomin={() => canvasApi?.zoomBy(1)}
     onzoomout={() => canvasApi?.zoomBy(-1)}
     onresize={requestResize}
@@ -2049,7 +2309,17 @@
         bind:view
         bind:cursor
         {showGrid}
+        {gridMode}
+        {gridSpacing}
+        {snapToGrid}
+        {checkerboard}
+        {tiledMode}
+        {symmetryX}
+        {symmetryY}
+        {guides}
         {boards}
+        {references}
+        {selectedReferenceId}
         {activeBoardId}
         {canvasBackground}
         {workspaceBackground}
@@ -2075,10 +2345,29 @@
         onrender={() => refreshComposite(activeBoardId, getActiveLayer())}
         onselectboard={selectBoard}
         onmoveboard={moveBoard}
+        onmoveboards={moveBoards}
+        onselectreference={(id) => (selectedReferenceId = id)}
+        onreferencemovestart={beginReferenceMove}
+        onreferencemove={(id, x, y) => updateReference(id, { x, y }, false)}
+        onreferencemoveend={endReferenceMove}
+        onreferencemovecancel={cancelReferenceMove}
         onselection={setSelection}
+        onguideschange={updateGuides}
+        onpreviewerror={(message) => notify(message, 'error')}
         onconfirmtransform={confirmSelectionTransform}
         oncanceltransform={cancelSelectionTransform}
       />
+      {#if referencesOpen}
+        <ReferencesPanel
+          {references}
+          {selectedReferenceId}
+          onimport={(file) => void importReference(file)}
+          onselect={(id) => (selectedReferenceId = id)}
+          onupdate={updateReference}
+          onremove={removeReference}
+          onclose={() => (referencesOpen = false)}
+        />
+      {/if}
     </section>
 
     <PalettePanel

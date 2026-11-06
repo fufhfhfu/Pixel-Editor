@@ -1,4 +1,10 @@
 import { PixelBuffer, type DirtyRect } from './state';
+import {
+  applyLayerEffectStack,
+  isValidLayerEffectStack,
+  layerEffectPadding,
+  type LayerEffect,
+} from './effects';
 
 export type LayerBlendMode = 'normal' | 'multiply' | 'screen' | 'overlay' | 'add';
 export type LayerRole = 'paint' | 'background' | 'reference';
@@ -32,11 +38,12 @@ export interface RasterLayer {
   readonly clippingMask: boolean;
   readonly role?: LayerRole;
   readonly effects?: LayerEffects;
+  readonly filters?: readonly LayerEffect[];
   readonly groupId?: string | null;
 }
 
-export type LayerUpdate = Partial<Omit<RasterLayer, 'id' | 'buffer' | 'effects' | 'groupId'>> &
-  { effects?: Partial<LayerEffects>; groupId?: string | null };
+export type LayerUpdate = Partial<Omit<RasterLayer, 'id' | 'buffer' | 'effects' | 'filters' | 'groupId'>> &
+  { effects?: Partial<LayerEffects>; filters?: readonly LayerEffect[]; groupId?: string | null };
 export type LayerGroupUpdate = Partial<Omit<LayerGroup, 'id' | 'parentGroupId' | 'effects'>> &
   { effects?: Partial<LayerEffects> };
 
@@ -103,6 +110,7 @@ export function createRasterLayer(
     clippingMask: false,
     role: 'paint',
     effects: { ...DEFAULT_LAYER_EFFECTS },
+    filters: [],
   };
 }
 
@@ -131,6 +139,8 @@ export function updateRasterLayer(layer: RasterLayer, update: LayerUpdate): Rast
       throw new RangeError(`Layer ${effect} must be between -100 and 100.`);
     }
   }
+  const filters = update.filters ?? layer.filters ?? [];
+  if (!isValidLayerEffectStack(filters)) throw new RangeError('Layer effect stack is invalid.');
   const role = update.role ?? layer.role ?? 'paint';
   const nonEditable = role === 'background' || role === 'reference';
   return {
@@ -139,9 +149,28 @@ export function updateRasterLayer(layer: RasterLayer, update: LayerUpdate): Rast
     name,
     role,
     effects,
+    filters,
     locked: nonEditable ? true : update.locked ?? layer.locked,
     alphaLock: nonEditable ? false : update.alphaLock ?? layer.alphaLock,
   };
+}
+
+interface LayerFilterCache {
+  readonly revision: number;
+  readonly filters: readonly LayerEffect[];
+  readonly output: PixelBuffer;
+}
+
+const layerFilterCache = new WeakMap<PixelBuffer, LayerFilterCache>();
+
+function getRenderedLayerBuffer(layer: RasterLayer): PixelBuffer {
+  const filters = layer.filters ?? [];
+  if (filters.length === 0 || !filters.some((effect) => effect.enabled)) return layer.buffer;
+  const cached = layerFilterCache.get(layer.buffer);
+  if (cached && cached.revision === layer.buffer.revision && cached.filters === filters) return cached.output;
+  const output = applyLayerEffectStack(layer.buffer, filters);
+  layerFilterCache.set(layer.buffer, { revision: layer.buffer.revision, filters, output });
+  return output;
 }
 
 function blendChannel(backdrop: number, source: number, mode: LayerBlendMode): number {
@@ -238,10 +267,12 @@ export function compositeLayers(
       parent = groupById.get(parent)?.parentGroupId ?? null;
     }
   }
-  const x0 = Math.max(0, Math.floor(dirty.x));
-  const y0 = Math.max(0, Math.floor(dirty.y));
-  const x1 = Math.min(width, Math.ceil(dirty.x + dirty.width));
-  const y1 = Math.min(height, Math.ceil(dirty.y + dirty.height));
+  const effectPadding = layers.reduce((padding, layer) =>
+    Math.max(padding, layerEffectPadding(layer.filters ?? [])), 0);
+  const x0 = Math.max(0, Math.floor(dirty.x - effectPadding));
+  const y0 = Math.max(0, Math.floor(dirty.y - effectPadding));
+  const x1 = Math.min(width, Math.ceil(dirty.x + dirty.width + effectPadding));
+  const y1 = Math.min(height, Math.ceil(dirty.y + dirty.height + effectPadding));
   if (x0 >= x1 || y0 >= y1) return output;
   const updated = { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
   for (let y = y0; y < y1; y++) {
@@ -278,11 +309,12 @@ export function compositeLayers(
       if ('layer' in node) {
         const layer = node.layer;
         if (layer.visible) {
+          const renderedLayer = getRenderedLayerBuffer(layer);
           for (let y = y0; y < y1; y++) {
             for (let x = x0; x < x1; x++) {
               const pixel = y * width + x;
               const sourceOffset = pixel * 4;
-              const sourceAlpha = layer.buffer.data[sourceOffset + 3]!;
+              const sourceAlpha = renderedLayer.data[sourceOffset + 3]!;
               if (sourceAlpha === 0 || layer.opacity === 0) continue;
               const effectiveAlpha = layer.clippingMask
                 ? clipBaseAlpha && clipBaseVisible
@@ -293,7 +325,7 @@ export function compositeLayers(
               compositePixel(
                 target.data,
                 sourceOffset,
-                layer.buffer.data,
+                renderedLayer.data,
                 effectiveAlpha,
                 layer.opacity,
                 layer.blendMode,
@@ -303,7 +335,7 @@ export function compositeLayers(
           }
         }
         if (!layer.clippingMask) {
-          clipBaseAlpha = layer.buffer.data;
+          clipBaseAlpha = getRenderedLayerBuffer(layer).data;
           clipBaseVisible = layer.visible;
           clipBaseOpacity = layer.opacity;
         }

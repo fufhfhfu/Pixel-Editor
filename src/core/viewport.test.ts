@@ -28,14 +28,15 @@ describe('viewport', () => {
   });
 
   it('границы уровней зума', () => {
-    expect(stepZoom(64, 5)).toBe(64);
+    expect(stepZoom(256, 5)).toBe(256);
+    expect(stepZoom(64, 5)).toBe(256);
     expect(stepZoom(0.25, -5)).toBe(0.25);
   });
 
   it('nearestZoomLevel для жестов', () => {
     expect(nearestZoomLevel(7)).toBe(8);
     expect(nearestZoomLevel(0.01)).toBe(0.25);
-    expect(nearestZoomLevel(1000)).toBe(64);
+    expect(nearestZoomLevel(1000)).toBe(256);
     expect(nearestZoomLevel(Number.NaN)).toBe(0.25);
     expect(zoomTo({ zoom: 4, offsetX: 0, offsetY: 0 }, 4, 10, 10).zoom).toBe(4);
   });

@@ -8,6 +8,7 @@ export const GRID_MODE_KEY = 'pixel-editor:grid-mode';
 export const GRID_SPACING_KEY = 'pixel-editor:grid-spacing';
 export const SNAP_TO_GRID_KEY = 'pixel-editor:snap-to-grid';
 export const CHECKERBOARD_KEY = 'pixel-editor:checkerboard';
+export const SECONDARY_COLOR_DRAWING_KEY = 'pixel-editor:secondary-color-drawing';
 export const DEFAULT_CANVAS_BACKGROUND = '#ffffff';
 export const DEFAULT_WORKSPACE_BACKGROUND = '#34363f';
 export const MAX_CUSTOM_SIZES = 16;
@@ -36,6 +37,7 @@ export interface EditorPreferences {
   gridSpacing: number;
   snapToGrid: boolean;
   checkerboard: boolean;
+  secondaryColorDrawing: boolean;
   error: string | null;
 }
 
@@ -92,6 +94,7 @@ export function loadEditorPreferences(storage: PreferenceStorage | null): Editor
     gridSpacing: 1,
     snapToGrid: false,
     checkerboard: true,
+    secondaryColorDrawing: true,
     error: null as string | null,
   };
   if (!storage) return defaults;
@@ -105,6 +108,7 @@ export function loadEditorPreferences(storage: PreferenceStorage | null): Editor
     const savedGridSpacing = Number(storage.getItem(GRID_SPACING_KEY));
     const savedSnapToGrid = storage.getItem(SNAP_TO_GRID_KEY);
     const savedCheckerboard = storage.getItem(CHECKERBOARD_KEY);
+    const savedSecondaryColorDrawing = storage.getItem(SECONDARY_COLOR_DRAWING_KEY);
     const canvasBackground =
       savedBackground && isHexColor(savedBackground) ? savedBackground : DEFAULT_CANVAS_BACKGROUND;
     return {
@@ -121,6 +125,7 @@ export function loadEditorPreferences(storage: PreferenceStorage | null): Editor
         : defaults.gridSpacing,
       snapToGrid: savedSnapToGrid === 'true',
       checkerboard: savedCheckerboard !== 'false',
+      secondaryColorDrawing: savedSecondaryColorDrawing !== 'false',
       error: null,
     };
   } catch {
@@ -210,6 +215,16 @@ export function saveCheckerboard(storage: PreferenceStorage | null, enabled: boo
   if (!storage || typeof enabled !== 'boolean') return false;
   try {
     storage.setItem(CHECKERBOARD_KEY, String(enabled));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function saveSecondaryColorDrawing(storage: PreferenceStorage | null, enabled: boolean): boolean {
+  if (!storage || typeof enabled !== 'boolean') return false;
+  try {
+    storage.setItem(SECONDARY_COLOR_DRAWING_KEY, String(enabled));
     return true;
   } catch {
     return false;

@@ -19,11 +19,13 @@
     initialTab: 'general' | 'background' | 'hotkeys';
     canvasBackground: string;
     workspaceBackground: string;
+    secondaryColorDrawing: boolean;
     shortcuts: ShortcutMap;
     returnFocusTo: HTMLElement | null;
     ontheme: (theme: ThemePreference) => void;
     oncanvasbackground: (color: string) => void;
     onworkspacebackground: (color: string) => void;
+    onsecondarycolordrawing: (enabled: boolean) => void;
     onshortcuts: (shortcuts: ShortcutMap) => void;
     onclose: () => void;
   }
@@ -33,11 +35,13 @@
     initialTab,
     canvasBackground,
     workspaceBackground,
+    secondaryColorDrawing,
     shortcuts,
     returnFocusTo,
     ontheme,
     oncanvasbackground,
     onworkspacebackground,
+    onsecondarycolordrawing,
     onshortcuts,
     onclose,
   }: Props = $props();
@@ -248,6 +252,19 @@
             />
           </label>
           <p>Цвет холста виден под прозрачными пикселями и используется при экспорте JPEG. Второй цвет применяется вокруг холста.</p>
+        </fieldset>
+        <fieldset>
+          <legend>Дополнительный цвет</legend>
+          <label>
+            <input
+              type="checkbox"
+              aria-label="Рисовать дополнительным цветом через Shift+левую кнопку"
+              checked={secondaryColorDrawing}
+              onchange={(event) => onsecondarycolordrawing(event.currentTarget.checked)}
+            />
+            Рисовать дополнительным цветом через Shift+левую кнопку
+          </label>
+          <p>Правый клик по холсту открывает меню действий и не рисует.</p>
         </fieldset>
       </div>
     {:else}

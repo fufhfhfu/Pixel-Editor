@@ -8,6 +8,7 @@ import {
   saveGridSpacing,
   saveSnapToGrid,
   saveCheckerboard,
+  saveSecondaryColorDrawing,
   loadEditorPreferences,
   saveCanvasBackground,
   saveCustomSizes,
@@ -43,6 +44,7 @@ describe('пользовательские настройки холста', () 
       gridSpacing: 1,
       snapToGrid: false,
       checkerboard: true,
+      secondaryColorDrawing: true,
       error: null,
     });
   });
@@ -54,11 +56,13 @@ describe('пользовательские настройки холста', () 
     expect(saveGridSpacing(storage, 8)).toBe(true);
     expect(saveSnapToGrid(storage, true)).toBe(true);
     expect(saveCheckerboard(storage, false)).toBe(true);
+    expect(saveSecondaryColorDrawing(storage, false)).toBe(true);
     expect(loadEditorPreferences(storage)).toMatchObject({
       gridMode: 'isometric',
       gridSpacing: 8,
       snapToGrid: true,
       checkerboard: false,
+      secondaryColorDrawing: false,
     });
 
     storage.setItem('pixel-editor:grid-mode', 'invalid');
@@ -133,6 +137,7 @@ describe('пользовательские настройки холста', () 
       gridSpacing: 1,
       snapToGrid: false,
       checkerboard: true,
+      secondaryColorDrawing: true,
       error: expect.stringMatching(/не удалось прочитать/i),
     });
   });

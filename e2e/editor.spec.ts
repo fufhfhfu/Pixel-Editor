@@ -179,6 +179,22 @@ test('creates a second artboard and a layer through the editor controls', async 
   await expect(page.locator('.layers-panel > summary')).toContainText('Слои (2)');
 });
 
+test('deletes an artboard from its right-click menu and restores it with undo', async ({ page }) => {
+  await openEditor(page);
+  await page.getByRole('button', { name: 'Добавить холст' }).click();
+  await expect(page.locator('.board')).toHaveCount(2);
+
+  const point = await canvasPoint(page, 4, 4);
+  await page.mouse.click(point.x, point.y, { button: 'right' });
+  const contextMenu = page.getByRole('menu', { name: 'Действия холста' });
+  await expect(contextMenu).toBeVisible();
+  await contextMenu.getByRole('menuitem', { name: 'Удалить холст' }).click();
+  await expect(page.locator('.board')).toHaveCount(1);
+
+  await page.getByRole('button', { name: 'Отменить' }).click();
+  await expect(page.locator('.board')).toHaveCount(2);
+});
+
 test('draws exact pixels, then undoes and redoes the raster stroke', async ({ page }) => {
   await openEditor(page);
   await page.getByRole('button', { name: /Карандаш/ }).click();

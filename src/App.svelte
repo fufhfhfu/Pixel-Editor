@@ -85,6 +85,7 @@
     saveGridSpacing,
     saveSnapToGrid,
     saveCheckerboard,
+    saveSecondaryColorDrawing,
     saveCustomSizes,
     saveThemePreference,
     currentSizeIsBuiltIn,
@@ -289,6 +290,13 @@
 
   type BoardAction =
     | { kind: 'add'; board: Artboard; index: number; previousActiveBoardId: string }
+    | {
+        kind: 'remove';
+        board: Artboard;
+        index: number;
+        previousActiveBoardId: string;
+        fallbackActiveBoardId: string;
+      }
     | {
         kind: 'move';
         before: Array<{ id: string; x: number; y: number }>;
@@ -519,6 +527,7 @@
   let gridSpacing = $state(preferences.gridSpacing);
   let snapToGrid = $state(preferences.snapToGrid);
   let checkerboard = $state(preferences.checkerboard);
+  let secondaryColorDrawing = $state(preferences.secondaryColorDrawing);
   let tiledMode = $state(false);
   let symmetryX = $state(false);
   let symmetryY = $state(false);
@@ -1324,6 +1333,29 @@
     scheduleAutosave();
   }
 
+  function removeBoard(id: string): void {
+    if (boards.length <= 1) {
+      notify('В проекте должен остаться хотя бы один холст.', 'error');
+      return;
+    }
+    const index = boards.findIndex((board) => board.id === id);
+    if (index < 0) return;
+    const board = boards[index]!;
+    const previousActiveBoardId = activeBoardId;
+    const fallbackActiveBoardId = id === activeBoardId
+      ? boards[index > 0 ? index - 1 : 1]!.id
+      : activeBoardId;
+    boards = boards.filter((entry) => entry.id !== id);
+    if (id === activeBoardId) setActiveBoard(fallbackActiveBoardId);
+    pushUndoEntry({
+      kind: 'board',
+      action: { kind: 'remove', board, index, previousActiveBoardId, fallbackActiveBoardId },
+    });
+    syncHistory();
+    scheduleAutosave();
+    notify('Холст удалён. Отменить удаление можно через Ctrl+Z.');
+  }
+
   function findBoardPosition(width: number, height: number, origin: Artboard): { x: number; y: number } | null {
     const gap = 8;
     for (let radius = 1; radius <= boards.length + 1; radius++) {
@@ -1643,6 +1675,18 @@
       scheduleAutosave();
       return;
     }
+    if (action.kind === 'remove') {
+      if (direction === 'undo') {
+        boards = [...boards.slice(0, action.index), action.board, ...boards.slice(action.index)];
+        setActiveBoard(action.previousActiveBoardId);
+      } else {
+        boards = boards.filter((board) => board.id !== action.board.id);
+        if (activeBoardId === action.board.id) setActiveBoard(action.fallbackActiveBoardId);
+      }
+      syncHistory();
+      scheduleAutosave();
+      return;
+    }
     if (direction === 'undo') {
       boards = boards.filter((board) => board.id !== action.board.id);
       setActiveBoard(action.previousActiveBoardId);
@@ -1889,6 +1933,13 @@
     workspaceBackground = color;
     if (!saveWorkspaceBackground(storage, color)) {
       notify('Фон рабочего пространства изменён, но сохранить его настройку не удалось.', 'error');
+    }
+  }
+
+  function setSecondaryColorDrawing(enabled: boolean): void {
+    secondaryColorDrawing = enabled;
+    if (!saveSecondaryColorDrawing(storage, enabled)) {
+      notify('Настройка рисования изменена, но сохранить её не удалось.', 'error');
     }
   }
 
@@ -3171,6 +3222,7 @@
         tool={activeTool}
         {primary}
         {secondary}
+        {secondaryColorDrawing}
         {brushSize}
         {brushShape}
         {brushOpacity}
@@ -3190,6 +3242,7 @@
         onstrokeend={endStroke}
         onrender={() => refreshComposite(activeBoardId, getActiveLayer())}
         onselectboard={selectBoard}
+        ondeleteboard={removeBoard}
         onmoveboard={moveBoard}
         onmoveboards={moveBoards}
         onselectreference={(id) => (selectedReferenceId = id)}
@@ -3521,11 +3574,13 @@
   initialTab={settingsTab}
   {canvasBackground}
   {workspaceBackground}
+  {secondaryColorDrawing}
   {shortcuts}
   returnFocusTo={settingsTrigger}
   ontheme={setTheme}
   oncanvasbackground={setCanvasBackground}
   onworkspacebackground={setWorkspaceBackground}
+  onsecondarycolordrawing={setSecondaryColorDrawing}
   onshortcuts={setShortcuts}
   onclose={() => (settingsOpen = false)}
 />

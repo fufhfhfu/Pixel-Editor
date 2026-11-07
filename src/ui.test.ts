@@ -455,13 +455,71 @@ describe('приложение целиком (jsdom)', () => {
     expect(canvasAlpha(6, 4)).toBe(255);
   });
 
-  it('правая кнопка рисует дополнительным цветом, Shift+Enter и Enter — с клавиатуры', async () => {
-    drawStroke([4, 4], [4, 4], { button: 2 });
+  it('Shift+левая кнопка рисует дополнительным цветом, если функция включена', async () => {
+    drawStroke([4, 4], [4, 4], { shiftKey: true });
     drawStroke([6, 6], [6, 6], { button: 0 });
     await frame();
     const colorAt = (x: number, y: number) => Array.from(canvasData!.slice((y * 32 + x) * 4, (y * 32 + x) * 4 + 4));
     expect(colorAt(4, 4)).not.toEqual(colorAt(6, 6));
     expect(colorAt(4, 4)[3]).toBe(255);
+  });
+
+  it('настройка во вкладке «Фон» включает и выключает рисование дополнительным цветом', async () => {
+    const colorAt = (x: number, y: number) => Array.from(canvasData!.slice((y * 32 + x) * 4, (y * 32 + x) * 4 + 4));
+    drawStroke([4, 4], [4, 4], { shiftKey: true });
+    drawStroke([6, 6], [6, 6]);
+    await frame();
+    expect(colorAt(4, 4)).not.toEqual(colorAt(6, 6));
+
+    (document.querySelector('button[aria-label="Настройки"]') as HTMLButtonElement).click();
+    await tick();
+    (document.querySelector('#settings-background-tab') as HTMLButtonElement).click();
+    await tick();
+    const toggle = document.querySelector(
+      'input[aria-label="Рисовать дополнительным цветом через Shift+левую кнопку"]',
+    ) as HTMLInputElement;
+    expect(toggle.checked).toBe(true);
+    toggle.click();
+    await tick();
+    expect(localStorage.getItem('pixel-editor:secondary-color-drawing')).toBe('false');
+    (document.querySelector('[role="dialog"] button') as HTMLButtonElement).click();
+    await tick();
+
+    drawStroke([8, 8], [8, 8], { shiftKey: true });
+    await frame();
+    expect(colorAt(8, 8)).toEqual(colorAt(6, 6));
+  });
+
+  it('правый клик удаляет холст через меню; удаление можно отменить и повторить', async () => {
+    (document.querySelector('.add-board') as HTMLButtonElement).click();
+    await frame();
+    expect(document.querySelectorAll('.board')).toHaveLength(2);
+
+    const point = screenOf(4, 4, 1);
+    pointer('pointerdown', point, { button: 2 });
+    pointer('pointerup', point, { button: 2 });
+    await tick();
+    expect(document.querySelector('[role="menu"][aria-label="Действия холста"]')).toBeTruthy();
+
+    (document.querySelector('button[aria-label="Удалить холст"]') as HTMLButtonElement).click();
+    await frame();
+    expect(document.querySelectorAll('.board')).toHaveLength(1);
+    expect(document.body.textContent).toContain('Холст удалён');
+
+    (document.querySelector('button[aria-label="Отменить"]') as HTMLButtonElement).click();
+    await frame();
+    expect(document.querySelectorAll('.board')).toHaveLength(2);
+    (document.querySelector('button[aria-label="Повторить"]') as HTMLButtonElement).click();
+    await frame();
+    expect(document.querySelectorAll('.board')).toHaveLength(1);
+
+    const remainingPoint = screenOf(4, 4);
+    pointer('pointerdown', remainingPoint, { button: 2 });
+    pointer('pointerup', remainingPoint, { button: 2 });
+    await tick();
+    const deleteButton = document.querySelector('button[aria-label="Удалить холст"]') as HTMLButtonElement;
+    expect(deleteButton.disabled).toBe(true);
+    expect(document.querySelector('.board-context-menu')?.textContent).toContain('должен остаться хотя бы один холст');
   });
 
   it('pointercancel откатывает штрих целиком (случайные следы не остаются)', async () => {
@@ -667,6 +725,7 @@ describe('приложение целиком (jsdom)', () => {
     pointer('pointerup', screenOf(10, 8), { button: 2 });
     await tick();
     expect(stage().style.transform).not.toBe(before);
+    expect(document.querySelector('[aria-label="Действия холста"]')).toBeNull();
     const beforeScroll = stage().style.transform;
     scrollbar.scrollLeft = 100;
     scrollbar.dispatchEvent(new Event('scroll'));
@@ -807,6 +866,7 @@ describe('приложение целиком (jsdom)', () => {
     expect(first.style.left).toBe(originalPosition.left);
     expect(first.style.top).toBe(originalPosition.top);
     expect(first.classList.contains('selected')).toBe(true);
+    expect(document.querySelector('[aria-label="Действия холста"]')).toBeNull();
 
     const selectedStart = screenOf(5, 5, 0);
     const selectedTarget = { x: selectedStart.x + zoom * 5, y: selectedStart.y + zoom * 3 };

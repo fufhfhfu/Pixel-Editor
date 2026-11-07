@@ -310,7 +310,7 @@
     canvasBackground: string;
     workspaceBackground: string;
     tool: Tool;
-    /** Основной цвет (левая кнопка) и дополнительный (правая). */
+    secondaryColorDrawing: boolean;
     primary: RGBA;
     secondary: RGBA;
     brushSize: number;
@@ -335,6 +335,7 @@
     onfill: (x: number, y: number, slot: ColorSlot) => void;
     onrender: () => void;
     onselectboard: (id: string) => void;
+    ondeleteboard: (id: string) => void;
     onmoveboard: (id: string, x: number, y: number) => void;
     onmoveboards: (positions: Array<{ id: string; x: number; y: number }>) => void;
     onselectreference: (id: string) => void;
@@ -371,6 +372,7 @@
     canvasBackground,
     workspaceBackground,
     tool,
+    secondaryColorDrawing,
     primary,
     secondary,
     brushSize,
@@ -392,6 +394,7 @@
     onfill,
     onrender,
     onselectboard,
+    ondeleteboard,
     onmoveboard,
     onmoveboards,
     onselectreference,
@@ -482,6 +485,8 @@
   let alignmentGuides = $state.raw<AlignmentGuide[]>([]);
   let movingBoardStart = { x: 0, y: 0, boardX: 0, boardY: 0 };
   let rightClickBoardId: string | null = null;
+  let boardContextMenu = $state<{ boardId: string; x: number; y: number } | null>(null);
+  let boardContextMenuEl: HTMLDivElement | undefined = $state();
   let activeStrokeBoardId: string | null = null;
   let selectionDrag: {
     pointerId: number;
@@ -503,6 +508,28 @@
   const horizontalScroll = $derived(getHorizontalScrollMetrics());
   /** После жеста палец, оставшийся на экране, не должен рисовать. */
   let touchLocked = false;
+
+  $effect(() => {
+    if (boardContextMenu) boardContextMenuEl?.focus();
+  });
+
+  function openBoardContextMenu(boardId: string, clientX: number, clientY: number): void {
+    if (!boards.some((board) => board.id === boardId) || !viewportEl) return;
+    const rect = viewportEl.getBoundingClientRect();
+    boardContextMenu = {
+      boardId,
+      x: Math.max(0, Math.min(viewportEl.clientWidth - 196, clientX - rect.left)),
+      y: Math.max(0, Math.min(viewportEl.clientHeight - 76, clientY - rect.top)),
+    };
+  }
+
+  function deleteBoardFromContextMenu(): void {
+    if (!boardContextMenu || boards.length <= 1) return;
+    const boardId = boardContextMenu.boardId;
+    boardContextMenu = null;
+    selectedBoardIds = new Set([...selectedBoardIds].filter((id) => id !== boardId));
+    ondeleteboard(boardId);
+  }
 
   function makeContext(slot: ColorSlot, pressure = 1): ToolContext {
     return {
@@ -985,6 +1012,7 @@
 
   function onPointerDown(e: PointerEvent): void {
     if (!viewportEl || fillInProgress) return;
+    if (boardContextMenu) boardContextMenu = null;
     refreshOrigin();
     keyboardCursorShown = false;
 
@@ -1011,7 +1039,9 @@
     const worldPoint = pixelAt(e.clientX, e.clientY);
     const reference = referenceAtPoint(references, worldPoint.x, worldPoint.y);
     const picker = temporaryPicker || e.altKey || tool.id === 'picker';
-    const colorSlot: ColorSlot | null = e.button === 0 ? 'primary' : e.button === 2 ? 'secondary' : null;
+    const colorSlot: ColorSlot | null = e.button === 0
+      ? e.shiftKey && secondaryColorDrawing ? 'secondary' : 'primary'
+      : e.button === 2 ? 'secondary' : null;
     if (reference && picker && colorSlot) {
       e.preventDefault();
       const color = sampleReferenceColor(reference, worldPoint.x, worldPoint.y);
@@ -1068,6 +1098,7 @@
       rightPanPointerId = e.pointerId;
       rightClickBoardId = board?.id ?? null;
       panStart = { x: e.clientX, y: e.clientY, offsetX: view.offsetX, offsetY: view.offsetY };
+      viewportEl.focus({ preventScroll: true });
       viewportEl.setPointerCapture(e.pointerId);
       return;
     }
@@ -1083,8 +1114,7 @@
       return;
     }
 
-    // Рисование: левая кнопка (касание и перо тоже считаются левой) — основной цвет,
-    // правая — дополнительный
+    // Рисование: левая кнопка (касание и перо тоже считаются левой).
     if (panning || session.isActive || panMode || previewBuffer) return;
     if (!board || board.id !== activeBoardId) return;
     if (selectionMode && e.button === 0) {
@@ -1120,7 +1150,9 @@
       updateSelectionDrag(selectionDrag, point);
       return;
     }
-    const slot: ColorSlot | null = e.button === 0 ? 'primary' : e.button === 2 ? 'secondary' : null;
+    const slot: ColorSlot | null = e.button === 0
+      ? e.shiftKey && secondaryColorDrawing ? 'secondary' : 'primary'
+      : null;
     if (slot === null) return;
 
     e.preventDefault();
@@ -1316,17 +1348,8 @@
       rightPanPointerId = -1;
       if (!panning) {
         const board = rightClickBoardId ? boards.find((entry) => entry.id === rightClickBoardId) : undefined;
-        if (board && board.id === activeBoardId) {
-          const point = pixelAtBoard(board, e.clientX, e.clientY);
-          session.start(
-            e.pointerId,
-            temporaryPicker || e.altKey ? getTool('picker') : tool,
-            'secondary',
-            point.x,
-            point.y,
-            e.pointerType === 'pen' ? e.pressure : 1,
-          );
-          session.finish(e.pointerId, point);
+        if (board && boardAt(e.clientX, e.clientY)?.id === board.id) {
+          openBoardContextMenu(board.id, e.clientX, e.clientY);
         }
       }
       rightClickBoardId = null;
@@ -1474,6 +1497,11 @@
   }
 
   function onKeyDown(e: KeyboardEvent): void {
+    if (e.key === 'Escape' && boardContextMenu) {
+      e.preventDefault();
+      boardContextMenu = null;
+      return;
+    }
     if (fillInProgress) {
       e.preventDefault();
       return;
@@ -1571,7 +1599,7 @@
     bind:this={viewportEl}
     role="application"
     tabindex="0"
-    aria-label="Рабочее поле. Перетаскивайте пустое пространство правой кнопкой мыши, чтобы перемещаться. Ctrl и клик правой кнопкой выделяют холсты; перетаскивание выделенного холста перемещает группу."
+    aria-label="Рабочее поле. Правый клик по холсту открывает меню действий. Перетаскивайте пустое пространство правой кнопкой мыши, чтобы перемещаться. Ctrl и клик правой кнопкой выделяют холсты; перетаскивание выделенного холста перемещает группу."
     oncontextmenu={(e) => e.preventDefault()}
     onpointerdown={onPointerDown}
     onpointermove={onPointerMove}
@@ -1583,6 +1611,31 @@
     onfocus={onFocus}
     onblur={onBlur}
   >
+    {#if boardContextMenu}
+      <div
+        class="board-context-menu"
+        role="menu"
+        aria-label="Действия холста"
+        tabindex="-1"
+        bind:this={boardContextMenuEl}
+        style:left="{boardContextMenu.x}px"
+        style:top="{boardContextMenu.y}px"
+        onpointerdown={(event) => event.stopPropagation()}
+        onpointerup={(event) => event.stopPropagation()}
+        oncontextmenu={(event) => event.preventDefault()}
+      >
+        <button
+          type="button"
+          role="menuitem"
+          aria-label="Удалить холст"
+          disabled={boards.length <= 1}
+          onclick={deleteBoardFromContextMenu}
+        >Удалить холст</button>
+        {#if boards.length <= 1}
+          <span>В проекте должен остаться хотя бы один холст.</span>
+        {/if}
+      </div>
+    {/if}
     {#if tiledMode}
       <canvas class="tiled-background" bind:this={tiledPreviewCanvas} aria-hidden="true"></canvas>
     {/if}
@@ -1788,6 +1841,53 @@
     left: 0;
     top: 0;
     will-change: transform;
+  }
+
+  .board-context-menu {
+    position: absolute;
+    z-index: 20;
+    display: grid;
+    gap: 4px;
+    min-width: 184px;
+    padding: 6px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    color: var(--text);
+    font: inherit;
+  }
+
+  .board-context-menu button {
+    padding: 7px 10px;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .board-context-menu button:hover:not(:disabled),
+  .board-context-menu button:focus-visible {
+    background: var(--surface-hover);
+    outline: none;
+  }
+
+  .board-context-menu button:disabled {
+    color: var(--muted);
+    cursor: not-allowed;
+  }
+
+  .board-context-menu:focus {
+    outline: none;
+  }
+
+  .board-context-menu span {
+    padding: 2px 6px 4px;
+    color: var(--muted);
+    font-size: 11px;
   }
 
   .tiled-background {

@@ -110,7 +110,7 @@
 <aside class="panel" aria-label="Палитра" style:--dock-width="{panelWidth}px">
   <section class="block">
     <div class="current">
-      <div class="big secondary" style:background={rgbaToCss(secondary)} title="Дополнительный цвет (ПКМ)">
+      <div class="big secondary" style:background={rgbaToCss(secondary)} title="Дополнительный цвет">
         <input
           type="color"
           class="picker"

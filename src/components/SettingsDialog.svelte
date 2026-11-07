@@ -79,15 +79,15 @@
       <div id="settings-general-panel" role="tabpanel" aria-labelledby="settings-general-tab" tabindex="0">
         <fieldset>
           <legend>Тема оформления</legend>
-          <label>
+          <label class="theme-option" class:chosen={theme === 'system'}>
             <input type="radio" name="theme" value="system" checked={theme === 'system'} onchange={() => ontheme('system')} />
             Системная
           </label>
-          <label>
+          <label class="theme-option" class:chosen={theme === 'dark'}>
             <input type="radio" name="theme" value="dark" checked={theme === 'dark'} onchange={() => ontheme('dark')} />
             Тёмная
           </label>
-          <label>
+          <label class="theme-option" class:chosen={theme === 'light'}>
             <input type="radio" name="theme" value="light" checked={theme === 'light'} onchange={() => ontheme('light')} />
             Светлая
           </label>
@@ -131,8 +131,8 @@
     align-items: center;
     justify-content: center;
     padding: 16px;
-    background: rgba(5, 6, 10, 0.65);
-    backdrop-filter: blur(2px);
+    background: color-mix(in srgb, var(--bg) 62%, transparent);
+    backdrop-filter: blur(8px);
   }
 
   .dialog {
@@ -141,7 +141,7 @@
     border: 1px solid var(--border);
     border-radius: 12px;
     background: var(--panel);
-    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
+    box-shadow: var(--shadow-md), 0 0 0 1px color-mix(in srgb, var(--border) 60%, transparent);
   }
 
   header {
@@ -174,7 +174,9 @@
   }
 
   .tabs button {
+    min-height: 36px;
     padding: 8px 12px;
+    border-radius: 7px 7px 0 0;
     border: 0;
     border-bottom: 2px solid transparent;
     background: transparent;
@@ -186,6 +188,30 @@
   .tabs button.active {
     border-bottom-color: var(--accent);
     color: var(--text);
+  }
+
+  .tabs button:hover:not(.active) {
+    background: var(--button-hover);
+    color: var(--text);
+  }
+
+  .theme-option {
+    min-height: 42px;
+    padding: 9px 11px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--panel-2);
+    transition: background 0.16s ease, border-color 0.16s ease;
+  }
+
+  .theme-option:hover {
+    border-color: var(--button-border-hover);
+    background: var(--button-hover);
+  }
+
+  .theme-option.chosen {
+    border-color: var(--accent);
+    background: var(--accent-soft);
   }
 
   .color-setting {

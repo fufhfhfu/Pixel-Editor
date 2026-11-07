@@ -102,7 +102,7 @@
   }
 
   .value.bad {
-    color: #ff8597;
+    color: var(--danger);
   }
 
   @media (max-width: 720px) {

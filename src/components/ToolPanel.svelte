@@ -199,7 +199,7 @@
   .tool.active {
     background: var(--accent-soft);
     border-color: var(--accent);
-    color: #fff;
+    color: var(--accent-contrast);
   }
 
   .tool:focus-visible,
@@ -297,8 +297,8 @@
     padding: 7px 10px;
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    background: #232634;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    background: var(--panel-raised);
+    box-shadow: var(--shadow-md);
     white-space: nowrap;
     pointer-events: none;
     opacity: 0;

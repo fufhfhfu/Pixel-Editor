@@ -3,6 +3,7 @@
   import Canvas from './components/Canvas.svelte';
   import ConfirmDialog from './components/ConfirmDialog.svelte';
   import HelpDialog from './components/HelpDialog.svelte';
+  import NotesDialog from './components/NotesDialog.svelte';
   import SettingsDialog from './components/SettingsDialog.svelte';
   import PalettePanel from './components/PalettePanel.svelte';
   import ProjectBar from './components/ProjectBar.svelte';
@@ -107,6 +108,7 @@
   /** Пауза после последнего изменения перед сохранением проекта в локальное хранилище. */
   const AUTOSAVE_DELAY_MS = 800;
   const NOTICE_DURATION_MS = 5000;
+  const MAX_BATCH_EXPORT_MEMORY = 512 * 1024 * 1024;
 
   // Стартовые цвета подбираются по ближайшему цвету палитры по умолчанию
   const START_PRIMARY: RGBA = { r: 255, g: 0, b: 77, a: 255 };
@@ -143,6 +145,9 @@
   let view = $state.raw<ViewState>({ zoom: 1, offsetX: 0, offsetY: 0 });
   let cursor = $state.raw<PixelPos | null>(null);
   let showGrid = $state(true);
+  let panelsVisible = $state(true);
+  let fileDragActive = $state(false);
+  let operationProgress = $state<{ label: string; current: number; total: number } | null>(null);
   let canvasBackground = $state(preferences.canvasBackground);
   let workspaceBackground = $state(preferences.workspaceBackground);
   let customSizes = $state.raw<CanvasSize[]>(preferences.customSizes);
@@ -150,6 +155,23 @@
   let pending = $state.raw<PendingAction | null>(null);
   let helpOpen = $state(false);
   let helpTrigger = $state<HTMLElement | null>(null);
+  let notesOpen = $state(false);
+  let notesTrigger = $state<HTMLElement | null>(null);
+  const NOTES_STORAGE_KEY = 'pixel-editor:notes';
+  const NOTES_BACKUP_KEY = 'pixel-editor:notes:backup';
+  function loadNotes(): string {
+    try {
+      return storage?.getItem(NOTES_STORAGE_KEY) ?? '';
+    } catch {
+      return '';
+    }
+  }
+  let notesText = $state(start?.notes ?? loadNotes());
+  let notesStatus = $state('сохранено локально');
+  let notesTitle = $state('Заметки проекта');
+  let notesCreatedAt = $state(Date.now());
+  let notesUpdatedAt = $state(Date.now());
+  let projectName = $state('Безымянный проект');
   let settingsOpen = $state(false);
   let settingsTab = $state<'general' | 'background'>('general');
   let settingsTrigger = $state<HTMLElement | null>(null);
@@ -204,6 +226,53 @@
     document.documentElement.dataset.theme = theme;
   });
 
+  $effect(() => {
+    const title = saveStatus === 'pending'
+      ? `Pixel Editor — ${projectName} — сохранение…`
+      : saveStatus === 'error' || saveStatus === 'unavailable'
+        ? `Pixel Editor — ${projectName} — требуется сохранить`
+        : `Pixel Editor — ${projectName}`;
+    document.title = title;
+    void window.pixelEditorDesktop?.setTitle(title);
+    void window.pixelEditorDesktop?.setDirty(saveStatus === 'pending' || saveStatus === 'error' || saveStatus === 'unavailable');
+  });
+
+  $effect(() => {
+    const desktop = window.pixelEditorDesktop;
+    if (!desktop) return;
+    return desktop.onCommand((command) => {
+      if (command === 'save') void saveProject();
+      else if (command === 'save-and-close') {
+        void saveProject().then((saved) => {
+          if (saved) void window.pixelEditorDesktop?.closeApproved();
+        });
+      }
+      else if (command === 'undo') undo();
+      else if (command === 'redo') redo();
+      else if (command === 'zoom-in') canvasApi?.zoomBy(1);
+      else if (command === 'zoom-out') canvasApi?.zoomBy(-1);
+      else if (command === 'fit') fitCanvas();
+      else if (command === 'grid') toggleGrid();
+      else if (command === 'toggle-panels') panelsVisible = !panelsVisible;
+      else if (command === 'help') helpOpen = true;
+      else if (command === 'notes') notesOpen = true;
+      else if (command === 'add-board') void addBoard();
+      else if (command === 'open') {
+        (document.querySelector('button[aria-label="Действия с файлом"]') as HTMLButtonElement | null)?.click();
+        setTimeout(() => (document.querySelector('button[title^="Открыть проект"]') as HTMLButtonElement | null)?.click(), 0);
+      }
+    });
+  });
+
+  $effect(() => {
+    const desktop = window.pixelEditorDesktop;
+    if (!desktop) return;
+    return desktop.onOpenFile((file) => {
+      const backup = file.backupData ? new File([file.backupData], `${file.name}.bak`, { type: 'application/json' }) : undefined;
+      void importProjectFile(new File([file.data], file.name, { type: 'application/json' }), backup);
+    });
+  });
+
   // ——— Уведомления ———
 
   function dismissNotice(): void {
@@ -215,6 +284,71 @@
     clearTimeout(noticeTimer);
     notice = { text, kind };
     noticeTimer = setTimeout(dismissNotice, NOTICE_DURATION_MS);
+  }
+
+  function setNotes(value: string): void {
+    notesText = value;
+    notesUpdatedAt = Date.now();
+    notesStatus = 'сохраняется…';
+    try {
+      storage?.setItem(NOTES_STORAGE_KEY, value);
+      notesStatus = 'сохранено локально';
+    } catch {
+      notify('Заметки не удалось сохранить в браузере.', 'error');
+    }
+  }
+
+  function setNotesTitle(value: string): void {
+    notesTitle = value.slice(0, 120);
+    notesUpdatedAt = Date.now();
+  }
+
+  async function importNotesFile(file: File): Promise<void> {
+    const extension = file.name.split('.').at(-1)?.toLowerCase();
+    if (!extension || !['txt', 'md', 'markdown', 'json'].includes(extension)) {
+      notify('Поддерживаются заметки TXT, Markdown и JSON.', 'error');
+      return;
+    }
+    try {
+      const raw = await file.text();
+      const value = extension === 'json' ? (JSON.parse(raw) as { notes?: unknown }).notes : raw;
+      if (typeof value !== 'string') throw new Error('В JSON не найдено поле notes.');
+      setNotes(value);
+      notify('Заметки импортированы.');
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Не удалось импортировать заметки.', 'error');
+    }
+  }
+
+  async function exportNotes(format: 'markdown' | 'text' | 'json' = 'markdown'): Promise<void> {
+    const config = format === 'json'
+      ? { filename: 'pixel-editor-notes.json', mime: 'application/json', extensions: ['.json'] }
+      : format === 'text'
+        ? { filename: 'pixel-editor-notes.txt', mime: 'text/plain', extensions: ['.txt'] }
+        : { filename: 'pixel-editor-notes.md', mime: 'text/markdown', extensions: ['.md', '.markdown'] };
+    const destination = await chooseSaveDestination(config.filename, config.mime, config.extensions);
+    if (!destination) return;
+    const content = format === 'json'
+      ? JSON.stringify({ format: 'pixel-editor-notes', version: 1, exportedAt: new Date().toISOString(), notes: notesText }, null, 2)
+      : format === 'text'
+        ? `${notesText.trim()}\n`
+        : `# Заметки Pixel Editor\n\n${notesText.trim()}\n`;
+    try {
+      if (await saveOutput(new Blob([content], { type: config.mime }), config.filename, destination)) {
+        notify(`Заметки экспортированы в ${format === 'json' ? 'JSON' : format === 'text' ? 'TXT' : 'Markdown'}.`);
+      }
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Не удалось экспортировать заметки.', 'error');
+    }
+  }
+
+  async function exportNotesPdf(): Promise<void> {
+    if (!window.pixelEditorDesktop) {
+      notify('Экспорт PDF доступен в desktop-версии приложения.', 'error');
+      return;
+    }
+    const result = await window.pixelEditorDesktop.exportPdf({ title: notesTitle, text: notesText });
+    if (result === 'saved') notify('Заметки экспортированы в PDF.');
   }
 
   // ——— Автосохранение ———
@@ -229,6 +363,7 @@
       primary,
       secondary,
       recent,
+      notes: notesText || undefined,
       canvases: boards.map((board) => ({
         id: board.id,
         x: board.x,
@@ -428,6 +563,11 @@
 
   /** Сохраняет немедленно, если изменения ещё ждут таймера (закрытие вкладки, переключение). */
   function flushAutosave(): void {
+    try {
+      storage?.setItem(NOTES_BACKUP_KEY, JSON.stringify({ title: notesTitle, notes: notesText, updatedAt: notesUpdatedAt }));
+    } catch {
+      // Основное автосохранение проекта выполняется независимо от резервной копии заметок.
+    }
     if (autosaveTimer === undefined) return;
     clearTimeout(autosaveTimer);
     runAutosave();
@@ -759,23 +899,28 @@
     return true;
   }
 
-  async function saveProject(): Promise<void> {
-    const filename = `pixel-art-${boards.length}-canvases.json`;
-    const destination = await chooseSaveDestination(filename, 'application/json', ['.json']);
-    if (!destination) return;
+  async function saveProject(): Promise<boolean> {
+    const filename = `pixel-art-${boards.length}-canvases.pxproj`;
+    const destination = await chooseSaveDestination(filename, 'application/json', ['.pxproj', '.json']);
+    if (!destination) return false;
 
     try {
       const text = serializeProject(currentProject());
       const blob = new Blob([text], { type: 'application/json' });
-      if (await saveOutput(blob, filename, destination)) notify('Проект сохранён в файл.');
+      if (await saveOutput(blob, filename, destination)) {
+        projectName = filename;
+        notify('Проект сохранён в файл.');
+        return true;
+      }
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Не удалось сохранить проект.', 'error');
     }
+    return false;
   }
 
-  async function importProjectFile(file: File): Promise<void> {
+  async function importProjectFile(file: File, backupFile?: File): Promise<void> {
     const extension = file.name.split('.').at(-1)?.toLowerCase();
-    if (extension === 'json') {
+    if (extension === 'json' || extension === 'pxproj') {
       if (file.size > MAX_PROJECT_JSON_LENGTH) {
         notify('Файл слишком большой для проекта.', 'error');
         return;
@@ -784,13 +929,23 @@
         const project = parseProject(await file.text());
         pending = { kind: 'import', project, fileName: file.name };
       } catch (error) {
+        if (backupFile) {
+          try {
+            const recovered = parseProject(await backupFile.text());
+            pending = { kind: 'import', project: recovered, fileName: file.name };
+            notify('Основной файл повреждён. Открыта резервная копия.', 'error');
+            return;
+          } catch {
+            // Показываем исходную ошибку ниже, если резервная копия тоже повреждена.
+          }
+        }
         notify(error instanceof ProjectFormatError ? error.message : 'Не удалось прочитать файл проекта.', 'error');
       }
       return;
     }
 
     if (!extension || !['png', 'jpg', 'jpeg', 'webp', 'bmp'].includes(extension)) {
-      notify('Поддерживаются проекты JSON и изображения PNG, JPEG, WebP и BMP.', 'error');
+      notify('Поддерживаются проекты PXPROJ/JSON и изображения PNG, JPEG, WebP и BMP.', 'error');
       return;
     }
     if (file.size > MAX_IMAGE_FILE_BYTES) {
@@ -799,12 +954,34 @@
     }
 
     try {
+      operationProgress = { label: 'Чтение изображения', current: 0, total: 1 };
       const image = await decodeRasterImage(file);
+      operationProgress = { label: 'Чтение изображения', current: 1, total: 1 };
       const project = rasterImageToProject(image, { paletteId, freeColor, primary, secondary, recent });
       pending = { kind: 'image', project, fileName: file.name };
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Не удалось декодировать изображение.', 'error');
+    } finally {
+      operationProgress = null;
     }
+  }
+
+  function onFileDragOver(event: DragEvent): void {
+    if (!event.dataTransfer?.types.includes('Files')) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    fileDragActive = true;
+  }
+
+  function onFileDragLeave(event: DragEvent): void {
+    if (event.currentTarget === event.target) fileDragActive = false;
+  }
+
+  function onFileDrop(event: DragEvent): void {
+    event.preventDefault();
+    fileDragActive = false;
+    const file = event.dataTransfer?.files[0];
+    if (file) void importProjectFile(file);
   }
 
   async function exportImage(): Promise<void> {
@@ -826,6 +1003,36 @@
       );
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Не удалось создать изображение.', 'error');
+    }
+  }
+
+  async function exportAllBoards(): Promise<void> {
+    if (!window.pixelEditorDesktop) {
+      notify('Пакетный экспорт доступен в desktop-версии приложения.', 'error');
+      return;
+    }
+    try {
+      const estimatedBytes = boards.reduce(
+        (total, board) => total + board.buffer.width * board.buffer.height * exportScale * exportScale * 4,
+        0,
+      );
+      if (estimatedBytes > MAX_BATCH_EXPORT_MEMORY) {
+        notify('Пакетный экспорт остановлен: выбранные холсты потребуют слишком много памяти. Выберите меньший масштаб или экспортируйте их частями.', 'error');
+        return;
+      }
+      const requests = [];
+      operationProgress = { label: 'Подготовка пакетного экспорта', current: 0, total: boards.length };
+      for (const [index, board] of boards.entries()) {
+        const blob = await exportPngBlob(board.buffer, exportScale);
+        requests.push({ name: `pixel-art-${index + 1}-${board.buffer.width}x${board.buffer.height}.png`, data: new Uint8Array(await blob.arrayBuffer()) });
+        operationProgress = { label: 'Подготовка пакетного экспорта', current: index + 1, total: boards.length };
+      }
+      const result = await window.pixelEditorDesktop.saveBatch(requests);
+      if (result === 'saved') notify(`Экспортировано холстов: ${requests.length}.`);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Не удалось экспортировать холсты.', 'error');
+    } finally {
+      operationProgress = null;
     }
   }
 
@@ -856,6 +1063,12 @@
     primary = project.primary;
     secondary = project.secondary;
     recent = project.recent;
+    notesText = project.notes ?? '';
+    try {
+      storage?.setItem(NOTES_STORAGE_KEY, notesText);
+    } catch {
+      // Проект можно открыть и без доступа к локальному хранилищу.
+    }
     syncHistory();
     cursor = null;
     scheduleAutosave();
@@ -900,6 +1113,7 @@
       scheduleAutosave();
     } else {
       applyProject(action.project);
+      projectName = action.fileName;
       notify(action.kind === 'image' ? 'Изображение импортировано.' : 'Проект открыт.');
     }
   }
@@ -1038,7 +1252,14 @@
 <svelte:window onkeydown={onKeyDown} onkeyup={onKeyUp} onblur={onWindowBlur} onpagehide={flushAutosave} />
 <svelte:document onvisibilitychange={onVisibilityChange} />
 
-<div class="app">
+<div
+  class="app"
+  role="application"
+  class:drag-over={fileDragActive}
+  ondragover={onFileDragOver}
+  ondragleave={onFileDragLeave}
+  ondrop={onFileDrop}
+>
   <ProjectBar
     {canUndo}
     {canRedo}
@@ -1052,9 +1273,14 @@
     onopen={importProjectFile}
     onsave={saveProject}
     onexport={exportImage}
+    onexportall={exportAllBoards}
     onformat={(format) => (exportFormat = format)}
     onscale={(scale) => {
       if (availableExportScales.includes(scale)) exportScale = scale;
+    }}
+    onnotes={(trigger) => {
+      notesTrigger = trigger;
+      notesOpen = true;
     }}
     onsettings={(trigger) => openSettings('general', trigger)}
     onhelp={(trigger) => {
@@ -1063,6 +1289,7 @@
     }}
   />
 
+  {#if panelsVisible}
   <Toolbar
     width={buffer.width}
     height={buffer.height}
@@ -1077,8 +1304,10 @@
     onremovesize={removeCurrentSavedSize}
     onclear={requestClear}
   />
+  {/if}
 
   <div class="body">
+    {#if panelsVisible}
     <ToolPanel
       tools={TOOLS}
       {activeToolId}
@@ -1087,6 +1316,7 @@
       onbrush={setBrushSize}
       onaddboard={addBoard}
     />
+    {/if}
 
     <section class="workspace" aria-label="Холст">
       <Canvas
@@ -1113,6 +1343,7 @@
       />
     </section>
 
+    {#if panelsVisible}
     <PalettePanel
       palettes={PALETTES}
       {palette}
@@ -1125,6 +1356,7 @@
       onpick={setColor}
       onswap={swapColors}
     />
+    {/if}
   </div>
 
   <StatusBar
@@ -1145,6 +1377,31 @@
 
 {#if helpOpen}
   <HelpDialog tools={TOOLS} returnFocusTo={helpTrigger} onclose={() => (helpOpen = false)} />
+{/if}
+
+{#if notesOpen}
+  <NotesDialog
+    value={notesText}
+    title={notesTitle}
+    createdAt={notesCreatedAt}
+    updatedAt={notesUpdatedAt}
+    status={notesStatus}
+    returnFocusTo={notesTrigger}
+    oninput={setNotes}
+    ontitle={setNotesTitle}
+    onimport={importNotesFile}
+    onexport={exportNotes}
+    onpdf={exportNotesPdf}
+    onclose={() => (notesOpen = false)}
+  />
+{/if}
+
+{#if operationProgress}
+  <div class="operation-progress" role="status" aria-live="polite">
+    <span>{operationProgress.label}</span>
+    <strong>{operationProgress.current} / {operationProgress.total}</strong>
+    <progress max={operationProgress.total} value={operationProgress.current}></progress>
+  </div>
 {/if}
 
 {#if settingsOpen}
@@ -1180,6 +1437,22 @@
     height: 100%;
   }
 
+  .app.drag-over::after {
+    position: fixed;
+    inset: 10px;
+    z-index: 200;
+    display: grid;
+    place-items: center;
+    border: 2px dashed var(--accent);
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--accent-soft) 72%, var(--bg));
+    color: var(--text);
+    content: 'Перетащите проект или изображение сюда';
+    font-size: 16px;
+    font-weight: 600;
+    pointer-events: none;
+  }
+
   .body {
     display: flex;
     min-width: 0;
@@ -1198,5 +1471,28 @@
     flex: 1;
     min-width: 0;
     min-height: 0;
+  }
+
+  .operation-progress {
+    position: fixed;
+    right: 18px;
+    bottom: 42px;
+    z-index: 130;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 6px 14px;
+    min-width: 260px;
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--panel-raised);
+    box-shadow: var(--shadow-md);
+  }
+
+  .operation-progress progress {
+    grid-column: 1 / -1;
+    width: 100%;
+    height: 6px;
+    accent-color: var(--accent);
   }
 </style>

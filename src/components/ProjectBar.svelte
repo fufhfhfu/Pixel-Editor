@@ -15,8 +15,10 @@
     onopen: (file: File) => void;
     onsave: () => void;
     onexport: () => void;
+    onexportall: () => void;
     onformat: (format: ExportFormat) => void;
     onscale: (scale: ExportScale) => void;
+    onnotes: (trigger: HTMLElement) => void;
     onhelp: (trigger: HTMLElement) => void;
     onsettings: (trigger: HTMLElement) => void;
   }
@@ -34,8 +36,10 @@
     onopen,
     onsave,
     onexport,
+    onexportall,
     onformat,
     onscale,
+    onnotes,
     onhelp,
     onsettings,
   }: Props = $props();
@@ -97,7 +101,7 @@
         <button
           type="button"
           class="btn"
-          title="Открыть проект JSON или изображение PNG, JPEG, WebP, BMP"
+          title="Открыть проект PXPROJ/JSON или изображение PNG, JPEG, WebP, BMP"
           onclick={() => {
             closeFileMenu();
             fileInput?.click();
@@ -133,12 +137,15 @@
             onexport();
           }}
         >Экспорт {exportWidth}×{exportHeight}</button>
+        <button type="button" class="btn" title="Экспортировать все холсты в отдельные PNG-файлы" onclick={() => { closeFileMenu(); onexportall(); }}>
+          Все холсты PNG
+        </button>
       </div>
     {/if}
     <input
       class="hidden"
       type="file"
-      accept=".json,.png,.jpg,.jpeg,.webp,.bmp,application/json,image/png,image/jpeg,image/webp,image/bmp"
+      accept=".pxproj,.json,.png,.jpg,.jpeg,.webp,.bmp,application/json,image/png,image/jpeg,image/webp,image/bmp"
       tabindex="-1"
       aria-hidden="true"
       bind:this={fileInput}
@@ -174,6 +181,13 @@
   <div class="spacer"></div>
 
   <div class="group">
+    <button
+      type="button"
+      class="btn icon"
+      title="Заметки проекта"
+      aria-label="Заметки проекта"
+      onclick={(event) => onnotes(event.currentTarget)}
+    >✎</button>
     <button
       type="button"
       class="btn icon"

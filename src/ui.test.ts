@@ -641,6 +641,19 @@ describe('приложение целиком (jsdom)', () => {
     expect(document.querySelector('[role="dialog"]')).toBeNull();
   });
 
+  it('открывает заметки, сохраняет текст и предлагает экспорт Markdown', async () => {
+    (document.querySelector('button[aria-label="Заметки проекта"]') as HTMLButtonElement).click();
+    await tick();
+    const dialog = document.querySelector('[role="dialog"]')!;
+    expect(dialog.textContent).toContain('Заметки');
+    const editor = dialog.querySelector('textarea[aria-label="Текст заметок"]') as HTMLTextAreaElement;
+    editor.value = 'Проверить композицию';
+    editor.dispatchEvent(new Event('input', { bubbles: true }));
+    await tick();
+    expect(localStorage.getItem('pixel-editor:notes')).toBe('Проверить композицию');
+    expect(Array.from(dialog.querySelectorAll('button')).some((button) => button.textContent?.includes('Экспортировать'))).toBe(true);
+  });
+
   it('сохраняет выбор темы из настроек и применяет её к документу', async () => {
     (document.querySelector('button[aria-label="Настройки"]') as HTMLButtonElement).click();
     await tick();

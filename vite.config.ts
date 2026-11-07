@@ -3,6 +3,9 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   plugins: [svelte()],
+  // Electron loads the production bundle from file://, so asset URLs must
+  // remain relative to dist/index.html instead of pointing at /assets/.
+  base: './',
   // В тестах компоненты Svelte нужны в браузерной сборке
   resolve: process.env.VITEST ? { conditions: ['browser'] } : undefined,
   test: {

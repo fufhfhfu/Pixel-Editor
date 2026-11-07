@@ -17,7 +17,8 @@
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "check:e2e": "tsc --noEmit -p tsconfig.e2e.json",
-    "bench": "tsx scripts/bench.ts"
+    "bench": "tsx scripts/bench.ts",
+    "security:check": "node scripts/security-check.cjs"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.14.0",
@@ -50,6 +51,15 @@
       "electron/**/*",
       "package.json"
     ],
+    "fileAssociations": [
+      {
+        "ext": "pxproj",
+        "name": "Pixel Editor project",
+        "description": "Pixel Editor project file",
+        "mimeType": "application/json",
+        "role": "Editor"
+      }
+    ],
     "win": {
       "icon": "electron/icon.ico",
       "target": [
@@ -69,6 +79,7 @@
       "artifactName": "${productName}-${version}-${arch}.${ext}"
     },
     "nsis": {
+      "include": "build/installer.nsh",
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,

@@ -42,6 +42,7 @@ export interface ProjectData {
   primary: RGBA;
   secondary: RGBA;
   recent: RGBA[];
+  notes?: string;
   canvases?: ProjectCanvasData[];
   activeCanvasId?: string;
 }
@@ -119,6 +120,7 @@ export function serializeProject(project: ProjectData): string {
     palette: { id: project.paletteId, freeColor: project.freeColor },
     colors: { primary: colorToArray(project.primary), secondary: colorToArray(project.secondary) },
     recent: project.recent.map(colorToArray),
+    ...(project.notes ? { notes: project.notes } : {}),
   };
   if (canvases !== undefined) {
     return JSON.stringify({
@@ -260,7 +262,8 @@ export function parseProject(text: string): ProjectData {
     }
   }
 
-  return { width, height, pixels, paletteId, freeColor, primary, secondary, recent, canvases, activeCanvasId };
+  const notes = typeof raw.notes === 'string' ? raw.notes.slice(0, 200_000) : undefined;
+  return { width, height, pixels, paletteId, freeColor, primary, secondary, recent, notes, canvases, activeCanvasId };
 }
 
 function parsePixelData(value: unknown, width: number, height: number): Uint8ClampedArray {

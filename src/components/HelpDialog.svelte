@@ -11,6 +11,7 @@
   let { tools, returnFocusTo, onclose }: Props = $props();
 
   let closeButton: HTMLButtonElement | undefined = $state();
+  let search = $state('');
 
   $effect(() => {
     closeButton?.focus();
@@ -57,6 +58,18 @@
     { keys: 'Enter', action: 'Начать штрих, повторное нажатие — закончить (Shift+Enter — дополнительным цветом)' },
     { keys: 'Escape', action: 'Отменить текущий штрих целиком' },
   ];
+
+  function visibleRows(rows: readonly Row[]): Row[] {
+    const term = search.trim().toLocaleLowerCase('ru-RU');
+    if (!term) return [...rows];
+    return rows.filter((row) => `${row.keys} ${row.action}`.toLocaleLowerCase('ru-RU').includes(term));
+  }
+
+  function visibleTools(): readonly Tool[] {
+    const term = search.trim().toLocaleLowerCase('ru-RU');
+    if (!term) return tools;
+    return tools.filter((tool) => `${tool.label} ${tool.hotkeyLabel} ${tool.hint}`.toLocaleLowerCase('ru-RU').includes(term));
+  }
 </script>
 
 <svelte:window onkeydown={onKeydown} />
@@ -68,11 +81,13 @@
       <button type="button" class="btn" bind:this={closeButton} onclick={onclose}>Закрыть</button>
     </header>
 
+    <input class="search" type="search" placeholder="Поиск по командам и сочетаниям…" aria-label="Поиск в справке" bind:value={search} />
+
     <div class="columns">
       <section>
         <h3>Инструменты</h3>
         <dl>
-          {#each tools as tool (tool.id)}
+          {#each visibleTools() as tool (tool.id)}
             <div><dt><span class="kbd">{tool.hotkeyLabel}</span></dt><dd>{tool.label}</dd></div>
           {/each}
           <div><dt><span class="kbd">1</span>–<span class="kbd">4</span></dt><dd>Размер кисти, px</dd></div>
@@ -80,7 +95,7 @@
 
         <h3>Цвета</h3>
         <dl>
-          {#each colors as row (row.keys)}
+          {#each visibleRows(colors) as row (row.keys)}
             <div><dt>{row.keys}</dt><dd>{row.action}</dd></div>
           {/each}
         </dl>
@@ -89,21 +104,21 @@
       <section>
         <h3>Вид</h3>
         <dl>
-          {#each view as row (row.keys)}
+          {#each visibleRows(view) as row (row.keys)}
             <div><dt>{row.keys}</dt><dd>{row.action}</dd></div>
           {/each}
         </dl>
 
         <h3>Файл и история</h3>
         <dl>
-          {#each file as row (row.keys)}
+          {#each visibleRows(file) as row (row.keys)}
             <div><dt>{row.keys}</dt><dd>{row.action}</dd></div>
           {/each}
         </dl>
 
         <h3>Рисование с клавиатуры</h3>
         <dl>
-          {#each keyboard as row (row.keys)}
+          {#each visibleRows(keyboard) as row (row.keys)}
             <div><dt>{row.keys}</dt><dd>{row.action}</dd></div>
           {/each}
         </dl>
@@ -121,8 +136,8 @@
     align-items: center;
     justify-content: center;
     padding: 16px;
-    background: rgba(5, 6, 10, 0.65);
-    backdrop-filter: blur(2px);
+    background: color-mix(in srgb, var(--bg) 62%, transparent);
+    backdrop-filter: blur(8px);
   }
 
   .dialog {
@@ -133,7 +148,7 @@
     border: 1px solid var(--border);
     border-radius: 12px;
     background: var(--panel);
-    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
+    box-shadow: var(--shadow-md), 0 0 0 1px color-mix(in srgb, var(--border) 60%, transparent);
   }
 
   header {
@@ -155,6 +170,17 @@
     color: var(--text-dim);
     font-size: 12px;
     font-weight: 500;
+  }
+
+  .search {
+    width: 100%;
+    height: 36px;
+    margin-bottom: 4px;
+    padding: 0 11px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg);
+    color: var(--text);
   }
 
   .columns {

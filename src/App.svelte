@@ -27,9 +27,9 @@
     DEFAULT_PALETTE_ID,
     PALETTES,
     constrainColor,
-    filterToPalette,
     getPalette,
     nearestPaletteColor,
+    paletteIndexOf,
     pushRecentColor,
     type ColorSlot,
   } from './core/palette';
@@ -214,8 +214,10 @@
 
   const activeTool = $derived(getTool(activeToolId));
   const palette = $derived(getPalette(paletteId));
-  // В режиме палитры показываем только недавние цвета, которые в ней есть
-  const visibleRecent = $derived(freeColor ? recent : filterToPalette(recent, palette));
+  // Недавние цвета, уже доступные в палитре, не дублируем.
+  const visibleRecent = $derived(
+    freeColor ? recent.filter((color) => paletteIndexOf(palette, color) === -1) : [],
+  );
 
   $effect(() => {
     document.documentElement.dataset.theme = theme;

@@ -81,7 +81,6 @@
 
   /** Ниже этого зума линии сетки слишком частые и не рисуются. */
   const GRID_MIN_ZOOM = 4;
-  const HORIZONTAL_SCROLL_RANGE = 1000;
   const ALIGNMENT_SNAP_DISTANCE = 8;
   /** Накопленный deltaY колеса, соответствующий одному шагу зума. */
   const WHEEL_STEP = 100;
@@ -103,10 +102,9 @@
     startMidY: number;
     startOffsetX: number;
     startOffsetY: number;
-  }
+  };
 
   let viewportEl: HTMLDivElement | undefined = $state();
-  let horizontalScrollEl: HTMLDivElement | undefined = $state();
   let panning = $state(false);
   let focused = $state(false);
   let keyboardCursorShown = $state(false);
@@ -138,8 +136,6 @@
 
   const touches = new Map<number, { x: number; y: number }>();
   let gesture: Gesture | null = null;
-  const sceneBounds = $derived(getSceneBounds());
-  const horizontalScroll = $derived(getHorizontalScrollMetrics());
   /** После жеста палец, оставшийся на экране, не должен рисовать. */
   let touchLocked = false;
 
@@ -242,25 +238,23 @@
   export function focusBoard(id: string): void {
     const board = boards.find((entry) => entry.id === id);
     if (!board) return;
-    view = clampSceneView({
+    view = {
       ...centerView(view.zoom, board.buffer.width, board.buffer.height, viewW, viewH),
       offsetX: (viewW - board.buffer.width * view.zoom) / 2 - board.x * view.zoom,
       offsetY: (viewH - board.buffer.height * view.zoom) / 2 - board.y * view.zoom,
-    });
+    };
   }
 
   /** Меняет зум на steps уровней вокруг центра области просмотра (кнопки и клавиши +/−). */
   export function zoomBy(steps: number): void {
-    view = clampSceneView(zoomAt(view, steps, viewW / 2, viewH / 2));
+    view = zoomAt(view, steps, viewW / 2, viewH / 2);
     updateCursor();
   }
 
   /** Вписывает холст, если его размер изменился с прошлого вписывания. */
-  function ensureFit(): boolean {
-    if (viewW === 0 || viewH === 0) return false;
-    if (fittedSignature === boardSizeSignature()) return false;
+  function ensureFit(): void {
+    if (viewW === 0 || viewH === 0 || fittedSignature === boardSizeSignature()) return;
     fit();
-    return true;
   }
 
   function boardSizeSignature(): string {
@@ -385,19 +379,6 @@
     return { minX, minY, maxX, maxY, width: maxX - minX, height: maxY - minY };
   }
 
-  function clampSceneView(next: ViewState): ViewState {
-    const bounds = getSceneBounds();
-    const width = bounds.width * next.zoom;
-    const height = bounds.height * next.zoom;
-    const marginX = Math.min(48, width, viewW / 2);
-    const marginY = Math.min(48, height, viewH / 2);
-    return {
-      zoom: next.zoom,
-      offsetX: Math.round(Math.max(viewW - marginX - bounds.maxX * next.zoom, Math.min(marginX - bounds.minX * next.zoom, next.offsetX))),
-      offsetY: Math.round(Math.max(viewH - marginY - bounds.maxY * next.zoom, Math.min(marginY - bounds.minY * next.zoom, next.offsetY))),
-    };
-  }
-
   function boardAt(clientX: number, clientY: number): Board | null {
     const worldX = (clientX - originX - view.offsetX) / view.zoom;
     const worldY = (clientY - originY - view.offsetY) / view.zoom;
@@ -410,37 +391,6 @@
     const point = pixelAt(clientX, clientY);
     return { x: point.x - board.x, y: point.y - board.y };
   }
-
-  function getHorizontalScrollMetrics(): {
-    scrollContentWidth: number;
-  } {
-    return { scrollContentWidth: viewW + HORIZONTAL_SCROLL_RANGE };
-  }
-
-  function onHorizontalScroll(): void {
-    if (!horizontalScrollEl) return;
-    const margin = Math.min(48, sceneBounds.width * view.zoom, viewW / 2);
-    const minOffset = viewW - margin - sceneBounds.maxX * view.zoom;
-    const maxOffset = margin - sceneBounds.minX * view.zoom;
-    const range = maxOffset - minOffset;
-    const ratio = horizontalScrollEl.scrollLeft / HORIZONTAL_SCROLL_RANGE;
-    view = clampSceneView({ ...view, offsetX: maxOffset - range * ratio });
-  }
-
-  $effect(() => {
-    const currentScroll = horizontalScrollEl;
-    const margin = Math.min(48, sceneBounds.width * view.zoom, viewW / 2);
-    const minOffset = viewW - margin - sceneBounds.maxX * view.zoom;
-    const maxOffset = margin - sceneBounds.minX * view.zoom;
-    const range = maxOffset - minOffset;
-    const ratio = range > 0 ? (maxOffset - view.offsetX) / range : 0;
-    const target = ratio * HORIZONTAL_SCROLL_RANGE;
-    if (currentScroll && Math.abs(currentScroll.scrollLeft - target) > 1) {
-      untrack(() => {
-        currentScroll.scrollLeft = Math.max(0, target);
-      });
-    }
-  });
 
   function refreshOrigin(): void {
     if (!viewportEl) return;
@@ -527,9 +477,7 @@
     // Точка холста, бывшая под серединой в начале жеста, остаётся под серединой
     const canvasX = (gesture.startMidX - gesture.startOffsetX) / gesture.startZoom;
     const canvasY = (gesture.startMidY - gesture.startOffsetY) / gesture.startZoom;
-    view = clampSceneView(
-      { zoom, offsetX: Math.round(midX - canvasX * zoom), offsetY: Math.round(midY - canvasY * zoom) },
-    );
+    view = { zoom, offsetX: Math.round(midX - canvasX * zoom), offsetY: Math.round(midY - canvasY * zoom) };
   }
 
   function forgetTouch(pointerId: number): void {
@@ -645,13 +593,11 @@
     }
 
     if (panning && e.pointerId === panPointerId) {
-      view = clampSceneView(
-        {
-          zoom: view.zoom,
-          offsetX: panStart.offsetX + (e.clientX - panStart.x),
-          offsetY: panStart.offsetY + (e.clientY - panStart.y),
-        },
-      );
+      view = {
+        zoom: view.zoom,
+        offsetX: panStart.offsetX + (e.clientX - panStart.x),
+        offsetY: panStart.offsetY + (e.clientY - panStart.y),
+      };
     } else if (session.isActiveFor(e.pointerId)) {
       // Объединённые события дают все промежуточные позиции быстрого движения;
       // оставшиеся разрывы закрывает Брезенхэм внутри инструмента
@@ -779,7 +725,7 @@
     cursor = { x: keyboardX, y: keyboardY };
     const board = boards.find((entry) => entry.id === activeBoardId);
     if (board) {
-      view = clampSceneView(ensurePixelVisible(view, board.x + keyboardX, board.y + keyboardY, viewW, viewH));
+      view = ensurePixelVisible(view, board.x + keyboardX, board.y + keyboardY, viewW, viewH);
     }
     if (session.isActiveFor('keyboard')) session.move('keyboard', [{ x: keyboardX, y: keyboardY }]);
   }
@@ -846,9 +792,7 @@
       viewW = rect.width;
       viewH = rect.height;
       refreshOrigin();
-      if (!ensureFit()) {
-        view = clampSceneView(view);
-      }
+      ensureFit();
     });
     observer.observe(el);
 
@@ -953,17 +897,6 @@
       {/if}
     </div>
   </div>
-  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-  <div
-    class="horizontal-scroll"
-    bind:this={horizontalScrollEl}
-    role="region"
-    aria-label="Горизонтальная прокрутка холста"
-    tabindex="0"
-    onscroll={onHorizontalScroll}
-  >
-    <div class="horizontal-scroll-content" style:width="{horizontalScroll.scrollContentWidth}px"></div>
-  </div>
 </div>
 
 <style>
@@ -977,6 +910,7 @@
 
   .viewport {
     position: relative;
+    flex: 1;
     flex: 1;
     min-height: 0;
     overflow: hidden;
@@ -1032,19 +966,6 @@
     position: absolute;
     overflow: visible;
     pointer-events: none;
-  }
-
-  .horizontal-scroll {
-    flex: 0 0 16px;
-    overflow-x: auto;
-    overflow-y: hidden;
-    background: var(--panel-2);
-    scrollbar-color: var(--text-dim) var(--panel-2);
-    touch-action: pan-x;
-  }
-
-  .horizontal-scroll-content {
-    height: 1px;
   }
 
   canvas {

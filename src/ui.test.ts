@@ -95,15 +95,21 @@ function stage(): HTMLElement {
   return document.querySelector('.stage') as HTMLElement;
 }
 
+function stageOffset(): { x: number; y: number } {
+  const match = /translate\((-?[\d.]+)px, (-?[\d.]+)px\)/.exec(stage().style.transform);
+  if (!match) throw new Error('Stage transform was not set.');
+  return { x: Number(match[1]), y: Number(match[2]) };
+}
+
 /** Экранные координаты центра пикселя (x, y) при текущем виде. */
 function screenOf(x: number, y: number, boardIndex = 0): { x: number; y: number } {
   const board = document.querySelectorAll('.board')[boardIndex] as HTMLElement;
   const canvas = board.querySelector('canvas')!;
   const zoom = parseFloat(board.style.width) / canvas.width;
-  const m = /translate\((-?[\d.]+)px, (-?[\d.]+)px\)/.exec(stage().style.transform)!;
+  const { x: offsetX, y: offsetY } = stageOffset();
   return {
-    x: parseFloat(m[1]) + parseFloat(board.style.left) + (x + 0.5) * zoom,
-    y: parseFloat(m[2]) + parseFloat(board.style.top) + (y + 0.5) * zoom,
+    x: offsetX + parseFloat(board.style.left) + (x + 0.5) * zoom,
+    y: offsetY + parseFloat(board.style.top) + (y + 0.5) * zoom,
   };
 }
 
@@ -441,28 +447,38 @@ describe('приложение целиком (jsdom)', () => {
     expect(viewport().style.backgroundColor).toBe('rgb(52, 54, 63)');
   });
 
-  it('pans by right-button dragging and keeps a horizontal scrollbar available for wide canvases', async () => {
-    const scrollbar = document.querySelector('[aria-label="Горизонтальная прокрутка холста"]') as HTMLDivElement;
-    expect(scrollbar).toBeTruthy();
-    const scrollContent = scrollbar.firstElementChild as HTMLDivElement;
-    const fixedScrollWidth = scrollContent.style.width;
-    key('Equal');
-    key('Equal');
-    key('Equal');
+  it('keeps large canvases stationary on right-click and pans freely in all directions', async () => {
+    const preset = document.querySelector('#canvas-preset') as HTMLSelectElement;
+    preset.value = '1024x1024';
+    preset.dispatchEvent(new Event('change', { bubbles: true }));
+    await tick();
+    ([...document.querySelectorAll('[role="dialog"] button')].find((button) =>
+      button.textContent?.includes('Изменить'),
+    ) as HTMLButtonElement).click();
     await tick();
     await frame();
-    expect(scrollContent.style.width).toBe(fixedScrollWidth);
-    const before = stage().style.transform;
-    pointer('pointerdown', screenOf(8, 8), { button: 2 });
-    pointer('pointermove', screenOf(10, 8), { button: -1 });
-    pointer('pointerup', screenOf(10, 8), { button: 2 });
+
+    key('Minus');
     await tick();
-    expect(stage().style.transform).not.toBe(before);
-    const beforeScroll = stage().style.transform;
-    scrollbar.scrollLeft = 100;
-    scrollbar.dispatchEvent(new Event('scroll'));
-    flushSync();
-    expect(stage().style.transform).not.toBe(beforeScroll);
+    await frame();
+    const beforeClick = stageOffset();
+    const boardCenter = screenOf(512, 512);
+    pointer('pointerdown', boardCenter, { button: 2 });
+    pointer('pointerup', boardCenter, { button: 2 });
+    expect(stageOffset()).toEqual(beforeClick);
+
+    const panStart = { x: 400, y: 300 };
+    pointer('pointerdown', panStart, { button: 2 });
+    pointer('pointermove', { x: panStart.x + 1200, y: panStart.y + 900 }, { button: -1 });
+    pointer('pointerup', { x: panStart.x + 1200, y: panStart.y + 900 }, { button: 2 });
+    expect(stageOffset()).toEqual({ x: beforeClick.x + 1200, y: beforeClick.y + 900 });
+
+    const reverseStart = { x: 400, y: 300 };
+    pointer('pointerdown', reverseStart, { button: 2 });
+    pointer('pointermove', { x: reverseStart.x - 2500, y: reverseStart.y - 1900 }, { button: -1 });
+    pointer('pointerup', { x: reverseStart.x - 2500, y: reverseStart.y - 1900 }, { button: 2 });
+    expect(stageOffset()).toEqual({ x: beforeClick.x - 1300, y: beforeClick.y - 1000 });
+    expect(document.querySelector('[aria-label="Горизонтальная прокрутка холста"]')).toBeNull();
   });
 
   it('adds multiple boards and selects/moves them with Ctrl+right-drag', async () => {
@@ -689,12 +705,29 @@ describe('приложение целиком (jsdom)', () => {
     await tick();
     const dialog = document.querySelector('[role="dialog"]')!;
     expect(dialog.textContent).toContain('Заметки');
+    expect(dialog.textContent).not.toContain('Продолжить редактирование');
     const editor = dialog.querySelector('textarea[aria-label="Текст заметок"]') as HTMLTextAreaElement;
     editor.value = 'Проверить композицию';
     editor.dispatchEvent(new Event('input', { bubbles: true }));
     await tick();
     expect(localStorage.getItem('pixel-editor:notes')).toBe('Проверить композицию');
     expect(Array.from(dialog.querySelectorAll('button')).some((button) => button.textContent?.includes('Экспортировать'))).toBe(true);
+  });
+
+  it('не дублирует цвета активной палитры в недавних и показывает уникальные свободные цвета', async () => {
+    (document.querySelector('button[aria-label="#ff004d"]') as HTMLButtonElement).click();
+    await tick();
+    expect(Array.from(document.querySelectorAll('.block h2')).some((heading) => heading.textContent === 'Недавние')).toBe(false);
+
+    (document.querySelector('[role="switch"][aria-checked="false"]') as HTMLButtonElement).click();
+    const colorInput = document.querySelector('input[aria-label="Основной цвет"]') as HTMLInputElement;
+    colorInput.value = '#123456';
+    colorInput.dispatchEvent(new Event('input', { bubbles: true }));
+    drawStroke([0, 0], [1, 0]);
+    await tick();
+
+    expect(document.querySelectorAll('button[aria-label="#123456"]')).toHaveLength(1);
+    expect(Array.from(document.querySelectorAll('.block h2')).some((heading) => heading.textContent === 'Недавние')).toBe(true);
   });
 
   it('сохраняет выбор темы из настроек и применяет её к документу', async () => {

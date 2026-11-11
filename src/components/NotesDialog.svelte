@@ -78,7 +78,6 @@
       <span class="meta">{value.length.toLocaleString('ru-RU')} символов · {status}<br />Создано: {new Date(createdAt).toLocaleDateString('ru-RU')} · Изменено: {new Date(updatedAt).toLocaleString('ru-RU')}</span>
       <div class="actions">
         <button type="button" class="btn" onclick={() => fileInput?.click()}>Импортировать</button>
-        <button type="button" class="btn" onclick={() => editor?.focus()}>Продолжить редактирование</button>
         <select class="format" aria-label="Формат экспорта заметок" bind:value={format}>
           <option value="markdown">Markdown (.md)</option>
           <option value="text">Текст (.txt)</option>

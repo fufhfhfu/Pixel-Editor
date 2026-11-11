@@ -128,18 +128,16 @@
     {/if}
   </section>
 
-  <section class="block">
-    <h2>Недавние</h2>
-    {#if recent.length > 0}
+  {#if recent.length > 0}
+    <section class="block">
+      <h2>Недавние</h2>
       <div class="swatches">
         {#each recent as color, i (i)}
           {@render swatch(color)}
         {/each}
       </div>
-    {:else}
-      <p class="empty">Цвета, которыми вы рисовали, появятся здесь.</p>
-    {/if}
-  </section>
+    </section>
+  {/if}
 
   <section class="block free">
     <button

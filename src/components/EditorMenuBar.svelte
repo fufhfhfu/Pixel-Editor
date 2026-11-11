@@ -17,9 +17,10 @@
     groups: readonly EditorMenuGroup[];
     oncommand: (command: string) => void;
     onopen: (file: File) => void;
+    onsettings: (trigger: HTMLElement) => void;
   }
 
-  let { groups, oncommand, onopen }: Props = $props();
+  let { groups, oncommand, onopen, onsettings }: Props = $props();
   let openGroup = $state<string | null>(null);
   let root: HTMLElement;
   let fileInput: HTMLInputElement;
@@ -109,6 +110,13 @@
         </div>
       {/if}
     </div>
+    {#if group.label === 'Окно'}
+      <button type="button" class="menu-trigger" aria-label="Настройки"
+        onclick={(event) => {
+          closeMenu();
+          onsettings(event.currentTarget);
+        }}>Настройки</button>
+    {/if}
   {/each}
   <input class="hidden" type="file" accept=".json,.png,.jpg,.jpeg,.webp,.bmp,application/json,image/png,image/jpeg,image/webp,image/bmp"
     tabindex="-1" aria-hidden="true" bind:this={fileInput} onchange={onFileChange} />

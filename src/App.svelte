@@ -700,10 +700,8 @@
     welcomeOpen = true;
   }
 
-  function showFeedbackNotes(trigger: HTMLElement | null = null): void {
-    feedbackNotesTrigger = trigger?.isConnected
-      ? trigger
-      : document.querySelector<HTMLElement>('[aria-label="Горячие клавиши"]');
+  function showFeedbackNotes(trigger: HTMLElement): void {
+    feedbackNotesTrigger = trigger;
     feedbackNotesOpen = true;
   }
 
@@ -1020,7 +1018,6 @@
         helpTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
         helpOpen = true;
         break;
-      case 'feedback-notes': showFeedbackNotes(); break;
       case 'project-notes': showProjectNotes(); break;
       case 'welcome': showWelcome(); break;
       default: {
@@ -1123,12 +1120,6 @@
         command: `panel:${panel.id}`,
         separatorBefore: panel.id === 'colors',
       })),
-    ] },
-    { label: 'Справка', items: [
-      { label: 'Горячие клавиши', command: 'help' },
-      { label: 'Заметки обратной связи', command: 'feedback-notes' },
-      { label: 'Приветствие', command: 'welcome' },
-      { label: 'Настройки', command: 'settings' },
     ] },
   ]);
 
@@ -3317,6 +3308,7 @@
     groups={editorMenuGroups}
     oncommand={handleEditorCommand}
     onopen={(file) => void importProjectFile(file)}
+    onsettings={(trigger) => openSettings('general', trigger)}
   />
   <ProjectBar
     {canUndo}
@@ -3339,12 +3331,12 @@
     onscale={(scale) => {
       if (availableExportScales.includes(scale)) exportScale = scale;
     }}
-    onsettings={(trigger) => openSettings('general', trigger)}
     onwelcome={(trigger) => showWelcome(trigger)}
     onhelp={(trigger) => {
       helpTrigger = trigger;
       helpOpen = true;
     }}
+    onfeedbacknotes={showFeedbackNotes}
   />
 
   <Toolbar
@@ -3780,10 +3772,6 @@
     tools={keyboardTools}
     {shortcuts}
     returnFocusTo={helpTrigger}
-    onnotes={() => {
-      helpOpen = false;
-      showFeedbackNotes(helpTrigger);
-    }}
     onclose={() => (helpOpen = false)}
   />
 {/if}
@@ -3912,9 +3900,9 @@
     overflow: hidden;
   }
 
-  :global(.tool-dock:has(.options[open])) {
+  :global(.tool-dock:has(.options[open], .brush-size[open])) {
     position: relative;
-    z-index: 40;
+    z-index: 80;
     overflow: visible;
   }
 

@@ -215,6 +215,32 @@ describe('приложение целиком (jsdom)', () => {
     expect(document.querySelector('.palette-dock')).toBeTruthy();
   });
 
+  it('показывает настройки текстовой кнопкой после меню окна', async () => {
+    const windowButton = document.querySelector<HTMLButtonElement>('.menu-bar [data-menu="Окно"]')!;
+    const settingsButton = document.querySelector<HTMLButtonElement>('.menu-bar [aria-label="Настройки"]')!;
+    const saveButton = document.querySelector<HTMLButtonElement>('.bar button[title^="Сохранить проект"]')!;
+    const menuButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('.menu-bar button'));
+    expect(settingsButton.textContent?.trim()).toBe('Настройки');
+    expect(menuButtons.indexOf(settingsButton)).toBe(menuButtons.indexOf(windowButton) + 1);
+    expect(saveButton).toBeTruthy();
+
+    settingsButton.click();
+    await tick();
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain('Тема оформления');
+  });
+
+  it('переносит заметки обратной связи на верхнюю панель рядом со справкой', async () => {
+    const helpButton = document.querySelector<HTMLButtonElement>('.bar [aria-label="Справка"]')!;
+    const notesButton = document.querySelector<HTMLButtonElement>('.bar [aria-label="Заметки обратной связи"]')!;
+    const toolbarButtons = Array.from(helpButton.parentElement!.querySelectorAll('button'));
+    expect(toolbarButtons.indexOf(notesButton)).toBe(toolbarButtons.indexOf(helpButton) + 1);
+    expect(document.querySelector('.menu-bar [data-menu="Справка"]')).toBeNull();
+
+    notesButton.click();
+    await tick();
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain('Заметки обратной связи');
+  });
+
   it('не дублирует команды отмены, масштабирования и экспорта в правой панели', async () => {
     const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>('.panel-tabs button'));
     const selectTab = async (label: string) => {
@@ -1123,7 +1149,12 @@ describe('приложение целиком (jsdom)', () => {
   it('справка открывается по H и закрывается Escape, фокус возвращается', async () => {
     key('KeyH');
     await tick();
-    expect(document.querySelector('[role="dialog"]')?.textContent).toContain('Горячие клавиши');
+    const helpDialog = document.querySelector('[role="dialog"]');
+    expect(helpDialog?.textContent).toContain('Горячие клавиши');
+    expect(helpDialog?.textContent).not.toContain('Заметки обратной связи');
+    expect(helpDialog?.textContent).toContain('Копировать выделенную область');
+    expect(helpDialog?.textContent).toContain('Shift + Enter');
+    expect(helpDialog?.textContent).not.toContain('Перейти на холст');
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     await tick();
     expect(document.querySelector('[role="dialog"]')).toBeNull();

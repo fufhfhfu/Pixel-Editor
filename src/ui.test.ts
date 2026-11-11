@@ -490,24 +490,29 @@ describe('приложение целиком (jsdom)', () => {
     expect(colorAt(8, 8)).toEqual(colorAt(6, 6));
   });
 
-  it('правый клик не открывает меню удаления; удаление холста доступно в меню и отменяется', async () => {
+  it('правый клик по выбранному холсту открывает действия удаления и подгонки', async () => {
     (document.querySelector('.add-board') as HTMLButtonElement).click();
     await frame();
     expect(document.querySelectorAll('.board')).toHaveLength(2);
+
+    const unselectedPoint = screenOf(4, 4, 0);
+    pointer('pointerdown', unselectedPoint, { button: 2 });
+    pointer('pointerup', unselectedPoint, { button: 2 });
+    await tick();
+    expect(document.querySelector('[aria-label="Действия холста"]')).toBeNull();
 
     const point = screenOf(4, 4, 1);
     pointer('pointerdown', point, { button: 2 });
     pointer('pointerup', point, { button: 2 });
     await tick();
-    expect(document.querySelector('[role="menu"][aria-label="Действия холста"]')).toBeNull();
-    expect(document.querySelectorAll('.board')).toHaveLength(2);
+    const menu = document.querySelector('[role="group"][aria-label="Действия холста"]');
+    expect(menu).toBeTruthy();
+    expect(Array.from(menu!.querySelectorAll('button')).map((button) => button.textContent?.trim())).toEqual([
+      'Удалить',
+      'Подогнать холст под изображение',
+    ]);
 
-    (document.querySelector('[data-menu="Холст"]') as HTMLButtonElement).click();
-    await tick();
-    const deleteBoardMenuItem = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'))
-      .find((button) => button.textContent?.trim() === 'Удалить активный холст');
-    expect(deleteBoardMenuItem).toBeTruthy();
-    deleteBoardMenuItem?.click();
+    (menu!.querySelector('button') as HTMLButtonElement).click();
     await frame();
     expect(document.querySelectorAll('.board')).toHaveLength(1);
     expect(document.body.textContent).toContain('Холст удалён');
@@ -518,8 +523,39 @@ describe('приложение целиком (jsdom)', () => {
     (document.querySelector('button[aria-label="Повторить"]') as HTMLButtonElement).click();
     await frame();
     expect(document.querySelectorAll('.board')).toHaveLength(1);
+  });
 
-    expect(document.querySelector('[data-menu="Холст"]')).toBeTruthy();
+  it('подгоняет размер выбранного холста по непрозрачным пикселям и отменяется', async () => {
+    drawStroke([4, 5], [4, 5]);
+    drawStroke([8, 10], [8, 10]);
+    await frame();
+
+    const point = screenOf(12, 12, 0);
+    pointer('pointerdown', point, { button: 2 });
+    pointer('pointerup', point, { button: 2 });
+    await tick();
+    const fitButton = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('[aria-label="Действия холста"] button'),
+    ).find((button) => button.textContent?.trim() === 'Подогнать холст под изображение');
+    expect(fitButton).toBeTruthy();
+    fitButton!.click();
+    await frame();
+
+    const activeCanvas = document.querySelector('.board.selected canvas') as HTMLCanvasElement;
+    expect(activeCanvas.width).toBe(5);
+    expect(activeCanvas.height).toBe(6);
+    expect(canvasData).toHaveLength(5 * 6 * 4);
+    expect(canvasData![3]).toBe(255);
+    expect(canvasData![(5 * 5 + 4) * 4 + 3]).toBe(255);
+
+    (document.querySelector('button[aria-label="Отменить"]') as HTMLButtonElement).click();
+    await frame();
+    expect((document.querySelector('.board.selected canvas') as HTMLCanvasElement).width).toBe(32);
+    expect((document.querySelector('.board.selected canvas') as HTMLCanvasElement).height).toBe(32);
+    (document.querySelector('button[aria-label="Повторить"]') as HTMLButtonElement).click();
+    await frame();
+    expect((document.querySelector('.board.selected canvas') as HTMLCanvasElement).width).toBe(5);
+    expect((document.querySelector('.board.selected canvas') as HTMLCanvasElement).height).toBe(6);
   });
 
   it('pointercancel откатывает штрих целиком (случайные следы не остаются)', async () => {

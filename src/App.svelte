@@ -1424,6 +1424,118 @@
     notify('Холст удалён. Отменить удаление можно через Ctrl+Z.');
   }
 
+  function fitBoardToArtwork(id: string): void {
+    const board = boards.find((entry) => entry.id === id);
+    if (!board || id !== activeBoardId) return;
+
+    for (const layer of board.layers) getAnimationFramesForLayer(id, layer);
+
+    let minX = board.buffer.width;
+    let minY = board.buffer.height;
+    let maxX = -1;
+    let maxY = -1;
+    const framesByLayer = new Map(
+      board.layers.map((layer) => [
+        layer.id,
+        animationFramesByLayer.get(getAnimationLayerKey(id, layer.id))!,
+      ]),
+    );
+
+    for (const frames of framesByLayer.values()) {
+      for (const frame of frames) {
+        const { width, height, data } = frame.buffer;
+        for (let y = 0; y < height; y++) {
+          for (let x = 0; x < width; x++) {
+            if (data[(y * width + x) * 4 + 3] === 0) continue;
+            minX = Math.min(minX, x);
+            minY = Math.min(minY, y);
+            maxX = Math.max(maxX, x);
+            maxY = Math.max(maxY, y);
+          }
+        }
+      }
+    }
+
+    if (maxX < minX || maxY < minY) {
+      notify('Нечего подгонять: холст не содержит непрозрачных пикселей.', 'error');
+      return;
+    }
+
+    const width = maxX - minX + 1;
+    const height = maxY - minY + 1;
+    if (width === board.buffer.width && height === board.buffer.height) {
+      notify('Холст уже подогнан под содержимое.');
+      return;
+    }
+
+    stopAnimationPlayback();
+    const cropBuffer = (source: PixelBuffer): PixelBuffer => {
+      const cropped = new PixelBuffer(width, height);
+      for (let y = 0; y < height; y++) {
+        const sourceStart = ((minY + y) * source.width + minX) * 4;
+        const targetStart = y * width * 4;
+        cropped.data.set(source.data.subarray(sourceStart, sourceStart + width * 4), targetStart);
+      }
+      cropped.markAllDirty();
+      return cropped;
+    };
+
+    const beforeLayers = board.layers;
+    const beforeAnimationFrames = animationFrames;
+    const beforeActiveFrameIndex = activeFrameIndex;
+    const beforeAnimationFramesByLayer = new Map(animationFramesByLayer);
+    const afterAnimationFramesByLayer = new Map(beforeAnimationFramesByLayer);
+    for (const layer of board.layers) {
+      const key = getAnimationLayerKey(id, layer.id);
+      const croppedFrames = framesByLayer.get(layer.id)!.map((frame) => {
+        const next = createAnimationFrame(frame.id, width, height, cropBuffer(frame.buffer).data, frame.durationMs);
+        frameBufferIds.set(next.buffer, next.id);
+        return next;
+      });
+      afterAnimationFramesByLayer.set(key, croppedFrames);
+    }
+
+    const activeLayerFrames = afterAnimationFramesByLayer.get(getAnimationLayerKey(id, activeLayerId))!;
+    const afterLayers = board.layers.map((layer) => {
+      const frames = afterAnimationFramesByLayer.get(getAnimationLayerKey(id, layer.id))!;
+      return {
+        ...layer,
+        buffer: frames[layer.id === activeLayerId ? activeFrameIndex : 0]!.buffer,
+      };
+    });
+
+    animationFramesByLayer.clear();
+    for (const [key, frames] of afterAnimationFramesByLayer) animationFramesByLayer.set(key, frames);
+    const beforeSelection = selectionMask;
+    selectionMask = null;
+    selectionPreview = null;
+    replaceLayerStack(id, afterLayers, activeLayerId, board.groups);
+    animationFrames = activeLayerFrames;
+    activeFrameIndex = Math.min(beforeActiveFrameIndex, activeLayerFrames.length - 1);
+    pushUndoEntry({
+      kind: 'layer-stack',
+      boardId: id,
+      beforeLayers,
+      afterLayers,
+      beforeGroups: board.groups,
+      afterGroups: board.groups,
+      beforeActiveLayerId: activeLayerId,
+      afterActiveLayerId: activeLayerId,
+      beforeSelection,
+      afterSelection: null,
+      beforeAnimationFrames,
+      afterAnimationFrames: activeLayerFrames,
+      beforeAnimationFramesByLayer,
+      afterAnimationFramesByLayer,
+      beforeActiveFrameIndex,
+      afterActiveFrameIndex: activeFrameIndex,
+    });
+    cursor = null;
+    scheduleAutosave();
+    canvasApi?.requestRender();
+    notify(`Холст подогнан под изображение: ${width}×${height} px. Действие можно отменить через Ctrl+Z.`);
+  }
+
   function findBoardPosition(width: number, height: number, origin: Artboard): { x: number; y: number } | null {
     const gap = 32;
     for (let radius = 1; radius <= boards.length + 1; radius++) {
@@ -3371,6 +3483,8 @@
         onselectboard={selectBoard}
         onmoveboard={moveBoard}
         onmoveboards={moveBoards}
+        ondeleteboard={removeBoard}
+        onfitboard={fitBoardToArtwork}
         onselectreference={(id) => (selectedReferenceId = id)}
         onreferencemovestart={beginReferenceMove}
         onreferencemove={(id, x, y) => updateReference(id, { x, y }, false)}

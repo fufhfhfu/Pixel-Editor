@@ -337,6 +337,8 @@
     onselectboard: (id: string) => void;
     onmoveboard: (id: string, x: number, y: number) => void;
     onmoveboards: (positions: Array<{ id: string; x: number; y: number }>) => void;
+    ondeleteboard: (id: string) => void;
+    onfitboard: (id: string) => void;
     onselectreference: (id: string) => void;
     onreferencemovestart: () => void;
     onreferencemove: (id: string, x: number, y: number) => void;
@@ -395,6 +397,8 @@
     onselectboard,
     onmoveboard,
     onmoveboards,
+    ondeleteboard,
+    onfitboard,
     onselectreference,
     onreferencemovestart,
     onreferencemove,
@@ -460,6 +464,8 @@
   let lastClient: { x: number; y: number } | null = null;
   let panPointerId = -1;
   let rightPanPointerId = -1;
+  let rightClickBoardId: string | null = null;
+  let boardContextMenu = $state<{ boardId: string; x: number; y: number } | null>(null);
   let movingPointerId = -1;
   let movingBoardId: string | null = null;
   let movingBoardIds: string[] = [];
@@ -935,6 +941,7 @@
 
   function onPointerDown(e: PointerEvent): void {
     if (!viewportEl || fillInProgress) return;
+    if (boardContextMenu) boardContextMenu = null;
     refreshOrigin();
     keyboardCursorShown = false;
 
@@ -1018,6 +1025,7 @@
       if (panning || session.isActive) return;
       e.preventDefault();
       rightPanPointerId = e.pointerId;
+      rightClickBoardId = board?.id === activeBoardId ? board.id : null;
       panStart = { x: e.clientX, y: e.clientY, offsetX: view.offsetX, offsetY: view.offsetY };
       viewportEl.focus({ preventScroll: true });
       viewportEl.setPointerCapture(e.pointerId);
@@ -1266,7 +1274,19 @@
     }
 
     if (rightPanPointerId === e.pointerId) {
+      const clickedBoardId = rightClickBoardId;
+      rightClickBoardId = null;
       rightPanPointerId = -1;
+      if (!panning && clickedBoardId === activeBoardId && boardAt(e.clientX, e.clientY)?.id === clickedBoardId) {
+        const rect = viewportEl!.getBoundingClientRect();
+        const menuWidth = 212;
+        const menuHeight = 82;
+        boardContextMenu = {
+          boardId: clickedBoardId,
+          x: Math.max(8, Math.min(e.clientX - rect.left, rect.width - menuWidth - 8)),
+          y: Math.max(8, Math.min(e.clientY - rect.top, rect.height - menuHeight - 8)),
+        };
+      }
     }
 
     if (panning && e.pointerId === panPointerId) {
@@ -1300,7 +1320,10 @@
       draggingGuide = null;
       releasePointer(e.pointerId);
     }
-    if (rightPanPointerId === e.pointerId) rightPanPointerId = -1;
+    if (rightPanPointerId === e.pointerId) {
+      rightPanPointerId = -1;
+      rightClickBoardId = null;
+    }
     if (selectionDrag?.pointerId === e.pointerId) {
       onselection(selectionDrag.original);
       selectionDrag = null;
@@ -1340,7 +1363,10 @@
       onreferencemovecancel();
     }
     if (draggingGuide?.pointerId === e.pointerId) draggingGuide = null;
-    if (rightPanPointerId === e.pointerId) rightPanPointerId = -1;
+    if (rightPanPointerId === e.pointerId) {
+      rightPanPointerId = -1;
+      rightClickBoardId = null;
+    }
     if (selectionDrag?.pointerId === e.pointerId) {
       onselection(selectionDrag.original);
       selectionDrag = null;
@@ -1411,6 +1437,11 @@
   }
 
   function onKeyDown(e: KeyboardEvent): void {
+    if (boardContextMenu && e.key === 'Escape') {
+      e.preventDefault();
+      boardContextMenu = null;
+      return;
+    }
     if (fillInProgress) {
       e.preventDefault();
       return;
@@ -1472,6 +1503,10 @@
   onMount(() => {
     const el = viewportEl;
     if (!el) return;
+    const dismissBoardContextMenu = (event: PointerEvent) => {
+      if (event.target instanceof Element && event.target.closest('.board-context-menu')) return;
+      if (boardContextMenu) boardContextMenu = null;
+    };
 
     const observer = new ResizeObserver((entries) => {
       const rect = entries[0].contentRect;
@@ -1484,10 +1519,12 @@
 
     // passive: false нужен, чтобы колесо не прокручивало страницу
     el.addEventListener('wheel', onWheel, { passive: false });
+    document.addEventListener('pointerdown', dismissBoardContextMenu, true);
 
     return () => {
       observer.disconnect();
       el.removeEventListener('wheel', onWheel);
+      document.removeEventListener('pointerdown', dismissBoardContextMenu, true);
       if (tiledRenderFrame) cancelAnimationFrame(tiledRenderFrame);
       if (previewWindowTimer) clearInterval(previewWindowTimer);
       previewWindow?.close();
@@ -1669,6 +1706,35 @@
         <button type="button" onclick={oncanceltransform}>Отмена</button>
       </div>
     {/if}
+    {#if boardContextMenu}
+      <div
+        class="board-context-menu"
+        role="group"
+        aria-label="Действия холста"
+        style:left="{boardContextMenu.x}px"
+        style:top="{boardContextMenu.y}px"
+        onpointerdown={(event) => event.stopPropagation()}
+        onpointerup={(event) => event.stopPropagation()}
+        oncontextmenu={(event) => event.preventDefault()}
+      >
+        <button
+          type="button"
+          onclick={() => {
+            const boardId = boardContextMenu?.boardId;
+            boardContextMenu = null;
+            if (boardId) ondeleteboard(boardId);
+          }}
+        >Удалить</button>
+        <button
+          type="button"
+          onclick={() => {
+            const boardId = boardContextMenu?.boardId;
+            boardContextMenu = null;
+            if (boardId) onfitboard(boardId);
+          }}
+        >Подогнать холст под изображение</button>
+      </div>
+    {/if}
   </div>
 </div>
 
@@ -1705,6 +1771,39 @@
 
   .viewport.panning {
     cursor: grabbing;
+  }
+
+  .board-context-menu {
+    position: absolute;
+    z-index: 30;
+    display: grid;
+    min-width: 196px;
+    gap: 4px;
+    padding: 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--panel);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    color: var(--text);
+  }
+
+  .board-context-menu button {
+    min-height: 30px;
+    padding: 5px 8px;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .board-context-menu button:hover,
+  .board-context-menu button:focus-visible {
+    border-color: var(--border);
+    background: var(--panel-2);
+    outline: none;
   }
 
   .stage {

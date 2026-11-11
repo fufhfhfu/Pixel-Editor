@@ -4,8 +4,6 @@ import {
   AUTOSAVE_DATABASE_VERSION,
   AUTOSAVE_OBJECT_STORE,
   AutosaveRepository,
-  writeBlobToFile,
-  type SaveFileHandle,
 } from './autosave';
 import { parseProject, type ProjectData } from './project';
 import { AUTOSAVE_BACKUP_KEY, AUTOSAVE_KEY, type KeyValueStorage } from './storage';
@@ -38,36 +36,6 @@ const repository = (storage: KeyValueStorage | null) =>
   new AutosaveRepository(new IDBFactory(), storage, `pixel-editor-test-${databaseId++}`);
 
 describe('IndexedDB autosave repository', () => {
-  it('writes the blob to the file selected by the user', async () => {
-    const write = vi.fn(async (_blob: Blob) => {});
-    const close = vi.fn(async () => {});
-    const file: SaveFileHandle = {
-      createWritable: vi.fn(async () => ({ write, close })),
-    };
-
-    await writeBlobToFile(file, new Blob(['project']));
-
-    expect(file.createWritable).toHaveBeenCalledOnce();
-    expect(write).toHaveBeenCalledOnce();
-    expect(close).toHaveBeenCalledOnce();
-  });
-
-  it('aborts the selected file if writing fails', async () => {
-    const abort = vi.fn(async () => {});
-    const file: SaveFileHandle = {
-      createWritable: async () => ({
-        write: async () => {
-          throw new Error('disk full');
-        },
-        close: async () => {},
-        abort,
-      }),
-    };
-
-    await expect(writeBlobToFile(file, new Blob(['image']))).rejects.toThrow('disk full');
-    expect(abort).toHaveBeenCalledOnce();
-  });
-
   it('removes previously remembered save-directory handles during database upgrade', async () => {
     const factory = new IDBFactory();
     const databaseName = `pixel-editor-legacy-${databaseId++}`;

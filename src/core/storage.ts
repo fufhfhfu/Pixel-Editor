@@ -16,7 +16,7 @@ export interface AutosaveLoadResult {
   error: string | null;
 }
 
-export function getBrowserStorage(): KeyValueStorage | null {
+export function getAppStorage(): KeyValueStorage | null {
   if (typeof window === 'undefined') return null;
   try {
     return window.localStorage;
@@ -30,7 +30,7 @@ export function loadAutosave(storage: KeyValueStorage): AutosaveLoadResult {
   try {
     saved = storage.getItem(AUTOSAVE_KEY);
   } catch {
-    return { project: null, error: 'Автосохранение недоступно: браузер запретил доступ к хранилищу.' };
+    return { project: null, error: 'Автосохранение недоступно: приложение запретило доступ к хранилищу.' };
   }
 
   if (saved === null) return { project: null, error: null };

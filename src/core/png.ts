@@ -83,7 +83,7 @@ export function zlibStored(data: Uint8Array): Uint8Array {
   return out;
 }
 
-/** zlib-поток со сжатием средствами браузера (CompressionStream), иначе без сжатия. */
+/** zlib-поток с помощью CompressionStream, иначе без сжатия. */
 async function zlibCompress(data: Uint8Array, stored: boolean): Promise<Uint8Array> {
   if (!stored && typeof CompressionStream === 'function') {
     try {

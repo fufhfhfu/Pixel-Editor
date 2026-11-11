@@ -486,9 +486,7 @@
     const steps = Math.max(-MAX_WHEEL_STEPS, Math.min(MAX_WHEEL_STEPS, raw));
 
     // deltaY < 0: прокрутка от себя — приближение
-    view = clampSceneView(
-      zoomAt(view, -steps, e.clientX - originX, e.clientY - originY),
-    );
+    view = zoomAt(view, -steps, e.clientX - originX, e.clientY - originY);
     lastClient = { x: e.clientX, y: e.clientY };
     updateCursor();
   }
@@ -738,7 +736,7 @@
   }
 
   /**
-   * Захват потерян без pointerup (окно потеряло фокус, отпускание вне браузера):
+   * Захват потерян без pointerup (окно потеряло фокус, отпускание вне приложения):
    * без этого штрих «залипал» бы и блокировал рисование до перезагрузки страницы.
    */
   function onLostPointerCapture(e: PointerEvent): void {

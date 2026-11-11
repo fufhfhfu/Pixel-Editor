@@ -1,9 +1,9 @@
 import { mount } from 'svelte';
 import App from './App.svelte';
 import './app.css';
-import { AutosaveRepository, getBrowserIndexedDB } from './core/autosave';
+import { AutosaveRepository, getAppIndexedDB } from './core/autosave';
 import { loadEditorPreferences } from './core/preferences';
-import { getBrowserStorage } from './core/storage';
+import { getAppStorage } from './core/storage';
 
 const target = document.getElementById('app');
 
@@ -12,25 +12,29 @@ if (!target) {
 }
 
 const appTarget = target;
-document.documentElement.dataset.theme = loadEditorPreferences(getBrowserStorage()).theme;
+if (!window.pixelEditorDesktop) {
+  appTarget.textContent = 'Pixel Editor работает только как настольное приложение. Запустите его командой npm run dev.';
+} else {
+  document.documentElement.dataset.theme = loadEditorPreferences(getAppStorage()).theme;
 
-async function bootstrap(): Promise<void> {
-  const legacyStorage = getBrowserStorage();
-  const autosaveRepository = new AutosaveRepository(getBrowserIndexedDB(), legacyStorage);
-  appTarget.textContent = 'Загрузка проекта…';
-  const startup = await autosaveRepository.load();
-  mount(App, {
-    target: appTarget,
-    props: {
-      initialProject: startup.project,
-      initialLoadError: startup.error,
-      initialStorageMode: startup.mode,
-      autosaveRepository,
-    },
+  async function bootstrap(): Promise<void> {
+    const legacyStorage = getAppStorage();
+    const autosaveRepository = new AutosaveRepository(getAppIndexedDB(), legacyStorage);
+    appTarget.textContent = 'Загрузка проекта…';
+    const startup = await autosaveRepository.load();
+    mount(App, {
+      target: appTarget,
+      props: {
+        initialProject: startup.project,
+        initialLoadError: startup.error,
+        initialStorageMode: startup.mode,
+        autosaveRepository,
+      },
+    });
+  }
+
+  void bootstrap().catch((error: unknown) => {
+    console.error('Не удалось запустить Pixel Editor.', error);
+    appTarget.textContent = 'Не удалось запустить редактор. Перезапустите приложение.';
   });
 }
-
-void bootstrap().catch((error: unknown) => {
-  console.error('Не удалось запустить Pixel Editor.', error);
-  appTarget.textContent = 'Не удалось запустить редактор. Обновите страницу или сохраните резервную копию проекта.';
-});

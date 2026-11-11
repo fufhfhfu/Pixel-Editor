@@ -53,7 +53,7 @@
     <span class="value">{Math.round(zoom * 100)}%</span>
   </div>
   <div class="spacer"></div>
-  <div class="item" title={saveStatus === 'degraded' ? 'IndexedDB недоступна: проект сохраняется в localStorage с ограниченной квотой' : 'Проект автоматически сохраняется в браузере'}>
+  <div class="item" title={saveStatus === 'degraded' ? 'IndexedDB недоступна: проект сохраняется в localStorage с ограниченной квотой' : 'Проект автоматически сохраняется в приложении'}>
     <span class="label hide-small">Автосохранение</span>
     <span class="value save" class:bad={saveStatus === 'error' || saveStatus === 'unavailable' || saveStatus === 'degraded'}>{saveText}</span>
   </div>

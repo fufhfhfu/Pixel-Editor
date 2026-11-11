@@ -4,5 +4,5 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["e2e/**/*.ts", "playwright.config.ts", "src/desktop.d.ts"]
+  "include": ["e2e/desktop.spec.ts", "playwright.config.ts", "src/desktop.d.ts"]
 }

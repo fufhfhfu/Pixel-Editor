@@ -6,7 +6,7 @@ export default defineConfig({
   // Electron loads the production bundle from file://, so asset URLs must
   // remain relative to dist/index.html instead of pointing at /assets/.
   base: './',
-  // В тестах компоненты Svelte нужны в браузерной сборке
+  // Svelte-компоненты в jsdom тестируются с клиентскими условиями сборки.
   resolve: process.env.VITEST ? { conditions: ['browser'] } : undefined,
   test: {
     environment: 'node',

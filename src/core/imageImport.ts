@@ -50,7 +50,7 @@ async function decodeBitmap(file: File): Promise<DecodedImageSource> {
   }
 
   if (typeof Image === 'undefined' || typeof URL.createObjectURL !== 'function') {
-    throw new Error('Этот браузер не поддерживает чтение изображений.');
+    throw new Error('Среда приложения не поддерживает чтение изображений.');
   }
 
   const url = URL.createObjectURL(file);

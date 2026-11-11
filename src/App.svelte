@@ -13,7 +13,6 @@
   import Toolbar from './components/Toolbar.svelte';
   import {
     DEFAULT_EXPORT_SCALE,
-    downloadBlob,
     exportPngBlob,
     exportRasterBlob,
     getAvailableExportScales,
@@ -22,6 +21,7 @@
     type ExportScale,
   } from './core/export';
   import { decodeRasterImage, MAX_IMAGE_FILE_BYTES, rasterImageToProject } from './core/imageImport';
+  import { MAX_NOTES_IMPORT_BYTES, parseNotesImport } from './core/notesImport';
   import { History } from './core/history';
   import {
     DEFAULT_PALETTE_ID,
@@ -56,14 +56,10 @@
   } from './core/preferences';
   import {
     AutosaveRepository,
-    pickSaveFileHandle,
-    supportsSaveFilePicker,
-    writeBlobToFile,
-    type SaveFileHandle,
     type AutosaveStorageMode,
   } from './core/autosave';
   import { DEFAULT_GRID_SIZE, PixelBuffer, isValidCanvasSize, type RGBA } from './core/state';
-  import { getBrowserStorage, type SaveStatus } from './core/storage';
+  import { getAppStorage, type SaveStatus } from './core/storage';
   import type { StrokeOutcome } from './core/stroke';
   import { MAX_BRUSH_SIZE, MIN_BRUSH_SIZE, TOOLS, clampBrushSize, getTool, type ToolId } from './core/tools';
   import type { PixelPos, ViewState } from './core/viewport';
@@ -114,7 +110,7 @@
   const START_PRIMARY: RGBA = { r: 255, g: 0, b: 77, a: 255 };
   const START_SECONDARY: RGBA = { r: 255, g: 241, b: 232, a: 255 };
 
-  const storage = getBrowserStorage();
+  const storage = getAppStorage();
   const preferences = loadEditorPreferences(storage);
   const start = untrack(() => initialProject);
   const startupStorageMode = untrack(() => initialStorageMode);
@@ -176,7 +172,6 @@
   let settingsTab = $state<'general' | 'background'>('general');
   let settingsTrigger = $state<HTMLElement | null>(null);
   let theme = $state<ThemePreference>(preferences.theme);
-  const saveFilePickerSupported = supportsSaveFilePicker();
   let canvasApi = $state.raw<ReturnType<typeof Canvas>>();
   let boardSequence = 1;
 
@@ -294,7 +289,7 @@
       storage?.setItem(NOTES_STORAGE_KEY, value);
       notesStatus = 'сохранено локально';
     } catch {
-      notify('Заметки не удалось сохранить в браузере.', 'error');
+      notify('Заметки не удалось сохранить в настройках приложения.', 'error');
     }
   }
 
@@ -304,16 +299,12 @@
   }
 
   async function importNotesFile(file: File): Promise<void> {
-    const extension = file.name.split('.').at(-1)?.toLowerCase();
-    if (!extension || !['txt', 'md', 'markdown', 'json'].includes(extension)) {
-      notify('Поддерживаются заметки TXT, Markdown и JSON.', 'error');
+    if (file.size > MAX_NOTES_IMPORT_BYTES) {
+      notify('Файл заметок превышает допустимый размер 5 МБ.', 'error');
       return;
     }
     try {
-      const raw = await file.text();
-      const value = extension === 'json' ? (JSON.parse(raw) as { notes?: unknown }).notes : raw;
-      if (typeof value !== 'string') throw new Error('В JSON не найдено поле notes.');
-      setNotes(value);
+      setNotes(parseNotesImport(file.name, await file.text()));
       notify('Заметки импортированы.');
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Не удалось импортировать заметки.', 'error');
@@ -322,19 +313,17 @@
 
   async function exportNotes(format: 'markdown' | 'text' | 'json' = 'markdown'): Promise<void> {
     const config = format === 'json'
-      ? { filename: 'pixel-editor-notes.json', mime: 'application/json', extensions: ['.json'] }
+      ? { filename: 'pixel-editor-notes.json', mime: 'application/json' }
       : format === 'text'
-        ? { filename: 'pixel-editor-notes.txt', mime: 'text/plain', extensions: ['.txt'] }
-        : { filename: 'pixel-editor-notes.md', mime: 'text/markdown', extensions: ['.md', '.markdown'] };
-    const destination = await chooseSaveDestination(config.filename, config.mime, config.extensions);
-    if (!destination) return;
+        ? { filename: 'pixel-editor-notes.txt', mime: 'text/plain' }
+        : { filename: 'pixel-editor-notes.md', mime: 'text/markdown' };
     const content = format === 'json'
       ? JSON.stringify({ format: 'pixel-editor-notes', version: 1, exportedAt: new Date().toISOString(), notes: notesText }, null, 2)
       : format === 'text'
         ? `${notesText.trim()}\n`
         : `# Заметки Pixel Editor\n\n${notesText.trim()}\n`;
     try {
-      if (await saveOutput(new Blob([content], { type: config.mime }), config.filename, destination)) {
+      if (await saveOutput(new Blob([content], { type: config.mime }), config.filename)) {
         notify(`Заметки экспортированы в ${format === 'json' ? 'JSON' : format === 'text' ? 'TXT' : 'Markdown'}.`);
       }
     } catch (error) {
@@ -760,7 +749,7 @@
     const next = [...customSizes, size];
     customSizes = next;
     if (saveCustomSizes(storage, next)) notify(`Размер ${size.width}×${size.height} добавлен в список.`);
-    else notify('Размер добавлен до закрытия страницы, но не сохранён: хранилище браузера недоступно.', 'error');
+    else notify('Размер добавлен до закрытия приложения, но не сохранён: локальное хранилище недоступно.', 'error');
   }
 
   function removeCurrentSavedSize(): void {
@@ -857,57 +846,23 @@
 
   // ——— Файлы: проект JSON и PNG ———
 
-  async function chooseSaveFile(filename: string, mimeType: string, extensions: string[]) {
-    try {
-      return await pickSaveFileHandle(filename, mimeType, extensions);
-    } catch (error) {
-      notify(error instanceof Error ? error.message : 'Не удалось открыть диалог сохранения файла.', 'error');
-      return null;
-    }
-  }
-
-  type SaveDestination = { kind: 'desktop' } | { kind: 'browser'; handle: SaveFileHandle } | { kind: 'download' };
-
-  async function chooseSaveDestination(
-    filename: string,
-    mimeType: string,
-    extensions: string[],
-  ): Promise<SaveDestination | null> {
-    if (window.pixelEditorDesktop) return { kind: 'desktop' };
-    if (!supportsSaveFilePicker()) return { kind: 'download' };
-    const handle = await chooseSaveFile(filename, mimeType, extensions);
-    return handle ? { kind: 'browser', handle } : null;
-  }
-
-  async function saveOutput(blob: Blob, filename: string, destination: SaveDestination): Promise<boolean> {
-    if (destination.kind === 'desktop') {
-      if (!window.pixelEditorDesktop) throw new Error('Возможность сохранения в приложении недоступна.');
-      const result = await window.pixelEditorDesktop.saveFile({
-        suggestedName: filename,
-        mimeType: blob.type,
-        data: new Uint8Array(await blob.arrayBuffer()),
-      });
-      return result === 'saved';
-    }
-
-    if (destination.kind === 'browser') {
-      await writeBlobToFile(destination.handle, blob);
-      return true;
-    }
-
-    downloadBlob(blob, filename);
-    return true;
+  async function saveOutput(blob: Blob, filename: string): Promise<boolean> {
+    const desktop = window.pixelEditorDesktop;
+    if (!desktop) throw new Error('Файловый мост приложения недоступен. Перезапустите Pixel Editor.');
+    const result = await desktop.saveFile({
+      suggestedName: filename,
+      mimeType: blob.type,
+      data: new Uint8Array(await blob.arrayBuffer()),
+    });
+    return result === 'saved';
   }
 
   async function saveProject(): Promise<boolean> {
     const filename = `pixel-art-${boards.length}-canvases.pxproj`;
-    const destination = await chooseSaveDestination(filename, 'application/json', ['.pxproj', '.json']);
-    if (!destination) return false;
-
     try {
       const text = serializeProject(currentProject());
       const blob = new Blob([text], { type: 'application/json' });
-      if (await saveOutput(blob, filename, destination)) {
+      if (await saveOutput(blob, filename)) {
         projectName = filename;
         notify('Проект сохранён в файл.');
         return true;
@@ -989,15 +944,12 @@
     const extension = exportFormat === 'jpeg' ? 'jpg' : exportFormat;
     const filename = `pixel-art-${width}x${height}@${exportScale}x.${extension}`;
     const mimeType = exportFormat === 'jpeg' ? 'image/jpeg' : `image/${exportFormat}`;
-    const destination = await chooseSaveDestination(filename, mimeType, [`.${extension}`]);
-    if (!destination) return;
-
     try {
       const blob =
         exportFormat === 'png'
           ? await exportPngBlob(buffer, exportScale)
           : await exportRasterBlob(buffer, exportScale, exportFormat, canvasBackground);
-      if (!(await saveOutput(blob, filename, destination))) return;
+      if (!(await saveOutput(blob, filename))) return;
       notify(
         `${exportFormat === 'jpeg' ? 'JPEG' : exportFormat.toUpperCase()} сохранён: ${width * exportScale}×${height * exportScale}.`,
       );

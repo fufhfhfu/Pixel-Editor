@@ -154,6 +154,7 @@ beforeEach(async () => {
 afterEach(() => {
   if (app) unmount(app);
   app = null;
+  delete window.pixelEditorDesktop;
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -171,6 +172,36 @@ describe('приложение целиком (jsdom)', () => {
     expect(Array.from((document.querySelector('#canvas-preset') as HTMLSelectElement).options).map((option) => option.value))
       .toEqual(['8x8', '16x16', '32x32', '64x64', '128x128', '256x256', '512x512', '1024x1024']);
     expect((document.querySelector('.board') as HTMLElement).style.backgroundColor).toBe('rgb(255, 255, 255)');
+  });
+
+  it('сохраняет точку под курсором при зуме колёсиком без принудительного смещения', async () => {
+    const rect = viewport().getBoundingClientRect();
+    const anchorX = rect.left + rect.width - 10;
+    const anchorY = rect.top + rect.height - 10;
+    const readView = () => {
+      const zoom = parseFloat((document.querySelector('.board') as HTMLElement).style.width) / 32;
+      const translation = /translate\((-?[\d.]+)px, (-?[\d.]+)px\)/.exec(stage().style.transform)!;
+      return { zoom, offsetX: Number(translation[1]), offsetY: Number(translation[2]) };
+    };
+    const before = readView();
+    const anchoredCanvasPoint = {
+      x: (anchorX - rect.left - before.offsetX) / before.zoom,
+      y: (anchorY - rect.top - before.offsetY) / before.zoom,
+    };
+
+    viewport().dispatchEvent(new WheelEvent('wheel', {
+      bubbles: true,
+      cancelable: true,
+      clientX: anchorX,
+      clientY: anchorY,
+      deltaY: 100,
+    }));
+    await tick();
+
+    const after = readView();
+    expect(after.zoom).toBeLessThan(before.zoom);
+    expect(Math.abs(after.offsetX + anchoredCanvasPoint.x * after.zoom - (anchorX - rect.left))).toBeLessThanOrEqual(0.5);
+    expect(Math.abs(after.offsetY + anchoredCanvasPoint.y * after.zoom - (anchorY - rect.top))).toBeLessThanOrEqual(0.5);
   });
 
   it('первая отрисовка — весь холст; штрих перерисовывает только свою область', async () => {
@@ -218,6 +249,7 @@ describe('приложение целиком (jsdom)', () => {
     drawStroke([4, 4], [4, 4], { button: 2 });
     drawStroke([6, 6], [6, 6], { button: 0 });
     await frame();
+    expect(document.querySelector('[aria-label="Удалить холст"]')).toBeNull();
     const colorAt = (x: number, y: number) => Array.from(canvasData!.slice((y * 32 + x) * 4, (y * 32 + x) * 4 + 4));
     expect(colorAt(4, 4)).not.toEqual(colorAt(6, 6));
     expect(colorAt(4, 4)[3]).toBe(255);
@@ -606,18 +638,28 @@ describe('приложение целиком (jsdom)', () => {
     expect(canvasData![3]).toBe(255);
   });
 
-  it('экспортирует WebP выбранного размера и использует правильный MIME-тип', async () => {
+  it('экспортирует WebP через системный диалог с правильным MIME-типом', async () => {
     const toBlob = vi.fn(function (
       this: HTMLCanvasElement,
       callback: BlobCallback,
       type?: string,
     ) {
-      callback(new Blob(['encoded'], { type }));
+      const blob = new Blob(['encoded'], { type });
+      Object.defineProperty(blob, 'arrayBuffer', { value: async () => new TextEncoder().encode('encoded').buffer });
+      callback(blob);
     });
     Object.defineProperty(HTMLCanvasElement.prototype, 'toBlob', { configurable: true, value: toBlob });
-    Object.defineProperty(HTMLAnchorElement.prototype, 'click', { configurable: true, value: vi.fn() });
-    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:export') });
-    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() });
+    const saveFile = vi.fn(async () => 'saved' as const);
+    window.pixelEditorDesktop = {
+      saveFile,
+      saveBatch: async () => 'saved',
+      exportPdf: async () => 'saved',
+      onCommand: () => () => {},
+      setTitle: async () => {},
+      setDirty: async () => {},
+      closeApproved: async () => {},
+      onOpenFile: () => () => {},
+    };
 
     (document.querySelector('button[aria-label="Действия с файлом"]') as HTMLButtonElement).click();
     await tick();
@@ -625,11 +667,12 @@ describe('приложение целиком (jsdom)', () => {
     format.value = 'webp';
     format.dispatchEvent(new Event('change', { bubbles: true }));
     await tick();
-    (document.querySelector('button[title="Скачать WEBP"]') as HTMLButtonElement).click();
+    (document.querySelector('button[title="Экспортировать WEBP"]') as HTMLButtonElement).click();
     await vi.waitFor(() => expect(document.body.textContent).toContain('WEBP сохранён'));
 
     expect(toBlob).toHaveBeenCalledOnce();
     expect(toBlob.mock.calls[0][1]).toBe('image/webp');
+    expect(saveFile).toHaveBeenCalledWith(expect.objectContaining({ mimeType: 'image/webp' }));
   });
 
   it('справка открывается по H и закрывается Escape, фокус возвращается', async () => {

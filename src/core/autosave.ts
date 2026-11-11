@@ -12,21 +12,6 @@ export const AUTOSAVE_OBJECT_STORE = 'projects';
 const AUTOSAVE_RECORD_KEY = 'latest';
 const IDB_OPERATION_TIMEOUT_MS = 10_000;
 
-export interface SaveFileHandle {
-  createWritable(): Promise<{
-    write(data: Blob): Promise<void>;
-    close(): Promise<void>;
-    abort?(): Promise<void>;
-  }>;
-}
-
-interface SavePickerWindow extends Window {
-  showSaveFilePicker?: (options: {
-    suggestedName: string;
-    types?: { description: string; accept: Record<string, string[]> }[];
-  }) => Promise<SaveFileHandle>;
-}
-
 export type AutosaveStorageMode = 'indexeddb' | 'localstorage' | 'unavailable';
 
 export interface AutosaveStartupResult {
@@ -152,7 +137,7 @@ function readLegacyAutosave(storage: KeyValueStorage | null): { raw: string | nu
   } catch {
     return {
       raw: null,
-      result: { project: null, error: 'Автосохранение недоступно: браузер запретил доступ к localStorage.' },
+      result: { project: null, error: 'Автосохранение недоступно: приложению запрещён доступ к локальному хранилищу.' },
     };
   }
   if (raw === null) return { raw, result: { project: null, error: null } };
@@ -295,39 +280,7 @@ export class AutosaveRepository {
   }
 }
 
-export function supportsSaveFilePicker(): boolean {
-  return typeof window !== 'undefined' && window.isSecureContext && typeof (window as SavePickerWindow).showSaveFilePicker === 'function';
-}
-
-export async function pickSaveFileHandle(
-  suggestedName: string,
-  mimeType: string,
-  extensions: string[],
-): Promise<SaveFileHandle | null> {
-  if (!supportsSaveFilePicker()) return null;
-  try {
-    return await (window as SavePickerWindow).showSaveFilePicker!({
-      suggestedName,
-      types: [{ description: mimeType, accept: { [mimeType]: extensions } }],
-    });
-  } catch (error) {
-    if (error instanceof DOMException && error.name === 'AbortError') return null;
-    throw error;
-  }
-}
-
-export async function writeBlobToFile(handle: SaveFileHandle, blob: Blob): Promise<void> {
-  const writable = await handle.createWritable();
-  try {
-    await writable.write(blob);
-    await writable.close();
-  } catch (error) {
-    await writable.abort?.();
-    throw error;
-  }
-}
-
-export function getBrowserIndexedDB(): IDBFactory | null {
+export function getAppIndexedDB(): IDBFactory | null {
   if (typeof window === 'undefined') return null;
   try {
     return window.indexedDB ?? null;

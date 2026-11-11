@@ -732,6 +732,41 @@ describe('приложение целиком (jsdom)', () => {
     expect(document.querySelector('[aria-label="Горизонтальная прокрутка холста"]')).toBeNull();
   });
 
+  it('exposes thickness controls for pencil and eraser and applies size changes', async () => {
+    const pencilControl = document.querySelector('summary[aria-label="Настроить толщину: Карандаш"]') as HTMLElement;
+    expect(pencilControl).toBeTruthy();
+    pencilControl.click();
+    await tick();
+    expect(pencilControl.parentElement?.matches('details[open]')).toBe(true);
+
+    const pencilSize = document.querySelector('input[aria-label="Толщина: Карандаш"]') as HTMLInputElement;
+    expect(pencilSize.value).toBe('1');
+    pencilSize.value = '7';
+    pencilSize.dispatchEvent(new Event('input', { bubbles: true }));
+    await tick();
+    expect(pencilControl.textContent?.trim()).toBe('7 px');
+
+    (document.querySelector('button[aria-label="Ластик (E)"]') as HTMLButtonElement).click();
+    await tick();
+    const eraserControl = document.querySelector('summary[aria-label="Настроить толщину: Ластик"]') as HTMLElement;
+    expect(eraserControl).toBeTruthy();
+    expect(eraserControl.textContent?.trim()).toBe('1 px');
+    eraserControl.click();
+    await tick();
+    expect(eraserControl.parentElement?.matches('details[open]')).toBe(true);
+    const eraserSize = document.querySelector('input[aria-label="Толщина: Ластик"]') as HTMLInputElement;
+    expect(eraserSize.value).toBe('1');
+    eraserSize.value = '11';
+    eraserSize.dispatchEvent(new Event('input', { bubbles: true }));
+    await tick();
+    expect(eraserControl.textContent?.trim()).toBe('11 px');
+
+    (document.querySelector('button[aria-label="Карандаш (P)"]') as HTMLButtonElement).click();
+    await tick();
+    expect((document.querySelector('input[aria-label="Толщина: Карандаш"]') as HTMLInputElement).value).toBe('7');
+    expect((document.querySelector('input[aria-label="Толщина: Ластик"]') as HTMLInputElement).value).toBe('11');
+  });
+
   it('adds multiple boards and selects/moves them with Ctrl+right-drag', async () => {
     drawStroke([4, 4], [4, 4]);
     const undoButton = document.querySelector('[aria-label="Отменить"]') as HTMLButtonElement;

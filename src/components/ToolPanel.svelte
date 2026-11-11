@@ -13,10 +13,11 @@
     panelWidth: number;
     tools: readonly Tool[];
     activeToolId: ToolId;
-    brushSize: number;
+    pencilSize: number;
+    eraserSize: number;
     settings: DrawingSettings;
     onselect: (id: ToolId) => void;
-    onbrushsize: (size: number) => void;
+    onbrushsize: (tool: 'pencil' | 'eraser', size: number) => void;
     onsettings: (settings: DrawingSettings) => void;
     onaddboard: () => void;
   }
@@ -25,7 +26,8 @@
     panelWidth,
     tools,
     activeToolId,
-    brushSize,
+    pencilSize,
+    eraserSize,
     settings,
     onselect,
     onbrushsize,
@@ -187,16 +189,21 @@
           {@render tip(tool.label, tool.hotkeyLabel, tool.hint)}
           {#if tool.id === 'pencil' || tool.id === 'eraser'}
             <details class="brush-size">
-              <summary aria-label="Настроить размер: {tool.label}" title="Размер: {tool.label}">px</summary>
+              <summary aria-label="Настроить толщину: {tool.label}" title="Настроить толщину: {tool.label}">
+                {tool.id === 'eraser' ? eraserSize : pencilSize} px
+              </summary>
               <div class="brush-size-panel" role="group" aria-label="Размер: {tool.label}">
-                <label>Размер: {brushSize} px
+                <label>Толщина: {tool.id === 'eraser' ? eraserSize : pencilSize} px
                   <input
                     type="range"
                     min={MIN_BRUSH_SIZE}
                     max={MAX_BRUSH_SIZE}
-                    value={brushSize}
-                    aria-label="Размер: {tool.label}"
-                    oninput={(event) => onbrushsize(Number(event.currentTarget.value))}
+                    value={tool.id === 'eraser' ? eraserSize : pencilSize}
+                    aria-label="Толщина: {tool.label}"
+                    oninput={(event) => onbrushsize(
+                      tool.id === 'eraser' ? 'eraser' : 'pencil',
+                      Number(event.currentTarget.value),
+                    )}
                   />
                 </label>
               </div>
@@ -415,26 +422,43 @@
     display: flex;
   }
 
+  .slot:has(.brush-size) {
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+  }
+
   .brush-size {
-    position: absolute;
+    position: relative;
     z-index: 3;
-    right: -3px;
-    bottom: -3px;
+    width: 40px;
   }
 
   .brush-size > summary {
     display: grid;
-    width: 18px;
-    height: 16px;
+    width: 40px;
+    min-height: 20px;
     place-items: center;
     border: 1px solid var(--border);
     border-radius: 5px;
     background: var(--panel-2);
-    color: var(--text-dim);
-    font-size: 9px;
-    font-weight: 700;
+    color: var(--text);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
     list-style: none;
     cursor: pointer;
+  }
+
+  .brush-size > summary:hover,
+  .brush-size[open] > summary {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+
+  .brush-size > summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
   }
 
   .brush-size > summary::-webkit-details-marker {

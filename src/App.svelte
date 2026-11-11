@@ -248,7 +248,8 @@
     selectedBrushId = id;
     const brush = brushLibrary.find((entry) => entry.id === id);
     if (!brush) return;
-    brushSize = brush.size;
+    if (activeToolId === 'eraser') eraserSize = brush.size;
+    else pencilSize = brush.size;
     brushShape = brush.type === 'circle' ? 'circle' : 'square';
   }
 
@@ -576,7 +577,9 @@
     selection: SelectionMask;
     preview: PixelBuffer;
   } | null>(null);
-  let brushSize = $state(MIN_BRUSH_SIZE);
+  let pencilSize = $state(MIN_BRUSH_SIZE);
+  let eraserSize = $state(MIN_BRUSH_SIZE);
+  const brushSize = $derived(activeToolId === 'eraser' ? eraserSize : pencilSize);
   let brushShape = $state<BrushShape>('square');
   let brushOpacity = $state(100);
   const BRUSH_LIBRARY_KEY = 'pixel-editor:brush-library';
@@ -2507,7 +2510,14 @@
   }
 
   function setBrushSize(size: number): void {
-    brushSize = clampBrushSize(size);
+    if (activeToolId === 'eraser') eraserSize = clampBrushSize(size);
+    else pencilSize = clampBrushSize(size);
+    selectedBrushId = '';
+  }
+
+  function setToolBrushSize(tool: 'pencil' | 'eraser', size: number): void {
+    if (tool === 'eraser') eraserSize = clampBrushSize(size);
+    else pencilSize = clampBrushSize(size);
     selectedBrushId = '';
   }
 
@@ -3234,10 +3244,11 @@
       panelWidth={workspaceLayout.toolsWidth}
       tools={keyboardTools}
       {activeToolId}
-      {brushSize}
+      {pencilSize}
+      {eraserSize}
       settings={drawingSettings}
       onselect={selectTool}
-      onbrushsize={setBrushSize}
+      onbrushsize={setToolBrushSize}
       onsettings={updateDrawingSettings}
       onaddboard={addBoard}
     />

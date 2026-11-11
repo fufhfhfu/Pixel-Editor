@@ -30,7 +30,7 @@ export function loadAutosave(storage: KeyValueStorage): AutosaveLoadResult {
   try {
     saved = storage.getItem(AUTOSAVE_KEY);
   } catch {
-    return { project: null, error: 'Автосохранение недоступно: приложение запретило доступ к хранилищу.' };
+    return { project: null, error: 'Автосохранение недоступно: нет доступа к хранилищу приложения.' };
   }
 
   if (saved === null) return { project: null, error: null };
@@ -55,8 +55,9 @@ export function loadAutosave(storage: KeyValueStorage): AutosaveLoadResult {
 
 export function saveAutosave(storage: KeyValueStorage, project: ProjectData): boolean {
   try {
-    storage.setItem(AUTOSAVE_KEY, serializeProject(project));
-    return true;
+    const serialized = serializeProject(project);
+    storage.setItem(AUTOSAVE_KEY, serialized);
+    return storage.getItem(AUTOSAVE_KEY) === serialized;
   } catch {
     return false;
   }

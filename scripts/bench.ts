@@ -27,6 +27,11 @@ function strokeBench(size: number, toolId: ToolId, brush: number): number {
   const buffer = new PixelBuffer(size, size);
   const tool = TOOLS.find((t) => t.id === toolId)!;
   const color = { r: 255, g: 0, b: 77, a: 255 };
+  const iterations = size >= 256
+    ? (toolId === 'line' || toolId === 'rect' ? 250 : 1_000)
+    : toolId === 'line' || toolId === 'rect'
+      ? 2_000
+      : 5_000;
   const session = new StrokeSession({
     makeContext: () => ({ buffer, color, brushSize: brush, invalidate() {}, setColor() {} }),
     onBegin() {},
@@ -35,7 +40,7 @@ function strokeBench(size: number, toolId: ToolId, brush: number): number {
   });
   session.start(1, tool, 'primary', 0, 0);
   let t = 0;
-  const perFrame = measure(`${size}×${size} ${toolId}, кисть ${brush}: кадр из ${EVENTS_PER_FRAME} событий + takeDirty`, 20_000, () => {
+  const perFrame = measure(`${size}×${size} ${toolId}, кисть ${brush}: кадр из ${EVENTS_PER_FRAME} событий + takeDirty`, iterations, () => {
     const points = [];
     for (let k = 0; k < EVENTS_PER_FRAME; k++) {
       t += 0.35;

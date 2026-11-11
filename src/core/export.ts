@@ -1,6 +1,6 @@
 /**
  * Ядро: экспорт изображения.
- * scaleNearest и кодирование PNG — чистые функции; Blob и canvas используются в renderer.
+ * scaleNearest и кодирование PNG — чистые функции; Blob использует DOM.
  */
 
 import { encodePng } from './png';
@@ -100,32 +100,8 @@ export function scaleNearest(buffer: PixelBuffer, scale: number): RawImage {
  * canvas хранит пиксели premultiplied и искажает цвета полупрозрачных пикселей.
  */
 export async function exportPngBlob(buffer: PixelBuffer, scale: number): Promise<Blob> {
-  const image = scaleNearest(buffer, scale);
-  const bytes = await encodePngInWorker(image);
+  const bytes = await encodePng(scaleNearest(buffer, scale));
   return new Blob([bytes], { type: 'image/png' });
-}
-
-function encodePngInWorker(image: RawImage): Promise<Uint8Array> {
-  if (typeof Worker === 'undefined') return encodePng(image);
-  return new Promise((resolve, reject) => {
-    const worker = new Worker(new URL('../workers/png.worker.ts', import.meta.url), { type: 'module' });
-    const timeout = setTimeout(() => {
-      worker.terminate();
-      encodePng(image).then(resolve, reject);
-    }, 30_000);
-    worker.onmessage = (event: MessageEvent<Uint8Array | { error: string }>) => {
-      clearTimeout(timeout);
-      worker.terminate();
-      if ('error' in event.data) reject(new Error(event.data.error));
-      else resolve(new Uint8Array(event.data));
-    };
-    worker.onerror = () => {
-      clearTimeout(timeout);
-      worker.terminate();
-      encodePng(image).then(resolve, reject);
-    };
-    worker.postMessage({ width: image.width, height: image.height, data: image.data.buffer }, [image.data.buffer]);
-  });
 }
 
 export async function exportRasterBlob(
@@ -164,7 +140,7 @@ export async function exportRasterBlob(
     );
   });
   if (blob.type !== mimeType) {
-    throw new Error(`Экспорт в ${format.toUpperCase()} не поддерживается текущей средой приложения.`);
+    throw new Error(`Среда приложения не поддерживает экспорт в ${format.toUpperCase()}.`);
   }
   return blob;
 }

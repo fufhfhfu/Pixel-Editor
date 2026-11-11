@@ -1,23 +1,39 @@
 <script lang="ts">
   import { hexToRgba, rgbaToCss, rgbaToHex } from '../core/color';
-  import { colorsEqual, type ColorSlot, type Palette } from '../core/palette';
+  import {
+    colorsEqual,
+    MAX_CUSTOM_PALETTE_COLORS,
+    MAX_CUSTOM_PALETTES,
+    type ColorSlot,
+    type Palette,
+  } from '../core/palette';
   import type { RGBA } from '../core/state';
 
   interface Props {
+    panelWidth: number;
     palettes: readonly Palette[];
     palette: Palette;
     freeColor: boolean;
     primary: RGBA;
     secondary: RGBA;
     recent: readonly RGBA[];
+    customPaletteCount: number;
     onpalette: (id: string) => void;
     onfreecolor: (enabled: boolean) => void;
     onpick: (slot: ColorSlot, color: RGBA) => void;
     onswap: () => void;
+    oncreatepalette: (name: string, colors: RGBA[]) => void;
+    ondeletepalette: (id: string) => void;
   }
 
-  let { palettes, palette, freeColor, primary, secondary, recent, onpalette, onfreecolor, onpick, onswap }: Props =
+  let {
+    panelWidth, palettes, palette, freeColor, primary, secondary, recent, customPaletteCount,
+    onpalette, onfreecolor, onpick, onswap, oncreatepalette, ondeletepalette,
+  }: Props =
     $props();
+  let customPaletteName = $state('');
+  let customPaletteColors = $state('');
+  let customPaletteError = $state('');
 
   function onPaletteChange(e: Event & { currentTarget: HTMLSelectElement }): void {
     onpalette(e.currentTarget.value);
@@ -37,6 +53,44 @@
     const next = hexToRgba(e.currentTarget.value);
     if (next) onpick(slot, next);
   }
+
+  function toHsv(color: RGBA): string {
+    const r = color.r / 255;
+    const g = color.g / 255;
+    const b = color.b / 255;
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const delta = max - min;
+    let hue = 0;
+    if (delta !== 0) {
+      if (max === r) hue = 60 * (((g - b) / delta) % 6);
+      else if (max === g) hue = 60 * ((b - r) / delta + 2);
+      else hue = 60 * ((r - g) / delta + 4);
+    }
+
+    if (hue < 0) hue += 360;
+    const saturation = max === 0 ? 0 : (delta / max) * 100;
+    return `${Math.round(hue)}°, ${Math.round(saturation)}%, ${Math.round(max * 100)}%`;
+  }
+
+  function createPalette(): void {
+    const values = customPaletteColors.split(/[\s,;]+/).filter(Boolean);
+    if (customPaletteName.trim().length === 0) {
+      customPaletteError = 'Укажите название палитры.';
+      return;
+    }
+    if (values.length === 0 || values.length > MAX_CUSTOM_PALETTE_COLORS) {
+      customPaletteError = `Добавьте от 1 до ${MAX_CUSTOM_PALETTE_COLORS} цветов в формате HEX.`;
+      return;
+    }
+    const colors = values.map(hexToRgba);
+    if (colors.some((color) => color === null)) {
+      customPaletteError = 'Каждый цвет должен быть указан в формате #RRGGBB или #RRGGBBAA.';
+      return;
+    }
+    oncreatepalette(customPaletteName.trim(), colors.filter((color): color is RGBA => color !== null));
+    customPaletteError = '';
+  }
 </script>
 
 {#snippet swatch(color: RGBA)}
@@ -53,10 +107,10 @@
   ></button>
 {/snippet}
 
-<aside class="panel" aria-label="Палитра">
+<aside class="panel" aria-label="Палитра" style:--dock-width="{panelWidth}px">
   <section class="block">
     <div class="current">
-      <div class="big secondary" style:background={rgbaToCss(secondary)} title="Дополнительный цвет (ПКМ)">
+      <div class="big secondary" style:background={rgbaToCss(secondary)} title="Дополнительный цвет">
         <input
           type="color"
           class="picker"
@@ -96,6 +150,18 @@
         <dd>{rgbaToHex(secondary)}</dd>
       </div>
     </dl>
+    <details class="formats">
+      <summary>Форматы цвета</summary>
+      {#each [{ label: 'Основной', color: primary }, { label: 'Дополнительный', color: secondary }] as item (item.label)}
+        <dl class="format-values">
+          <dt>{item.label}</dt>
+          <dd>HEX {rgbaToHex(item.color)}</dd>
+          <dd>RGB {item.color.r}, {item.color.g}, {item.color.b}</dd>
+          <dd>RGBA {item.color.r}, {item.color.g}, {item.color.b}, {(item.color.a / 255).toFixed(2)}</dd>
+          <dd>HSV {toHsv(item.color)}</dd>
+        </dl>
+      {/each}
+    </details>
   </section>
 
   <section class="block">
@@ -105,6 +171,35 @@
         <option value={p.id} selected={p.id === palette.id}>{p.name} · {p.colors.length}</option>
       {/each}
     </select>
+
+    <details class="custom-palette">
+      <summary>Пользовательские палитры</summary>
+      <label>
+        Название
+        <input bind:value={customPaletteName} maxlength="64" aria-label="Название пользовательской палитры" />
+      </label>
+      <label class="color-list">
+        Цвета HEX
+        <textarea
+          bind:value={customPaletteColors}
+          aria-label="Цвета пользовательской палитры"
+          placeholder="#1D2B53&#10;#7E2553"
+          rows="4"
+        ></textarea>
+      </label>
+      <button
+        type="button"
+        class="custom-action"
+        disabled={customPaletteCount >= MAX_CUSTOM_PALETTES}
+        onclick={createPalette}
+      >Создать палитру ({customPaletteCount}/{MAX_CUSTOM_PALETTES})</button>
+      {#if palette.id.startsWith('custom-')}
+        <button type="button" class="custom-action remove-palette" onclick={() => ondeletepalette(palette.id)}>
+          Удалить «{palette.name}»
+        </button>
+      {/if}
+      {#if customPaletteError}<p class="custom-error" role="alert">{customPaletteError}</p>{/if}
+    </details>
 
     {#if palette.groups}
       <div class="palette-groups">
@@ -166,7 +261,8 @@
     display: flex;
     flex-direction: column;
     gap: 18px;
-    width: 236px;
+    width: var(--dock-width, 236px);
+    height: 100%;
     padding: 14px;
     overflow-y: auto;
     background: var(--panel);
@@ -280,6 +376,32 @@
     font-family: var(--mono);
   }
 
+  .formats {
+    margin-top: 8px;
+    font-size: 11px;
+  }
+
+  .formats summary {
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+
+  .format-values {
+    margin: 8px 0;
+    overflow-wrap: anywhere;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .format-values dt {
+    color: var(--text);
+    font-weight: 600;
+  }
+
+  .format-values dd {
+    margin: 2px 0 0;
+    color: var(--text-dim);
+  }
+
   .select {
     height: 30px;
     padding: 0 8px;
@@ -289,6 +411,57 @@
     color: var(--text);
     font: inherit;
     cursor: pointer;
+  }
+
+  .custom-palette {
+    display: grid;
+    gap: 8px;
+    font-size: 12px;
+  }
+
+  .custom-palette summary {
+    cursor: pointer;
+    color: var(--text-dim);
+  }
+
+  .custom-palette label {
+    display: grid;
+    gap: 4px;
+  }
+
+  .custom-palette input,
+  .custom-palette textarea {
+    width: 100%;
+    box-sizing: border-box;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--bg);
+    color: var(--text);
+    padding: 6px;
+    font: inherit;
+  }
+
+  .custom-action {
+    min-height: 30px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--panel-2);
+    color: var(--text);
+    cursor: pointer;
+  }
+
+  .custom-action:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+
+  .remove-palette,
+  .custom-error {
+    color: var(--danger, #f66);
+  }
+
+  .custom-error {
+    margin: 0;
   }
 
   .swatches {
@@ -362,6 +535,7 @@
       flex-wrap: wrap;
       align-items: flex-start;
       width: auto;
+      height: auto;
       max-height: 42vh;
       gap: 14px 24px;
       padding: 10px 14px;

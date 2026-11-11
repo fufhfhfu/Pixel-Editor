@@ -22,6 +22,7 @@ if (!window.pixelEditorDesktop) {
     const autosaveRepository = new AutosaveRepository(getAppIndexedDB(), legacyStorage);
     appTarget.textContent = 'Загрузка проекта…';
     const startup = await autosaveRepository.load();
+    appTarget.replaceChildren();
     mount(App, {
       target: appTarget,
       props: {
@@ -35,6 +36,6 @@ if (!window.pixelEditorDesktop) {
 
   void bootstrap().catch((error: unknown) => {
     console.error('Не удалось запустить Pixel Editor.', error);
-    appTarget.textContent = 'Не удалось запустить редактор. Перезапустите приложение.';
+    appTarget.textContent = 'Не удалось запустить редактор. Перезапустите настольное приложение.';
   });
 }

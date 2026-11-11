@@ -4,6 +4,11 @@ import {
   CUSTOM_SIZES_KEY,
   DEFAULT_CANVAS_BACKGROUND,
   DEFAULT_WORKSPACE_BACKGROUND,
+  saveGridMode,
+  saveGridSpacing,
+  saveSnapToGrid,
+  saveCheckerboard,
+  saveSecondaryColorDrawing,
   loadEditorPreferences,
   saveCanvasBackground,
   saveCustomSizes,
@@ -35,8 +40,35 @@ describe('пользовательские настройки холста', () 
       canvasBackground: '#aabbcc',
       workspaceBackground: DEFAULT_WORKSPACE_BACKGROUND,
       theme: 'dark',
+      gridMode: 'pixel',
+      gridSpacing: 1,
+      snapToGrid: false,
+      checkerboard: true,
+      secondaryColorDrawing: true,
       error: null,
     });
+  });
+
+  it('stores validated viewport grid and transparency preferences', () => {
+    const storage = memoryStorage();
+
+    expect(saveGridMode(storage, 'isometric')).toBe(true);
+    expect(saveGridSpacing(storage, 8)).toBe(true);
+    expect(saveSnapToGrid(storage, true)).toBe(true);
+    expect(saveCheckerboard(storage, false)).toBe(true);
+    expect(saveSecondaryColorDrawing(storage, false)).toBe(true);
+    expect(loadEditorPreferences(storage)).toMatchObject({
+      gridMode: 'isometric',
+      gridSpacing: 8,
+      snapToGrid: true,
+      checkerboard: false,
+      secondaryColorDrawing: false,
+    });
+
+    storage.setItem('pixel-editor:grid-mode', 'invalid');
+    storage.setItem('pixel-editor:grid-spacing', '3');
+    expect(loadEditorPreferences(storage)).toMatchObject({ gridMode: 'pixel', gridSpacing: 1 });
+    expect(saveGridSpacing(storage, 3)).toBe(false);
   });
 
   it('stores canvas and surrounding workspace backgrounds independently', () => {
@@ -101,6 +133,11 @@ describe('пользовательские настройки холста', () 
       canvasBackground: DEFAULT_CANVAS_BACKGROUND,
       workspaceBackground: DEFAULT_WORKSPACE_BACKGROUND,
       theme: 'dark',
+      gridMode: 'pixel',
+      gridSpacing: 1,
+      snapToGrid: false,
+      checkerboard: true,
+      secondaryColorDrawing: true,
       error: expect.stringMatching(/не удалось прочитать/i),
     });
   });

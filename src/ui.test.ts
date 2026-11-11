@@ -4,21 +4,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App.svelte';
 import { AutosaveRepository } from './core/autosave';
 import { AUTOSAVE_KEY } from './core/storage';
-import { parseProject } from './core/project';
+import { parseProject, type ProjectData } from './core/project';
+import { computeFloodFillOutput, type FloodFillWorkerRequest } from './core/tools/floodFillWorker';
+import { WELCOME_SEEN_KEY } from './core/feedbackNotes';
 
-/** Заглушки того, чего нет в jsdom: canvas, ImageData, ResizeObserver, захват указателя. */
+/** Заглушки DOM-возможностей, отсутствующих в jsdom. */
 interface PutCall {
   dirty: [number, number, number, number];
 }
 const putCalls: PutCall[] = [];
 let canvasData: Uint8ClampedArray | null = null;
 const rasterDrawCalls: number[][] = [];
+const desktopSaveFile = vi.fn(async () => 'saved' as const);
 
-function installBrowserStubs(): void {
+function installDomStubs(): void {
   const proto = HTMLCanvasElement.prototype as unknown as { getContext: () => unknown };
-  proto.getContext = function () {
+  proto.getContext = function (this: HTMLCanvasElement) {
+    const canvas = this;
     return {
       putImageData(image: { data: Uint8ClampedArray }, _dx: number, _dy: number, x: number, y: number, w: number, h: number) {
+        if (canvas.classList.contains('thumbnail') || canvas.classList.contains('selection-overlay') ||
+          canvas.classList.contains('transform-preview') || canvas.classList.contains('reference-image')) return;
         canvasData = image.data;
         putCalls.push({ dirty: [x, y, w, h] });
       },
@@ -72,13 +78,13 @@ function installBrowserStubs(): void {
 
 let app: ReturnType<typeof mount> | null = null;
 
-async function mountApp(): Promise<void> {
+async function mountApp(initialProject?: ProjectData): Promise<void> {
   const repository = new AutosaveRepository(null, localStorage);
   const startup = await repository.load();
   app = mount(App, {
     target: document.getElementById('app')!,
     props: {
-      initialProject: startup.project,
+      initialProject: initialProject ?? startup.project,
       initialLoadError: startup.error,
       initialStorageMode: startup.mode,
       autosaveRepository: repository,
@@ -95,21 +101,15 @@ function stage(): HTMLElement {
   return document.querySelector('.stage') as HTMLElement;
 }
 
-function stageOffset(): { x: number; y: number } {
-  const match = /translate\((-?[\d.]+)px, (-?[\d.]+)px\)/.exec(stage().style.transform);
-  if (!match) throw new Error('Stage transform was not set.');
-  return { x: Number(match[1]), y: Number(match[2]) };
-}
-
 /** Экранные координаты центра пикселя (x, y) при текущем виде. */
 function screenOf(x: number, y: number, boardIndex = 0): { x: number; y: number } {
   const board = document.querySelectorAll('.board')[boardIndex] as HTMLElement;
   const canvas = board.querySelector('canvas')!;
   const zoom = parseFloat(board.style.width) / canvas.width;
-  const { x: offsetX, y: offsetY } = stageOffset();
+  const m = /translate\((-?[\d.]+)px, (-?[\d.]+)px\)/.exec(stage().style.transform)!;
   return {
-    x: offsetX + parseFloat(board.style.left) + (x + 0.5) * zoom,
-    y: offsetY + parseFloat(board.style.top) + (y + 0.5) * zoom,
+    x: parseFloat(m[1]) + parseFloat(board.style.left) + (x + 0.5) * zoom,
+    y: parseFloat(m[2]) + parseFloat(board.style.top) + (y + 0.5) * zoom,
   };
 }
 
@@ -148,11 +148,17 @@ function drawStroke(from: [number, number], to: [number, number], init: PointerE
 }
 
 beforeEach(async () => {
-  installBrowserStubs();
+  installDomStubs();
   putCalls.length = 0;
   canvasData = null;
   rasterDrawCalls.length = 0;
+  desktopSaveFile.mockClear();
   localStorage.clear();
+  localStorage.setItem(WELCOME_SEEN_KEY, 'true');
+  Object.defineProperty(window, 'pixelEditorDesktop', {
+    configurable: true,
+    value: { saveFile: desktopSaveFile },
+  });
   document.body.innerHTML = '<div id="app"></div>';
   await mountApp();
 });
@@ -160,7 +166,7 @@ beforeEach(async () => {
 afterEach(() => {
   if (app) unmount(app);
   app = null;
-  delete window.pixelEditorDesktop;
+  delete (window as Window & { pixelEditorDesktop?: unknown }).pixelEditorDesktop;
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -170,8 +176,6 @@ describe('приложение целиком (jsdom)', () => {
     expect(viewport()).toBeTruthy();
     expect(document.querySelector('[aria-label="Инструменты"]')).toBeTruthy();
     expect(document.querySelector('[aria-label="Палитра"]')).toBeTruthy();
-    expect(document.querySelector('.brush-popover')).toBeNull();
-    expect(document.querySelector('.brush')).toBeNull();
     expect(document.querySelector('.add-board')?.textContent?.trim()).toBe('+');
     expect(document.body.textContent).toContain('Карандаш');
     expect(document.body.textContent).toContain('32×32');
@@ -182,59 +186,232 @@ describe('приложение целиком (jsdom)', () => {
     expect((document.querySelector('.board') as HTMLElement).style.backgroundColor).toBe('rgb(255, 255, 255)');
   });
 
-  it('показывает настройки толщины в выдвижных панелях инструментов', async () => {
-    const pencil = document.querySelector('button[aria-label="Карандаш (P)"]') as HTMLButtonElement;
-    pencil.click();
-    await tick();
-    expect(pencil.getAttribute('aria-expanded')).toBe('true');
-    expect(document.querySelector('[aria-label="Толщина инструмента «Карандаш»"]')).toBeTruthy();
-
-    (document.querySelector('button[aria-label="Толщина 3 px"]') as HTMLButtonElement).click();
-    await tick();
-    expect(document.querySelector('.statusbar')?.textContent).toContain('Карандаш, 3 px');
-    expect(document.querySelector('[aria-label="Толщина 3 px"]')?.getAttribute('aria-pressed')).toBe('true');
-
-    const eraser = document.querySelector('button[aria-label="Ластик (E)"]') as HTMLButtonElement;
-    eraser.click();
-    await tick();
-    expect(pencil.getAttribute('aria-expanded')).toBe('false');
-    expect(eraser.getAttribute('aria-expanded')).toBe('true');
-    expect(document.querySelector('[aria-label="Толщина инструмента «Ластик»"]')).toBeTruthy();
-
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-    await tick();
-    expect(document.querySelector('[aria-label="Толщина инструмента «Ластик»"]')).toBeNull();
-    expect(document.querySelector('.statusbar')?.textContent).toContain('Ластик, 3 px');
-  });
-
-  it('сохраняет точку под курсором при зуме колёсиком без принудительного смещения', async () => {
-    const rect = viewport().getBoundingClientRect();
-    const anchorX = rect.left + rect.width - 10;
-    const anchorY = rect.top + rect.height - 10;
-    const readView = () => {
-      const zoom = parseFloat((document.querySelector('.board') as HTMLElement).style.width) / 32;
-      const translation = /translate\((-?[\d.]+)px, (-?[\d.]+)px\)/.exec(stage().style.transform)!;
-      return { zoom, offsetX: Number(translation[1]), offsetY: Number(translation[2]) };
-    };
-    const before = readView();
-    const anchoredCanvasPoint = {
-      x: (anchorX - rect.left - before.offsetX) / before.zoom,
-      y: (anchorY - rect.top - before.offsetY) / before.zoom,
-    };
+  it('масштабирует холст вокруг точки под курсором при прокрутке колеса', async () => {
+    const zoomAnchor = screenOf(5, 7);
 
     viewport().dispatchEvent(new WheelEvent('wheel', {
       bubbles: true,
       cancelable: true,
-      clientX: anchorX,
-      clientY: anchorY,
-      deltaY: 100,
+      clientX: zoomAnchor.x,
+      clientY: zoomAnchor.y,
+      deltaY: -100,
     }));
     await tick();
 
-    const after = readView();
-    expect(after.zoom).toBeLessThan(before.zoom);
-    expect(Math.abs(after.offsetX + anchoredCanvasPoint.x * after.zoom - (anchorX - rect.left))).toBeLessThanOrEqual(0.5);
-    expect(Math.abs(after.offsetY + anchoredCanvasPoint.y * after.zoom - (anchorY - rect.top))).toBeLessThanOrEqual(0.5);
+    const anchorAfter = screenOf(5, 7);
+    expect(anchorAfter.x).toBeCloseTo(zoomAnchor.x);
+    expect(anchorAfter.y).toBeCloseTo(zoomAnchor.y);
+  });
+
+  it('позволяет скрыть правую панель и вернуть её с края рабочей области', async () => {
+    expect(document.querySelector('.palette-dock')).toBeTruthy();
+    document.querySelector<HTMLButtonElement>('[aria-label="Скрыть правую панель"]')!.click();
+    await tick();
+
+    expect(document.querySelector('.palette-dock')).toBeNull();
+    document.querySelector<HTMLButtonElement>('[aria-label="Показать правую панель"]')!.click();
+    await tick();
+
+    expect(document.querySelector('.palette-dock')).toBeTruthy();
+  });
+
+  it('не дублирует команды отмены, масштабирования и экспорта в правой панели', async () => {
+    const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>('.panel-tabs button'));
+    const selectTab = async (label: string) => {
+      const tab = tabs.find((entry) => entry.textContent?.trim() === label);
+      expect(tab).toBeTruthy();
+      tab!.click();
+      await tick();
+    };
+
+    await selectTab('History');
+    expect(document.querySelectorAll<HTMLButtonElement>('[aria-label="Отменить"]')).toHaveLength(1);
+    expect(document.querySelectorAll<HTMLButtonElement>('[aria-label="Повторить"]')).toHaveLength(1);
+
+    await selectTab('Navigator');
+    expect(document.querySelectorAll<HTMLButtonElement>('button[title="Центрировать активный холст"]')).toHaveLength(1);
+    expect(document.querySelectorAll<HTMLButtonElement>('[aria-label="Увеличить"]')).toHaveLength(1);
+    expect(document.querySelectorAll<HTMLButtonElement>('[aria-label="Уменьшить"]')).toHaveLength(1);
+    expect(document.querySelectorAll<HTMLButtonElement>('button[title="Показать активный холст в масштабе 100%"]')).toHaveLength(1);
+    expect(document.querySelectorAll<HTMLButtonElement>('button[title="Вписать холст в окно (F)"]')).toHaveLength(1);
+    expect(document.querySelectorAll<HTMLButtonElement>('button[title="Открыть активный холст в отдельном окне предпросмотра"]')).toHaveLength(1);
+
+    await selectTab('Export');
+    expect(Array.from(document.querySelectorAll<HTMLButtonElement>('.panel-content button'))
+      .some((button) => button.textContent?.trim() === 'Экспортировать')).toBe(false);
+    document.querySelector<HTMLButtonElement>('[data-menu="Файл"]')!.click();
+    await tick();
+    expect(Array.from(document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'))
+      .some((button) => button.textContent?.includes('Экспорт изображения'))).toBe(true);
+  });
+
+  it('упрощает левую панель и оставляет режимы выделения в меню «Правка»', async () => {
+    const toolPanel = document.querySelector<HTMLElement>('[aria-label="Инструменты"]')!;
+    expect(toolPanel.querySelectorAll('button.tool').length).toBeGreaterThan(0);
+    expect(toolPanel.querySelector('.options > summary')?.textContent).toContain('⚙');
+    expect(toolPanel.querySelector('[aria-label="Размер кисти"]')).toBeNull();
+    expect(toolPanel.querySelector('[aria-label="Форма кисти"]')).toBeNull();
+    expect(toolPanel.textContent).not.toContain('Выделение');
+    expect(toolPanel.textContent).not.toContain('Библиотека кистей');
+
+    document.querySelector<HTMLButtonElement>('[data-menu="Правка"]')!.click();
+    await tick();
+    const rectSelection = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'))
+      .find((button) => button.textContent?.includes('Выделение: прямоугольник'))!;
+    expect(rectSelection).toBeTruthy();
+    rectSelection.click();
+    await tick();
+    expect(document.querySelector('[role="menu"]')).toBeNull();
+
+    document.querySelector<HTMLButtonElement>('[data-menu="Правка"]')!.click();
+    await tick();
+    expect(document.querySelector('[role="menu"]')?.textContent).toContain('Снять режим выделения');
+  });
+
+  it('группирует фигуры в безымянной кнопке и закрывает меню после выбора', () => {
+    const menu = document.querySelector<HTMLElement>('.shape-menu')!;
+    const folder = menu.querySelector<HTMLButtonElement>('.shape-folder')!;
+    expect(folder.textContent?.trim()).toBe('');
+    expect(folder.getAttribute('aria-expanded')).toBe('false');
+
+    folder.click();
+    flushSync();
+    expect(folder.getAttribute('aria-expanded')).toBe('true');
+    expect(menu.querySelectorAll('.shape-menu-panel button')).toHaveLength(11);
+
+    menu.querySelector<HTMLButtonElement>('[aria-label="Эллипс (O)"]')!.click();
+    flushSync();
+    expect(folder.getAttribute('aria-expanded')).toBe('false');
+    expect(menu.querySelector('.shape-menu-panel')).toBeNull();
+    expect(folder.classList.contains('active')).toBe(true);
+  });
+
+  it('открывает менеджер референсов из панели холста', () => {
+    const toggle = Array.from(document.querySelectorAll<HTMLButtonElement>('.toolbar button'))
+      .find((button) => button.textContent?.trim() === 'Референсы');
+    expect(toggle).toBeTruthy();
+    toggle!.click();
+    flushSync();
+    expect(document.querySelector('[aria-label="Менеджер референсов"]')).toBeTruthy();
+    document.querySelector<HTMLButtonElement>('[aria-label="Закрыть панель референсов"]')!.click();
+    flushSync();
+    expect(document.querySelector('[aria-label="Менеджер референсов"]')).toBeNull();
+  });
+
+  it('пипетка выбирает точный цвет с видимого референса', async () => {
+    const project: ProjectData = {
+      width: 32,
+      height: 32,
+      pixels: new Uint8ClampedArray(32 * 32 * 4),
+      paletteId: 'pico8',
+      freeColor: true,
+      primary: { r: 0, g: 0, b: 0, a: 255 },
+      secondary: { r: 255, g: 255, b: 255, a: 255 },
+      recent: [],
+      references: [{
+        id: 'ref',
+        name: 'swatches.png',
+        width: 2,
+        height: 1,
+        pixels: new Uint8ClampedArray([12, 34, 56, 255, 78, 90, 123, 128]),
+        x: 0,
+        y: 0,
+        scale: 1,
+        rotation: 0,
+        opacity: 1,
+        visible: true,
+        locked: false,
+      }],
+    };
+    if (app) unmount(app);
+    app = null;
+    await mountApp(project);
+    await frame();
+    document.querySelector<HTMLButtonElement>('[aria-label^="Пипетка"]')!.click();
+    flushSync();
+    pointer('pointerdown', screenOf(0, 0));
+    expect(document.querySelector<HTMLInputElement>('.big.primary input')?.value).toBe('#0c2238');
+  });
+
+  it('выполняет заливку через Worker, блокирует ввод и сохраняет Undo', async () => {
+    class FakeWorker {
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onerror: ((event: ErrorEvent) => void) | null = null;
+      onmessageerror: (() => void) | null = null;
+
+      postMessage(request: FloodFillWorkerRequest): void {
+        const pixels = computeFloodFillOutput(request);
+        queueMicrotask(() => this.onmessage?.({ data: { pixels: pixels.buffer } } as MessageEvent));
+      }
+
+      terminate(): void {}
+    }
+    vi.stubGlobal('Worker', FakeWorker);
+    await frame();
+    document.querySelector<HTMLButtonElement>('[aria-label="Заливка (B)"]')!.click();
+    flushSync();
+    pointer('pointerdown', screenOf(4, 4));
+    expect(document.querySelector('.fill-overlay')?.textContent).toContain('Выполняется заливка');
+    await frame();
+    await frame();
+    expect(document.querySelector('.fill-overlay')).toBeNull();
+    expect(canvasAlpha(4, 4)).toBe(255);
+    key('KeyZ', { ctrlKey: true });
+    await frame();
+    expect(canvasAlpha(4, 4)).toBe(0);
+  });
+
+  it('сохраняет созданную пользовательскую палитру и метаданные в проекте', async () => {
+    vi.useFakeTimers();
+    document.querySelector<HTMLElement>('.custom-palette summary')!.click();
+    flushSync();
+    const name = document.querySelector<HTMLInputElement>('[aria-label="Название пользовательской палитры"]')!;
+    const colors = document.querySelector<HTMLTextAreaElement>('[aria-label="Цвета пользовательской палитры"]')!;
+    name.value = 'UI Palette';
+    name.dispatchEvent(new Event('input', { bubbles: true }));
+    colors.value = '#112233\n#445566';
+    colors.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    document.querySelector<HTMLButtonElement>('.custom-palette button')!.click();
+    flushSync();
+    expect((document.querySelector('[aria-label="Пресет палитры"]') as HTMLSelectElement).value).toMatch(/^custom-/);
+
+    document.querySelector<HTMLButtonElement>('.panel-tabs button:nth-child(4)')!.click();
+    flushSync();
+    const metadata = document.querySelector<HTMLTextAreaElement>('#project-metadata')!;
+    metadata.value = '{"title":"UI test"}';
+    metadata.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    document.querySelector<HTMLButtonElement>('.metadata-panel button')!.click();
+    flushSync();
+
+    await vi.advanceTimersByTimeAsync(1000);
+    const saved = parseProject(localStorage.getItem(AUTOSAVE_KEY)!);
+    expect(saved.customPalettes?.[0]?.name).toBe('UI Palette');
+    expect(saved.metadata).toEqual({ title: 'UI test' });
+  });
+
+  it('назначает последовательность клавиш инструменту и распознаёт её', async () => {
+    document.querySelector<HTMLButtonElement>('button[aria-label="Настройки"]')!.click();
+    await tick();
+    document.querySelector<HTMLButtonElement>('#settings-hotkeys-tab')!.click();
+    await tick();
+    const row = Array.from(document.querySelectorAll<HTMLElement>('.shortcut-row'))
+      .find((entry) => entry.textContent?.includes('Инструмент: Пипетка'))!;
+    row.querySelector<HTMLButtonElement>('.assign[aria-label*="последовательность"]')!.click();
+    flushSync();
+    key('KeyQ');
+    key('KeyW');
+    Array.from(row.querySelectorAll<HTMLButtonElement>('.assign'))
+      .find((button) => button.textContent?.includes('Завершить'))?.click();
+    flushSync();
+    expect(row.textContent).toContain('Q → W');
+    document.querySelector<HTMLButtonElement>('[role="dialog"] header button')!.click();
+    flushSync();
+    key('KeyQ');
+    expect(document.querySelector('.shortcut-sequence-hint')?.textContent).toContain('Q');
+    key('KeyW');
+    expect(document.querySelector<HTMLButtonElement>('[aria-label^="Пипетка"]')?.getAttribute('aria-pressed')).toBe('true');
   });
 
   it('первая отрисовка — весь холст; штрих перерисовывает только свою область', async () => {
@@ -278,14 +455,71 @@ describe('приложение целиком (jsdom)', () => {
     expect(canvasAlpha(6, 4)).toBe(255);
   });
 
-  it('правая кнопка рисует дополнительным цветом, Shift+Enter и Enter — с клавиатуры', async () => {
-    drawStroke([4, 4], [4, 4], { button: 2 });
+  it('Shift+левая кнопка рисует дополнительным цветом, если функция включена', async () => {
+    drawStroke([4, 4], [4, 4], { shiftKey: true });
     drawStroke([6, 6], [6, 6], { button: 0 });
     await frame();
-    expect(document.querySelector('[aria-label="Удалить холст"]')).toBeNull();
     const colorAt = (x: number, y: number) => Array.from(canvasData!.slice((y * 32 + x) * 4, (y * 32 + x) * 4 + 4));
     expect(colorAt(4, 4)).not.toEqual(colorAt(6, 6));
     expect(colorAt(4, 4)[3]).toBe(255);
+  });
+
+  it('настройка во вкладке «Фон» включает и выключает рисование дополнительным цветом', async () => {
+    const colorAt = (x: number, y: number) => Array.from(canvasData!.slice((y * 32 + x) * 4, (y * 32 + x) * 4 + 4));
+    drawStroke([4, 4], [4, 4], { shiftKey: true });
+    drawStroke([6, 6], [6, 6]);
+    await frame();
+    expect(colorAt(4, 4)).not.toEqual(colorAt(6, 6));
+
+    (document.querySelector('button[aria-label="Настройки"]') as HTMLButtonElement).click();
+    await tick();
+    (document.querySelector('#settings-background-tab') as HTMLButtonElement).click();
+    await tick();
+    const toggle = document.querySelector(
+      'input[aria-label="Рисовать дополнительным цветом через Shift+левую кнопку"]',
+    ) as HTMLInputElement;
+    expect(toggle.checked).toBe(true);
+    toggle.click();
+    await tick();
+    expect(localStorage.getItem('pixel-editor:secondary-color-drawing')).toBe('false');
+    (document.querySelector('[role="dialog"] button') as HTMLButtonElement).click();
+    await tick();
+
+    drawStroke([8, 8], [8, 8], { shiftKey: true });
+    await frame();
+    expect(colorAt(8, 8)).toEqual(colorAt(6, 6));
+  });
+
+  it('правый клик не открывает меню удаления; удаление холста доступно в меню и отменяется', async () => {
+    (document.querySelector('.add-board') as HTMLButtonElement).click();
+    await frame();
+    expect(document.querySelectorAll('.board')).toHaveLength(2);
+
+    const point = screenOf(4, 4, 1);
+    pointer('pointerdown', point, { button: 2 });
+    pointer('pointerup', point, { button: 2 });
+    await tick();
+    expect(document.querySelector('[role="menu"][aria-label="Действия холста"]')).toBeNull();
+    expect(document.querySelectorAll('.board')).toHaveLength(2);
+
+    (document.querySelector('[data-menu="Холст"]') as HTMLButtonElement).click();
+    await tick();
+    const deleteBoardMenuItem = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'))
+      .find((button) => button.textContent?.trim() === 'Удалить активный холст');
+    expect(deleteBoardMenuItem).toBeTruthy();
+    deleteBoardMenuItem?.click();
+    await frame();
+    expect(document.querySelectorAll('.board')).toHaveLength(1);
+    expect(document.body.textContent).toContain('Холст удалён');
+
+    (document.querySelector('button[aria-label="Отменить"]') as HTMLButtonElement).click();
+    await frame();
+    expect(document.querySelectorAll('.board')).toHaveLength(2);
+    (document.querySelector('button[aria-label="Повторить"]') as HTMLButtonElement).click();
+    await frame();
+    expect(document.querySelectorAll('.board')).toHaveLength(1);
+
+    expect(document.querySelector('[data-menu="Холст"]')).toBeTruthy();
   });
 
   it('pointercancel откатывает штрих целиком (случайные следы не остаются)', async () => {
@@ -474,37 +708,27 @@ describe('приложение целиком (jsdom)', () => {
     expect(viewport().style.backgroundColor).toBe('rgb(52, 54, 63)');
   });
 
-  it('keeps large canvases stationary on right-click and pans freely in all directions', async () => {
-    const preset = document.querySelector('#canvas-preset') as HTMLSelectElement;
-    preset.value = '1024x1024';
-    preset.dispatchEvent(new Event('change', { bubbles: true }));
-    await tick();
-    ([...document.querySelectorAll('[role="dialog"] button')].find((button) =>
-      button.textContent?.includes('Изменить'),
-    ) as HTMLButtonElement).click();
+  it('pans the unbounded workspace by right-button dragging without a horizontal scrollbar', async () => {
+    expect(document.querySelector('[aria-label="Горизонтальная прокрутка холста"]')).toBeNull();
+    key('Equal');
+    key('Equal');
+    key('Equal');
     await tick();
     await frame();
-
-    key('Minus');
+    const before = stage().style.transform;
+    const start = screenOf(8, 8);
+    const end = { x: start.x + 2400, y: start.y - 1800 };
+    pointer('pointerdown', start, { button: 2 });
+    pointer('pointermove', end, { button: -1 });
+    pointer('pointerup', end, { button: 2 });
     await tick();
-    await frame();
-    const beforeClick = stageOffset();
-    const boardCenter = screenOf(512, 512);
-    pointer('pointerdown', boardCenter, { button: 2 });
-    pointer('pointerup', boardCenter, { button: 2 });
-    expect(stageOffset()).toEqual(beforeClick);
-
-    const panStart = { x: 400, y: 300 };
-    pointer('pointerdown', panStart, { button: 2 });
-    pointer('pointermove', { x: panStart.x + 1200, y: panStart.y + 900 }, { button: -1 });
-    pointer('pointerup', { x: panStart.x + 1200, y: panStart.y + 900 }, { button: 2 });
-    expect(stageOffset()).toEqual({ x: beforeClick.x + 1200, y: beforeClick.y + 900 });
-
-    const reverseStart = { x: 400, y: 300 };
-    pointer('pointerdown', reverseStart, { button: 2 });
-    pointer('pointermove', { x: reverseStart.x - 2500, y: reverseStart.y - 1900 }, { button: -1 });
-    pointer('pointerup', { x: reverseStart.x - 2500, y: reverseStart.y - 1900 }, { button: 2 });
-    expect(stageOffset()).toEqual({ x: beforeClick.x - 1300, y: beforeClick.y - 1000 });
+    expect(stage().style.transform).not.toBe(before);
+    const offsets = (value: string) => value.match(/translate\(([-\d.]+)px,\s*([-\d.]+)px\)/)!.slice(1).map(Number);
+    const [beforeX, beforeY] = offsets(before);
+    const [afterX, afterY] = offsets(stage().style.transform);
+    expect(afterX! - beforeX!).toBe(2400);
+    expect(afterY! - beforeY!).toBe(-1800);
+    expect(document.querySelector('[aria-label="Действия холста"]')).toBeNull();
     expect(document.querySelector('[aria-label="Горизонтальная прокрутка холста"]')).toBeNull();
   });
 
@@ -529,59 +753,64 @@ describe('приложение целиком (jsdom)', () => {
     const boards = [...document.querySelectorAll<HTMLElement>('.board')];
     expect(boards).toHaveLength(2);
 
+    const secondBoardPoint = screenOf(5, 5, 1);
+    const zoom = parseFloat(boards[1].style.width) / 32;
+    expect(boards[1].style.left).toBe(`${40 * zoom}px`);
+    const originalPositions = boards.map((board) => ({ left: board.style.left, top: board.style.top }));
+    const start = secondBoardPoint;
+    pointer('pointerdown', start, { button: 2, ctrlKey: true });
+    const singleMove = { x: start.x + zoom * 5, y: start.y + zoom * 3 };
+    pointer('pointermove', singleMove, { button: -1, ctrlKey: true });
+    pointer('pointerup', singleMove, { button: 2, ctrlKey: true });
+    await tick();
+    expect(boards[0]!.style.left).toBe(originalPositions[0]!.left);
+    expect(boards[0]!.style.top).toBe(originalPositions[0]!.top);
+    expect(boards[1]!.style.left).toBe(`${45 * zoom}px`);
+    expect(boards[1]!.style.top).toBe(`${3 * zoom}px`);
+
+    key('KeyZ', { ctrlKey: true });
+    await tick();
+    expect(boards[1]!.style.left).toBe(originalPositions[1]!.left);
+    expect(boards[1]!.style.top).toBe(originalPositions[1]!.top);
+
     const firstBoardPoint = screenOf(5, 5, 0);
     pointer('pointerdown', firstBoardPoint, { button: 2, ctrlKey: true });
     pointer('pointerup', firstBoardPoint, { button: 2, ctrlKey: true });
     await tick();
-    expect(undoButton.disabled).toBe(false);
+    expect(document.querySelectorAll('.board.group-selected')).toHaveLength(1);
 
-    const secondBoardPoint = screenOf(5, 5, 1);
-    pointer('pointerdown', secondBoardPoint, { button: 2, ctrlKey: true });
-    pointer('pointerup', secondBoardPoint, { button: 2, ctrlKey: true });
-    await tick();
-    expect(undoButton.disabled).toBe(false);
-
-    const zoom = parseFloat(boards[1].style.width) / 32;
-    expect(boards[1].style.left).toBe(`${56 * zoom}px`);
-    const start = screenOf(5, 5, 1);
-    const originalLeft = boards[1].style.left;
-    const originalTop = boards[1].style.top;
-    pointer('pointerdown', start, { button: 2, ctrlKey: true });
-    const moved = { x: start.x + zoom * 5, y: start.y + zoom * 3 };
+    const groupStart = screenOf(5, 5, 1);
+    pointer('pointerdown', groupStart, { button: 2, ctrlKey: true });
+    const moved = { x: groupStart.x + zoom * 5, y: groupStart.y + zoom * 3 };
     pointer('pointermove', moved, { button: -1, ctrlKey: true });
-    expect(document.querySelectorAll<HTMLElement>('.board')[1].style.left).toBe(originalLeft);
-    expect(document.querySelectorAll<HTMLElement>('.board')[1].style.top).toBe(originalTop);
+    expect(boards[1]!.style.left).toBe(originalPositions[1]!.left);
+    expect(boards[1]!.style.top).toBe(originalPositions[1]!.top);
+    expect(document.querySelectorAll('.drop-preview')).toHaveLength(2);
     expect(document.querySelector('.drop-preview')).toBeTruthy();
     pointer('pointerup', moved, { button: 2, ctrlKey: true });
     await tick();
 
     const movedBoard = document.querySelectorAll<HTMLElement>('.board')[1];
     expect(movedBoard.classList.contains('selected')).toBe(true);
-    expect(movedBoard.style.left).toBe(`${61 * zoom}px`);
+    expect(movedBoard.style.left).toBe(`${45 * zoom}px`);
     expect(movedBoard.style.top).toBe(`${3 * zoom}px`);
+    expect(boards[0]!.style.left).toBe(`${5 * zoom}px`);
+    expect(boards[0]!.style.top).toBe(`${3 * zoom}px`);
+    pointer('pointerdown', { x: 790, y: 590 }, { button: 0 });
+    pointer('pointerup', { x: 790, y: 590 }, { button: 0 });
+    await tick();
+    expect(document.querySelectorAll('.board.group-selected')).toHaveLength(0);
 
     key('KeyZ', { ctrlKey: true });
     await tick();
-    expect(document.querySelectorAll<HTMLElement>('.board')[1].style.left).toBe(originalLeft);
-    expect(document.querySelectorAll<HTMLElement>('.board')[1].style.top).toBe(originalTop);
+    expect(boards[0]!.style.left).toBe(originalPositions[0]!.left);
+    expect(boards[0]!.style.top).toBe(originalPositions[0]!.top);
+    expect(boards[1]!.style.left).toBe(originalPositions[1]!.left);
+    expect(boards[1]!.style.top).toBe(originalPositions[1]!.top);
     key('KeyY', { ctrlKey: true });
     await tick();
-    expect(document.querySelectorAll<HTMLElement>('.board')[1].style.left).toBe(`${61 * zoom}px`);
+    expect(document.querySelectorAll<HTMLElement>('.board')[1].style.left).toBe(`${45 * zoom}px`);
 
-    key('KeyZ', { ctrlKey: true });
-    key('KeyZ', { ctrlKey: true });
-    await tick();
-    expect(document.querySelectorAll('.board')).toHaveLength(1);
-    key('KeyZ', { ctrlKey: true });
-    await tick();
-    expect(undoButton.disabled).toBe(true);
-
-    key('KeyY', { ctrlKey: true });
-    key('KeyY', { ctrlKey: true });
-    key('KeyY', { ctrlKey: true });
-    await tick();
-    expect(document.querySelectorAll('.board')).toHaveLength(2);
-    expect(document.querySelectorAll<HTMLElement>('.board')[1].style.left).toBe(`${61 * zoom}px`);
   });
 
   it('swaps board positions when a dropped board covers at least half the other board', async () => {
@@ -615,6 +844,42 @@ describe('приложение целиком (jsdom)', () => {
     ]);
   });
 
+  it('requires selecting an unselected board before it can be moved', async () => {
+    (document.querySelector('.add-board') as HTMLButtonElement).click();
+    await tick();
+    await frame();
+
+    const boards = [...document.querySelectorAll<HTMLElement>('.board')];
+    const first = boards[0]!;
+    const originalPosition = { left: first.style.left, top: first.style.top };
+    const secondPosition = { left: boards[1]!.style.left, top: boards[1]!.style.top };
+    const zoom = parseFloat(first.style.width) / 32;
+    const start = screenOf(5, 5, 0);
+    const target = { x: start.x + zoom * 5, y: start.y + zoom * 3 };
+
+    pointer('pointerdown', start, { button: 2, ctrlKey: true });
+    pointer('pointermove', target, { button: -1, ctrlKey: true });
+    pointer('pointerup', target, { button: 2, ctrlKey: true });
+    await tick();
+
+    expect(first.style.left).toBe(originalPosition.left);
+    expect(first.style.top).toBe(originalPosition.top);
+    expect(first.classList.contains('selected')).toBe(true);
+    expect(document.querySelector('[aria-label="Действия холста"]')).toBeNull();
+
+    const selectedStart = screenOf(5, 5, 0);
+    const selectedTarget = { x: selectedStart.x + zoom * 5, y: selectedStart.y + zoom * 3 };
+    pointer('pointerdown', selectedStart, { button: 2, ctrlKey: true });
+    pointer('pointermove', selectedTarget, { button: -1, ctrlKey: true });
+    pointer('pointerup', selectedTarget, { button: 2, ctrlKey: true });
+    await tick();
+
+    expect(first.style.left).toBe(`${5 * zoom}px`);
+    expect(first.style.top).toBe(`${3 * zoom}px`);
+    expect(boards[1]!.style.left).toBe(secondPosition.left);
+    expect(boards[1]!.style.top).toBe(secondPosition.top);
+  });
+
   it('snaps a dragged board to neighboring edges and shows blue corner alignment guides', async () => {
     (document.querySelector('.add-board') as HTMLButtonElement).click();
     await tick();
@@ -622,7 +887,7 @@ describe('приложение целиком (jsdom)', () => {
     const boards = [...document.querySelectorAll<HTMLElement>('.board')];
     const zoom = parseFloat(boards[1].style.width) / 32;
     const start = screenOf(5, 5, 1);
-    const nearAlignedEdge = { x: start.x - 23 * zoom, y: start.y };
+    const nearAlignedEdge = { x: start.x - 7 * zoom, y: start.y };
 
     pointer('pointerdown', start, { button: 2, ctrlKey: true });
     pointer('pointermove', nearAlignedEdge, { button: -1, ctrlKey: true });
@@ -654,6 +919,32 @@ describe('приложение целиком (jsdom)', () => {
     expect(Math.max(...boards.map((board) => Math.abs(parseFloat(board.style.left))))).toBeLessThan(400 * initialZoom);
   });
 
+  it('imports project notes from Markdown into the project notes editor', async () => {
+    (document.querySelector('[data-menu="Файл"]') as HTMLButtonElement).click();
+    await tick();
+    const notesItem = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'))
+      .find((button) => button.textContent?.trim() === 'Заметки проекта…');
+    expect(notesItem).toBeTruthy();
+    notesItem?.click();
+    await tick();
+
+    const input = document.querySelector('input[type="file"][accept*=".markdown"]') as HTMLInputElement;
+    const noteFile = new File(['# Imported ideas\n\nTry a cool palette.'], 'ideas.md', { type: 'text/markdown' });
+    Object.defineProperty(noteFile, 'text', {
+      configurable: true,
+      value: async () => '# Imported ideas\n\nTry a cool palette.',
+    });
+    Object.defineProperty(input, 'files', {
+      configurable: true,
+      value: [noteFile],
+    });
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    await vi.waitFor(() => {
+      expect((document.querySelector('textarea[aria-label="Текст заметок"]') as HTMLTextAreaElement).value)
+        .toBe('# Imported ideas\n\nTry a cool palette.');
+    });
+  });
+
   it('импортирует BMP с исходным размером и подтверждает замену проекта', async () => {
     const close = vi.fn();
     vi.stubGlobal(
@@ -681,28 +972,22 @@ describe('приложение целиком (jsdom)', () => {
     expect(canvasData![3]).toBe(255);
   });
 
-  it('экспортирует WebP через системный диалог с правильным MIME-типом', async () => {
+  it('экспортирует WebP выбранного размера и использует правильный MIME-тип', async () => {
+    Object.defineProperty(Blob.prototype, 'arrayBuffer', {
+      configurable: true,
+      value: vi.fn(async () => new Uint8Array([1]).buffer),
+    });
     const toBlob = vi.fn(function (
       this: HTMLCanvasElement,
       callback: BlobCallback,
       type?: string,
     ) {
-      const blob = new Blob(['encoded'], { type });
-      Object.defineProperty(blob, 'arrayBuffer', { value: async () => new TextEncoder().encode('encoded').buffer });
-      callback(blob);
+      callback(new Blob(['encoded'], { type }));
     });
     Object.defineProperty(HTMLCanvasElement.prototype, 'toBlob', { configurable: true, value: toBlob });
-    const saveFile = vi.fn(async () => 'saved' as const);
-    window.pixelEditorDesktop = {
-      saveFile,
-      saveBatch: async () => 'saved',
-      exportPdf: async () => 'saved',
-      onCommand: () => () => {},
-      setTitle: async () => {},
-      setDirty: async () => {},
-      closeApproved: async () => {},
-      onOpenFile: () => () => {},
-    };
+    Object.defineProperty(HTMLAnchorElement.prototype, 'click', { configurable: true, value: vi.fn() });
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:export') });
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() });
 
     (document.querySelector('button[aria-label="Действия с файлом"]') as HTMLButtonElement).click();
     await tick();
@@ -710,12 +995,16 @@ describe('приложение целиком (jsdom)', () => {
     format.value = 'webp';
     format.dispatchEvent(new Event('change', { bubbles: true }));
     await tick();
-    (document.querySelector('button[title="Экспортировать WEBP"]') as HTMLButtonElement).click();
+    (document.querySelector('button[title="Сохранить WEBP"]') as HTMLButtonElement).click();
     await vi.waitFor(() => expect(document.body.textContent).toContain('WEBP сохранён'));
 
     expect(toBlob).toHaveBeenCalledOnce();
     expect(toBlob.mock.calls[0][1]).toBe('image/webp');
-    expect(saveFile).toHaveBeenCalledWith(expect.objectContaining({ mimeType: 'image/webp' }));
+    expect(desktopSaveFile).toHaveBeenCalledWith(expect.objectContaining({
+      suggestedName: 'pixel-art-32x32@4x.webp',
+      mimeType: 'image/webp',
+      data: new Uint8Array([1]),
+    }));
   });
 
   it('справка открывается по H и закрывается Escape, фокус возвращается', async () => {
@@ -725,36 +1014,6 @@ describe('приложение целиком (jsdom)', () => {
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     await tick();
     expect(document.querySelector('[role="dialog"]')).toBeNull();
-  });
-
-  it('открывает заметки, сохраняет текст и предлагает экспорт Markdown', async () => {
-    (document.querySelector('button[aria-label="Заметки проекта"]') as HTMLButtonElement).click();
-    await tick();
-    const dialog = document.querySelector('[role="dialog"]')!;
-    expect(dialog.textContent).toContain('Заметки');
-    expect(dialog.textContent).not.toContain('Продолжить редактирование');
-    const editor = dialog.querySelector('textarea[aria-label="Текст заметок"]') as HTMLTextAreaElement;
-    editor.value = 'Проверить композицию';
-    editor.dispatchEvent(new Event('input', { bubbles: true }));
-    await tick();
-    expect(localStorage.getItem('pixel-editor:notes')).toBe('Проверить композицию');
-    expect(Array.from(dialog.querySelectorAll('button')).some((button) => button.textContent?.includes('Экспортировать'))).toBe(true);
-  });
-
-  it('не дублирует цвета активной палитры в недавних и показывает уникальные свободные цвета', async () => {
-    (document.querySelector('button[aria-label="#ff004d"]') as HTMLButtonElement).click();
-    await tick();
-    expect(Array.from(document.querySelectorAll('.block h2')).some((heading) => heading.textContent === 'Недавние')).toBe(false);
-
-    (document.querySelector('[role="switch"][aria-checked="false"]') as HTMLButtonElement).click();
-    const colorInput = document.querySelector('input[aria-label="Основной цвет"]') as HTMLInputElement;
-    colorInput.value = '#123456';
-    colorInput.dispatchEvent(new Event('input', { bubbles: true }));
-    drawStroke([0, 0], [1, 0]);
-    await tick();
-
-    expect(document.querySelectorAll('button[aria-label="#123456"]')).toHaveLength(1);
-    expect(Array.from(document.querySelectorAll('.block h2')).some((heading) => heading.textContent === 'Недавние')).toBe(true);
   });
 
   it('сохраняет выбор темы из настроек и применяет её к документу', async () => {
@@ -782,5 +1041,40 @@ describe('приложение целиком (jsdom)', () => {
     key('KeyE');
     await tick();
     expect(document.querySelector('.statusbar')?.textContent).toContain('Ластик');
+  });
+
+  it('позволяет переназначить клавишу инструмента и сохраняет контекстную подсказку', async () => {
+    (document.querySelector('button[aria-label="Настройки"]') as HTMLButtonElement).click();
+    await tick();
+    (document.querySelector('#settings-hotkeys-tab') as HTMLButtonElement).click();
+    await tick();
+    (document.querySelector('[aria-label="Назначить сочетание для действия «Инструмент: Ластик»"]') as HTMLButtonElement).click();
+    key('KeyQ');
+    await tick();
+
+    expect(localStorage.getItem('pixel-editor:hotkeys')).toContain('"code": "KeyQ"');
+    expect(Array.from(document.querySelectorAll('.tool')).map((element) => element.getAttribute('aria-label')).join('|')).toContain('Ластик (E; Q)');
+    (document.querySelector('[role="dialog"] button') as HTMLButtonElement).click();
+    await tick();
+    key('KeyQ');
+    expect(document.querySelector('.statusbar')?.textContent).toContain('Ластик');
+  });
+
+  it('не применяет конфликтующее назначение клавиши', async () => {
+    (document.querySelector('button[aria-label="Настройки"]') as HTMLButtonElement).click();
+    await tick();
+    (document.querySelector('#settings-hotkeys-tab') as HTMLButtonElement).click();
+    await tick();
+    (document.querySelector('[aria-label="Назначить сочетание для действия «Инструмент: Ластик»"]') as HTMLButtonElement).click();
+    key('KeyP');
+    await tick();
+
+    expect(document.querySelector('[role="status"]')?.textContent).toMatch(/уже назначено/i);
+    expect(localStorage.getItem('pixel-editor:hotkeys')).toBeNull();
+  });
+
+  it('сохраняет клавиши быстрого выбора размера кисти', () => {
+    key('Digit7');
+    expect(document.querySelector('.value.tool')?.textContent).toContain('7 px');
   });
 });

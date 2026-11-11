@@ -137,7 +137,7 @@ function readLegacyAutosave(storage: KeyValueStorage | null): { raw: string | nu
   } catch {
     return {
       raw: null,
-      result: { project: null, error: 'Автосохранение недоступно: приложению запрещён доступ к локальному хранилищу.' },
+      result: { project: null, error: 'Автосохранение недоступно: нет доступа к хранилищу приложения.' },
     };
   }
   if (raw === null) return { raw, result: { project: null, error: null } };
@@ -262,7 +262,7 @@ export class AutosaveRepository {
   private writeLegacy(serialized: string): boolean {
     try {
       this.legacyStorage?.setItem(AUTOSAVE_KEY, serialized);
-      return this.legacyStorage !== null;
+      return this.legacyStorage?.getItem(AUTOSAVE_KEY) === serialized;
     } catch {
       return false;
     }

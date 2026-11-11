@@ -7,6 +7,7 @@ import {
 } from './autosave';
 import { parseProject, type ProjectData } from './project';
 import { AUTOSAVE_BACKUP_KEY, AUTOSAVE_KEY, type KeyValueStorage } from './storage';
+import { createBrushDefinition } from './tools/brushLibrary';
 
 function memoryStorage(): KeyValueStorage & { values: Map<string, string> } {
   const values = new Map<string, string>();
@@ -77,6 +78,21 @@ describe('IndexedDB autosave repository', () => {
     const startup = await repo.load();
     expect(startup).toMatchObject({ error: null, mode: 'indexeddb' });
     expect(startup.project?.pixels).toEqual(project(42).pixels);
+  });
+
+  it('persists project brushes and metadata through IndexedDB autosave', async () => {
+    const source: ProjectData = {
+      ...project(42),
+      brushes: [createBrushDefinition('Autosave brush', 4, 'circle')],
+      metadata: { title: 'Autosaved project', custom: { revision: 3 } },
+    };
+    const repo = repository(null);
+    await repo.save(source);
+
+    const restored = await repo.load();
+
+    expect(restored.project?.brushes).toEqual(source.brushes);
+    expect(restored.project?.metadata).toEqual(source.metadata);
   });
 
   it('migrates valid localStorage autosave and removes it only after verification', async () => {

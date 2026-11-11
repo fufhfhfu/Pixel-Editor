@@ -14,6 +14,54 @@ export interface PaletteGroup {
   readonly colors: readonly RGBA[];
 }
 
+export const MAX_CUSTOM_PALETTES = 16;
+export const MAX_CUSTOM_PALETTE_COLORS = 256;
+
+export function parseCustomPalettes(value: unknown): Palette[] {
+  if (!Array.isArray(value) || value.length > MAX_CUSTOM_PALETTES) {
+    throw new RangeError(`Можно сохранить не больше ${MAX_CUSTOM_PALETTES} пользовательских палитр.`);
+  }
+  const ids = new Set<string>();
+  return value.map((entry): Palette => {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      throw new RangeError('В пользовательской палитре указаны некорректные данные.');
+    }
+    const palette = entry as Record<string, unknown>;
+    if (
+      typeof palette.id !== 'string' ||
+      !/^custom-[a-z0-9][a-z0-9-]{0,75}$/.test(palette.id) ||
+      ids.has(palette.id) ||
+      typeof palette.name !== 'string' ||
+      palette.name.trim().length === 0 ||
+      palette.name.length > 64 ||
+      !Array.isArray(palette.colors) ||
+      palette.colors.length === 0 ||
+      palette.colors.length > MAX_CUSTOM_PALETTE_COLORS ||
+      palette.colors.some((entry) =>
+        typeof entry !== 'object' ||
+        entry === null ||
+        !['r', 'g', 'b', 'a'].every((channel) => {
+          const value = (entry as Record<string, unknown>)[channel];
+          return Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 255;
+        }),
+      )
+    ) {
+      throw new RangeError('В пользовательской палитре указаны некорректные данные.');
+    }
+    ids.add(palette.id);
+    return Object.freeze({
+      id: palette.id,
+      name: palette.name.trim(),
+      colors: Object.freeze(palette.colors.map((entry) => Object.freeze({
+        r: (entry as RGBA).r,
+        g: (entry as RGBA).g,
+        b: (entry as RGBA).b,
+        a: (entry as RGBA).a,
+      }))),
+    });
+  });
+}
+
 const color = (hex: string): RGBA => {
   const value = Number.parseInt(hex.replace('#', ''), 16);
   return { r: value >>> 16, g: (value >>> 8) & 255, b: value & 255, a: 255 };

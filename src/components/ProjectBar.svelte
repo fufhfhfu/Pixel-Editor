@@ -10,15 +10,18 @@
     /** Размер изображения в пикселях при выбранном масштабе (для подписи кнопки). */
     exportWidth: number;
     exportHeight: number;
+    undoShortcut: string;
+    redoShortcut: string;
+    saveShortcut: string;
+    helpShortcut: string;
     onundo: () => void;
     onredo: () => void;
     onopen: (file: File) => void;
     onsave: () => void;
     onexport: () => void;
-    onexportall: () => void;
     onformat: (format: ExportFormat) => void;
     onscale: (scale: ExportScale) => void;
-    onnotes: (trigger: HTMLElement) => void;
+    onwelcome: (trigger: HTMLElement) => void;
     onhelp: (trigger: HTMLElement) => void;
     onsettings: (trigger: HTMLElement) => void;
   }
@@ -31,15 +34,18 @@
     availableExportScales,
     exportWidth,
     exportHeight,
+    undoShortcut,
+    redoShortcut,
+    saveShortcut,
+    helpShortcut,
     onundo,
     onredo,
     onopen,
     onsave,
     onexport,
-    onexportall,
     onformat,
     onscale,
-    onnotes,
+    onwelcome,
     onhelp,
     onsettings,
   }: Props = $props();
@@ -101,7 +107,7 @@
         <button
           type="button"
           class="btn"
-          title="Открыть проект PXPROJ/JSON или изображение PNG, JPEG, WebP, BMP"
+          title="Открыть проект JSON или изображение PNG, JPEG, WebP, BMP"
           onclick={() => {
             closeFileMenu();
             fileInput?.click();
@@ -131,21 +137,18 @@
         <button
           type="button"
           class="btn primary export-button"
-          title={exportFormat === 'jpeg' ? 'Экспортировать JPEG; прозрачность будет заменена цветом фона рабочей области' : `Экспортировать ${exportFormat.toUpperCase()}`}
+          title={exportFormat === 'jpeg' ? 'Сохранить JPEG; прозрачность будет заменена цветом фона рабочей области' : `Сохранить ${exportFormat.toUpperCase()}`}
           onclick={() => {
             closeFileMenu();
             onexport();
           }}
         >Экспорт {exportWidth}×{exportHeight}</button>
-        <button type="button" class="btn" title="Экспортировать все холсты в отдельные PNG-файлы" onclick={() => { closeFileMenu(); onexportall(); }}>
-          Все холсты PNG
-        </button>
       </div>
     {/if}
     <input
       class="hidden"
       type="file"
-      accept=".pxproj,.json,.png,.jpg,.jpeg,.webp,.bmp,application/json,image/png,image/jpeg,image/webp,image/bmp"
+      accept=".json,.png,.jpg,.jpeg,.webp,.bmp,application/json,image/png,image/jpeg,image/webp,image/bmp"
       tabindex="-1"
       aria-hidden="true"
       bind:this={fileInput}
@@ -164,13 +167,13 @@
   </div>
 
   <div class="group">
-    <button type="button" class="btn icon" disabled={!canUndo} title="Отменить (Ctrl+Z)" aria-label="Отменить" onclick={onundo}>
+    <button type="button" class="btn icon" disabled={!canUndo} title={`Отменить (${undoShortcut})`} aria-label="Отменить" aria-keyshortcuts={undoShortcut} onclick={onundo}>
       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M9 14L4 9l5-5" />
         <path d="M4 9h10a6 6 0 0 1 0 12h-3" />
       </svg>
     </button>
-    <button type="button" class="btn icon" disabled={!canRedo} title="Повторить (Ctrl+Shift+Z)" aria-label="Повторить" onclick={onredo}>
+    <button type="button" class="btn icon" disabled={!canRedo} title={`Повторить (${redoShortcut})`} aria-label="Повторить" aria-keyshortcuts={redoShortcut} onclick={onredo}>
       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M15 14l5-5-5-5" />
         <path d="M20 9H10a6 6 0 0 0 0 12h3" />
@@ -184,10 +187,10 @@
     <button
       type="button"
       class="btn icon"
-      title="Заметки проекта"
-      aria-label="Заметки проекта"
-      onclick={(event) => onnotes(event.currentTarget)}
-    >✎</button>
+      title="Открыть приветствие"
+      aria-label="Приветствие"
+      onclick={(event) => onwelcome(event.currentTarget)}
+    >i</button>
     <button
       type="button"
       class="btn icon"
@@ -203,12 +206,13 @@
     <button
       type="button"
       class="btn icon"
-      title="Горячие клавиши (H)"
+      title={`Горячие клавиши (${helpShortcut})`}
       aria-label="Горячие клавиши"
+      aria-keyshortcuts={helpShortcut}
       onclick={(event) => onhelp(event.currentTarget)}
     >?</button>
-    <button type="button" class="btn" title="Сохранить проект в файл JSON (Ctrl+S)" onclick={onsave}>
-      Сохранить <span class="kbd save-hint">Ctrl+S</span>
+    <button type="button" class="btn" title={`Сохранить проект в файл JSON (${saveShortcut})`} aria-keyshortcuts={saveShortcut} onclick={onsave}>
+      Сохранить <span class="kbd save-hint">{saveShortcut}</span>
     </button>
   </div>
 </header>

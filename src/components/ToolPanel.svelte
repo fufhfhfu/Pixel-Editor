@@ -1,55 +1,65 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
-  import { MAX_BRUSH_SIZE, MIN_BRUSH_SIZE, type Tool, type ToolId } from '../core/tools';
+  import { hexToRgba, rgbaToHex } from '../core/color';
+  import {
+    MAX_BRUSH_SIZE,
+    MIN_BRUSH_SIZE,
+    type DrawingSettings,
+    type Tool,
+    type ToolId,
+    parseCustomDitherPattern,
+  } from '../core/tools';
 
   interface Props {
+    panelWidth: number;
     tools: readonly Tool[];
     activeToolId: ToolId;
     brushSize: number;
+    settings: DrawingSettings;
     onselect: (id: ToolId) => void;
-    onbrush: (size: number) => void;
+    onbrushsize: (size: number) => void;
+    onsettings: (settings: DrawingSettings) => void;
     onaddboard: () => void;
   }
 
-  let { tools, activeToolId, brushSize, onselect, onbrush, onaddboard }: Props = $props();
+  let {
+    panelWidth,
+    tools,
+    activeToolId,
+    brushSize,
+    settings,
+    onselect,
+    onbrushsize,
+    onsettings,
+    onaddboard,
+  }: Props = $props();
 
-  const brushSizes = Array.from({ length: MAX_BRUSH_SIZE - MIN_BRUSH_SIZE + 1 }, (_, i) => MIN_BRUSH_SIZE + i);
-  let openBrushToolId = $state<ToolId | null>(null);
-  let previousActiveToolId = untrack(() => activeToolId);
+  const shapeToolIds: readonly ToolId[] = [
+    'line', 'rect', 'filledRect', 'circle', 'filledCircle', 'ellipse',
+    'filledEllipse', 'triangle', 'filledTriangle', 'polygon', 'filledPolygon',
+  ];
+  const shapeTools = $derived(tools.filter((tool) => shapeToolIds.includes(tool.id)));
+  const activeShapeTool = $derived(shapeTools.find((tool) => tool.id === activeToolId));
+  let shapeMenuOpen = $state(false);
+  let shapeMenuContainer = $state<HTMLDivElement | null>(null);
 
-  $effect(() => {
-    if (activeToolId === previousActiveToolId) return;
-    previousActiveToolId = activeToolId;
-    openBrushToolId = tools.find((tool) => tool.id === activeToolId)?.usesBrush ? activeToolId : null;
-  });
-
-  function selectTool(tool: Tool): void {
-    const alreadySelected = tool.id === activeToolId;
-    onselect(tool.id);
-    if (!tool.usesBrush) {
-      openBrushToolId = null;
-      return;
-    }
-    openBrushToolId = alreadySelected && openBrushToolId === tool.id ? null : tool.id;
-  }
-
-  function closeBrushPanelOnOutsidePointer(event: PointerEvent): void {
-    if (!(event.target instanceof Node) || !panelElement?.contains(event.target)) {
-      openBrushToolId = null;
-    }
-  }
-
-  function closeBrushPanelOnEscape(event: KeyboardEvent): void {
-    if (event.key === 'Escape' && openBrushToolId) {
-      openBrushToolId = null;
+  function closeShapeMenuOnOutsidePointer(event: PointerEvent): void {
+    if (shapeMenuOpen && shapeMenuContainer && event.target instanceof Node && !shapeMenuContainer.contains(event.target)) {
+      shapeMenuOpen = false;
     }
   }
 
-  let panelElement: HTMLElement | undefined = $state();
+  function closeShapeMenuOnEscape(event: KeyboardEvent): void {
+    if (event.key === 'Escape' && shapeMenuOpen) {
+      shapeMenuOpen = false;
+      shapeMenuContainer?.querySelector<HTMLButtonElement>('.shape-folder')?.focus();
+    }
+  }
 </script>
 
-<svelte:document onpointerdown={closeBrushPanelOnOutsidePointer} />
-<svelte:window onkeydown={closeBrushPanelOnEscape} />
+<svelte:window
+  onpointerdown={closeShapeMenuOnOutsidePointer}
+  onkeydown={closeShapeMenuOnEscape}
+/>
 
 {#snippet tip(title: string, key: string, hint?: string)}
   <span class="tip" role="tooltip">
@@ -90,13 +100,25 @@
       <path d="M5 19L19 5" />
       <circle cx="5" cy="19" r="1.4" />
       <circle cx="19" cy="5" r="1.4" />
-    {:else if id === 'rect'}
+    {:else if id === 'rect' || id === 'filledRect'}
       <rect x="4.5" y="6.5" width="15" height="11" rx="1" />
+    {:else if id === 'circle' || id === 'filledCircle'}
+      <circle cx="12" cy="12" r="7" />
+    {:else if id === 'ellipse' || id === 'filledEllipse'}
+      <ellipse cx="12" cy="12" rx="8" ry="5" />
+    {:else if id === 'triangle' || id === 'filledTriangle'}
+      <path d="M12 4 21 20H3z" />
+    {:else if id === 'polygon' || id === 'filledPolygon'}
+      <path d="m12 3 8 6-3 10H7L4 9z" />
+    {:else if id === 'gradient'}
+      <path d="M4 5h16M4 9h16M4 13h16M4 17h16M4 21h16" />
+    {:else if id === 'dither'}
+      <path d="M4 4h3v3H4zM10 4h3v3h-3zM16 4h3v3h-3zM7 10h3v3H7zM13 10h3v3h-3zM4 16h3v3H4zM10 16h3v3h-3zM16 16h3v3h-3z" />
     {/if}
   </svg>
 {/snippet}
 
-<aside class="panel" aria-label="Инструменты" bind:this={panelElement}>
+<aside class="panel" aria-label="Инструменты" style:--dock-width="{panelWidth}px">
   <button
     type="button"
     class="add-board"
@@ -109,50 +131,243 @@
 
   <div class="section">
     {#each tools as tool (tool.id)}
-      <div class="slot">
-        <button
-          type="button"
-          class="tool"
-          class:active={tool.id === activeToolId}
-          aria-pressed={tool.id === activeToolId}
-          aria-label="{tool.label} ({tool.hotkeyLabel})"
-          aria-keyshortcuts={tool.hotkeyLabel}
-          aria-expanded={tool.usesBrush ? openBrushToolId === tool.id : undefined}
-          aria-controls={tool.usesBrush ? `brush-options-${tool.id}` : undefined}
-          onclick={() => selectTool(tool)}
-        >
-          {@render icon(tool.id)}
-        </button>
-        {@render tip(tool.label, tool.hotkeyLabel, tool.hint)}
-        {#if tool.usesBrush && openBrushToolId === tool.id}
-          <div
-            id="brush-options-{tool.id}"
-            class="brush-popover"
-            role="group"
-            aria-label="Толщина инструмента «{tool.label}»"
+      {#if tool.id === 'line'}
+        <div class="shape-menu" class:open={shapeMenuOpen} bind:this={shapeMenuContainer}>
+          <button
+            type="button"
+            class="tool shape-folder"
+            class:active={activeShapeTool !== undefined}
+            aria-label="Фигуры"
+            aria-expanded={shapeMenuOpen}
+            title="Фигуры"
+            onclick={() => (shapeMenuOpen = !shapeMenuOpen)}
           >
-            <span class="brush-title">Толщина · {tool.label}</span>
-            <div class="brush-options">
-              {#each brushSizes as size (size)}
-                <button
-                  type="button"
-                  class="size"
-                  class:active={size === brushSize}
-                  aria-pressed={size === brushSize}
-                  aria-label="Толщина {size} px"
-                  aria-keyshortcuts={String(size)}
-                  onclick={() => onbrush(size)}
-                >
-                  <span class="dot" style:width="{size * 3 + 1}px" style:height="{size * 3 + 1}px"></span>
-                  <span>{size}</span>
-                </button>
+            {@render icon(activeShapeTool?.id ?? 'rect')}
+            <svg class="shape-chevron" viewBox="0 0 8 12" aria-hidden="true">
+              <path d="m2 1 5 5-5 5" />
+            </svg>
+          </button>
+          {#if shapeMenuOpen}
+            <div class="shape-menu-panel" role="group" aria-label="Фигуры">
+              {#each shapeTools as shape (shape.id)}
+                <div class="slot">
+                  <button
+                    type="button"
+                    class="tool"
+                    class:active={shape.id === activeToolId}
+                    aria-pressed={shape.id === activeToolId}
+                    aria-label="{shape.label} ({shape.hotkeyLabel})"
+                    aria-keyshortcuts={shape.hotkeyLabel}
+                    onclick={() => {
+                      onselect(shape.id);
+                      shapeMenuOpen = false;
+                    }}
+                  >
+                    {@render icon(shape.id)}
+                  </button>
+                  {@render tip(shape.label, shape.hotkeyLabel, shape.hint)}
+                </div>
               {/each}
             </div>
-          </div>
-        {/if}
-      </div>
+          {/if}
+        </div>
+      {:else if !shapeToolIds.includes(tool.id)}
+        <div class="slot">
+          <button
+            type="button"
+            class="tool"
+            class:active={tool.id === activeToolId}
+            aria-pressed={tool.id === activeToolId}
+            aria-label="{tool.label} ({tool.hotkeyLabel})"
+            aria-keyshortcuts={tool.hotkeyLabel}
+            onclick={() => onselect(tool.id)}
+          >
+            {@render icon(tool.id)}
+          </button>
+          {@render tip(tool.label, tool.hotkeyLabel, tool.hint)}
+          {#if tool.id === 'pencil' || tool.id === 'eraser'}
+            <details class="brush-size">
+              <summary aria-label="Настроить размер: {tool.label}" title="Размер: {tool.label}">px</summary>
+              <div class="brush-size-panel" role="group" aria-label="Размер: {tool.label}">
+                <label>Размер: {brushSize} px
+                  <input
+                    type="range"
+                    min={MIN_BRUSH_SIZE}
+                    max={MAX_BRUSH_SIZE}
+                    value={brushSize}
+                    aria-label="Размер: {tool.label}"
+                    oninput={(event) => onbrushsize(Number(event.currentTarget.value))}
+                  />
+                </label>
+              </div>
+            </details>
+          {/if}
+        </div>
+      {/if}
     {/each}
   </div>
+
+  <details class="options">
+    <summary aria-label="Параметры инструмента" title="Параметры инструмента">⚙</summary>
+    <div class="options-panel">
+      {#if activeToolId === 'pencil'}
+        <label class="check">
+          <input
+            type="checkbox"
+            checked={settings.pixelPerfect}
+            onchange={(event) => onsettings({ ...settings, pixelPerfect: event.currentTarget.checked })}
+          />
+          Pixel Perfect
+        </label>
+      {/if}
+      {#if activeToolId === 'line'}
+        <label>Фиксированный угол
+          <select
+            aria-label="Фиксированный угол линии"
+            value={settings.lineAngleSnap}
+            onchange={(event) => onsettings({ ...settings, lineAngleSnap: Number(event.currentTarget.value) as DrawingSettings['lineAngleSnap'] })}
+          >
+            <option value="0">Свободно</option><option value="15">15°</option>
+            <option value="30">30°</option><option value="45">45°</option><option value="90">90°</option>
+          </select>
+        </label>
+      {/if}
+      {#if activeToolId === 'fill'}
+        <label>Область
+          <select
+            aria-label="Режим заливки"
+            value={settings.fillContiguous ? 'contiguous' : 'global'}
+            onchange={(event) => onsettings({ ...settings, fillContiguous: event.currentTarget.value === 'contiguous' })}
+          >
+            <option value="contiguous">Связная</option><option value="global">Все совпадения</option>
+          </select>
+        </label>
+        <label>Допуск {settings.fillTolerance}
+          <input type="range" min="0" max="255" value={settings.fillTolerance}
+            aria-label="Допуск заливки"
+            oninput={(event) => onsettings({ ...settings, fillTolerance: Number(event.currentTarget.value) })} />
+        </label>
+        <label>Связность
+          <select aria-label="Связность заливки" value={settings.fillConnectivity}
+            onchange={(event) => onsettings({ ...settings, fillConnectivity: Number(event.currentTarget.value) as 4 | 8 })}>
+            <option value="4">4 пикселя</option><option value="8">8 пикселей</option>
+          </select>
+        </label>
+        <label class="check">
+          <input type="checkbox" checked={settings.fillProtectAlpha}
+            onchange={(event) => onsettings({ ...settings, fillProtectAlpha: event.currentTarget.checked })} />
+          Защита альфа-канала
+        </label>
+        <label class="check">
+          <input type="checkbox" checked={settings.sampleMerged}
+            onchange={(event) => onsettings({ ...settings, sampleMerged: event.currentTarget.checked })} />
+          Выбирать цвет по видимым слоям
+        </label>
+      {/if}
+      {#if activeToolId === 'picker'}
+        <label>Размер выборки
+          <select aria-label="Радиус пипетки" value={settings.pickerRadius}
+            onchange={(event) => onsettings({ ...settings, pickerRadius: Number(event.currentTarget.value) as DrawingSettings['pickerRadius'] })}>
+            <option value="1">1 × 1 px</option><option value="3">3 × 3 px</option>
+            <option value="5">5 × 5 px</option><option value="7">7 × 7 px</option>
+          </select>
+        </label>
+        <label class="check">
+          <input type="checkbox" checked={settings.sampleMerged}
+            onchange={(event) => onsettings({ ...settings, sampleMerged: event.currentTarget.checked })} />
+          Выбирать цвет по видимым слоям
+        </label>
+        <span class="note">Сэмплируется активный холст.</span>
+      {/if}
+      {#if activeToolId === 'polygon' || activeToolId === 'filledPolygon'}
+        <label>Вершины {settings.polygonSides}
+          <input type="range" min="3" max="12" value={settings.polygonSides}
+            aria-label="Количество вершин многоугольника"
+            oninput={(event) => onsettings({ ...settings, polygonSides: Number(event.currentTarget.value) })} />
+        </label>
+      {/if}
+      {#if activeToolId === 'gradient'}
+        <label>Тип
+          <select aria-label="Тип градиента" value={settings.gradientKind}
+            onchange={(event) => onsettings({ ...settings, gradientKind: event.currentTarget.value as DrawingSettings['gradientKind'] })}>
+            <option value="linear">Линейный</option><option value="radial">Радиальный</option>
+          </select>
+        </label>
+        <label class="check">
+          <input type="checkbox" checked={settings.gradientDither}
+            onchange={(event) => onsettings({ ...settings, gradientDither: event.currentTarget.checked })} />
+          Дизеринг градиента
+        </label>
+        <label class="check">
+          <input type="checkbox" checked={settings.gradientTransparency}
+            onchange={(event) => onsettings({ ...settings, gradientTransparency: event.currentTarget.checked })} />
+          Переход в прозрачность
+        </label>
+        <label class="check">
+          <input type="checkbox" checked={settings.gradientMidpointEnabled}
+            onchange={(event) => onsettings({ ...settings, gradientMidpointEnabled: event.currentTarget.checked })} />
+          Средняя точка
+        </label>
+        {#if settings.gradientMidpointEnabled}
+          <label>Цвет средней точки
+            <input type="color" aria-label="Цвет средней точки градиента" value={rgbaToHex(settings.gradientMidpoint)}
+              oninput={(event) => {
+                const color = hexToRgba(event.currentTarget.value);
+                if (color) onsettings({ ...settings, gradientMidpoint: color });
+              }} />
+          </label>
+          <label>Позиция {settings.gradientMidpointPosition}%
+            <input type="range" min="10" max="90" value={settings.gradientMidpointPosition}
+              aria-label="Позиция средней точки градиента"
+              oninput={(event) => onsettings({ ...settings, gradientMidpointPosition: Number(event.currentTarget.value) })} />
+          </label>
+        {/if}
+        <span class="note">От основного цвета к дополнительному.</span>
+      {/if}
+      {#if activeToolId === 'dither'}
+        <label>Паттерн
+          <select aria-label="Паттерн дизеринга" value={settings.ditherPattern}
+            onchange={(event) => onsettings({ ...settings, ditherPattern: event.currentTarget.value as DrawingSettings['ditherPattern'] })}>
+            <option value="checkerboard">Шахматный</option><option value="bayer2">Bayer 2×2</option>
+            <option value="bayer4">Bayer 4×4</option><option value="bayer8">Bayer 8×8</option>
+            <option value="diagonal">Диагональный</option><option value="custom">Пользовательский</option>
+          </select>
+        </label>
+        <label>Плотность {Math.round(settings.ditherDensity * 100)}%
+          <input type="range" min="0" max="100" value={settings.ditherDensity * 100}
+            aria-label="Плотность дизеринга"
+            oninput={(event) => onsettings({ ...settings, ditherDensity: Number(event.currentTarget.value) / 100 })} />
+        </label>
+        <label>Масштаб {settings.ditherScale}
+          <input type="range" min="1" max="8" value={settings.ditherScale}
+            aria-label="Масштаб дизеринга"
+            oninput={(event) => onsettings({ ...settings, ditherScale: Number(event.currentTarget.value) })} />
+        </label>
+        <label>Угол
+          <select aria-label="Угол дизеринга" value={settings.ditherAngle}
+            onchange={(event) => onsettings({ ...settings, ditherAngle: Number(event.currentTarget.value) as DrawingSettings['ditherAngle'] })}>
+            <option value="0">0°</option><option value="45">45°</option>
+            <option value="90">90°</option><option value="135">135°</option>
+          </select>
+        </label>
+        {#if settings.ditherPattern === 'custom'}
+          <label>Своя маска (строки через /)
+            <input aria-label="Маска пользовательского дизеринга" value={settings.ditherCustomPattern}
+              oninput={(event) => {
+                const input = event.currentTarget;
+                try {
+                  parseCustomDitherPattern(input.value);
+                  input.setCustomValidity('');
+                  onsettings({ ...settings, ditherCustomPattern: input.value });
+                } catch (error) {
+                  input.setCustomValidity(error instanceof Error ? error.message : String(error));
+                }
+              }} />
+          </label>
+        {/if}
+      {/if}
+    </div>
+  </details>
 </aside>
 
 <style>
@@ -163,10 +378,24 @@
     flex-direction: column;
     align-items: center;
     gap: 10px;
-    width: 60px;
+    width: var(--dock-width, 60px);
+    height: 100%;
+    min-height: 0;
     padding: 12px 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
     background: var(--panel);
     border-right: 1px solid var(--border);
+  }
+
+  .panel:has(.options[open]),
+  .panel:has(.brush-size[open]) {
+    overflow: visible;
+  }
+
+  .panel > * {
+    flex-shrink: 0;
   }
 
   .section {
@@ -184,6 +413,97 @@
   .slot {
     position: relative;
     display: flex;
+  }
+
+  .brush-size {
+    position: absolute;
+    z-index: 3;
+    right: -3px;
+    bottom: -3px;
+  }
+
+  .brush-size > summary {
+    display: grid;
+    width: 18px;
+    height: 16px;
+    place-items: center;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--panel-2);
+    color: var(--text-dim);
+    font-size: 9px;
+    font-weight: 700;
+    list-style: none;
+    cursor: pointer;
+  }
+
+  .brush-size > summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .brush-size-panel {
+    position: absolute;
+    top: 0;
+    left: calc(100% + 8px);
+    z-index: 80;
+    width: 196px;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--panel);
+    box-shadow: var(--shadow-md);
+  }
+
+  .brush-size-panel label {
+    display: grid;
+    gap: 6px;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+
+  .brush-size-panel input {
+    width: 100%;
+    accent-color: var(--accent);
+  }
+
+  .shape-menu {
+    position: relative;
+    z-index: 1;
+  }
+
+  .shape-menu.open {
+    z-index: 70;
+  }
+
+  .shape-folder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+  }
+
+  .shape-chevron {
+    width: 7px;
+    height: 11px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .shape-menu-panel {
+    position: absolute;
+    top: 0;
+    left: calc(100% + 6px);
+    display: grid;
+    grid-template-columns: repeat(5, 40px);
+    gap: 4px;
+    padding: 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--panel);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
   }
 
   .tool {
@@ -230,11 +550,10 @@
   .tool.active {
     background: var(--accent-soft);
     border-color: var(--accent);
-    color: var(--accent-contrast);
+    color: #fff;
   }
 
-  .tool:focus-visible,
-  .size:focus-visible {
+  .tool:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 1px;
   }
@@ -243,6 +562,11 @@
     .tip {
       display: none;
     }
+
+    .shape-menu-panel {
+      top: calc(100% + 6px);
+      left: 0;
+    }
   }
 
   @media (max-width: 859px) {
@@ -250,8 +574,10 @@
       flex-direction: row;
       justify-content: flex-start;
       width: auto;
+      height: auto;
       padding: 6px 12px;
       overflow-x: auto;
+      overflow-y: hidden;
       border-right: 0;
       border-bottom: 1px solid var(--border);
     }
@@ -270,68 +596,83 @@
     }
   }
 
-  .size {
+  .options {
+    position: relative;
+    z-index: 25;
+  }
+
+  .options[open] {
+    z-index: 80;
+  }
+
+  .options > summary {
     display: grid;
     place-items: center;
-    grid-template-columns: 16px auto;
-    gap: 6px;
-    min-width: 46px;
-    min-height: 34px;
-    padding: 4px 7px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--panel-2);
-    color: var(--text);
-    font: inherit;
-    font-size: 12px;
-    cursor: pointer;
-  }
-
-  .size:hover {
-    border-color: #3b3f50;
-  }
-
-  .size.active {
-    border-color: var(--accent);
-    background: var(--accent-soft);
-  }
-
-  .dot {
-    display: block;
-    justify-self: center;
-    max-width: 14px;
-    max-height: 14px;
-    background: var(--text);
-    border-radius: 1px;
-  }
-
-  .brush-popover {
-    position: absolute;
-    top: 50%;
-    left: calc(100% + 9px);
-    z-index: 60;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    min-width: 190px;
-    padding: 10px;
+    width: 36px;
+    height: 30px;
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    background: var(--panel-raised);
-    box-shadow: var(--shadow-md);
-    transform: translateY(-50%);
+    background: var(--panel-2);
+    color: var(--text);
+    cursor: pointer;
+    list-style: none;
   }
 
-  .brush-title {
+  .options > summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .options-panel {
+    position: absolute;
+    top: 0;
+    left: calc(100% + 8px);
+    display: grid;
+    gap: 10px;
+    width: 230px;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--panel);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  }
+
+  .options-panel label {
+    display: grid;
+    gap: 4px;
     color: var(--text-dim);
     font-size: 12px;
-    font-weight: 600;
-    white-space: nowrap;
   }
 
-  .brush-options {
+  .options-panel select {
+    min-height: 30px;
+    padding: 3px 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg);
+    color: var(--text);
+  }
+
+  .options-panel input[type='range'] {
+    width: 100%;
+    accent-color: var(--accent);
+  }
+
+  .options-panel .check {
     display: flex;
-    gap: 5px;
+    align-items: center;
+    color: var(--text);
+  }
+
+  @media (max-width: 859px) {
+    .options-panel {
+      top: calc(100% + 6px);
+      left: 0;
+    }
+
+    .brush-size-panel {
+      top: calc(100% + 6px);
+      left: 0;
+    }
   }
 
   .tip {
@@ -346,8 +687,8 @@
     padding: 7px 10px;
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    background: var(--panel-raised);
-    box-shadow: var(--shadow-md);
+    background: #232634;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
     white-space: nowrap;
     pointer-events: none;
     opacity: 0;
@@ -369,19 +710,5 @@
     grid-column: 1 / -1;
     color: var(--text-dim);
     font-size: 12px;
-  }
-
-  @media (max-width: 859px) {
-    .brush-popover {
-      top: calc(100% + 8px);
-      left: 0;
-      transform: none;
-    }
-  }
-
-  @media (pointer: coarse) {
-    .size {
-      min-height: 40px;
-    }
   }
 </style>

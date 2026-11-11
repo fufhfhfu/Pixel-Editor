@@ -19,12 +19,13 @@ test('runs the editor in Electron and imports project notes', async () => {
     const page = await electronApp.firstWindow();
     await expect(page.getByRole('heading', { name: 'Pixel Editor' })).toBeVisible();
     await expect.poll(() =>
-      page.evaluate(() => typeof window.pixelEditorDesktop?.onCommand),
+      page.evaluate(() => typeof window.pixelEditorDesktop?.saveFile),
     ).toBe('function');
 
     const welcomeButton = page.getByRole('button', { name: 'Начать работу' });
     if (await welcomeButton.count()) await welcomeButton.click();
-    await page.getByRole('button', { name: 'Заметки проекта' }).click();
+    await page.getByRole('button', { name: 'Файл', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Заметки проекта…' }).click();
     await page.locator('input[accept*=".markdown"]').setInputFiles({
       name: 'project-notes.md',
       mimeType: 'text/markdown',

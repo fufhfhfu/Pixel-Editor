@@ -15,10 +15,13 @@ export interface ViewState {
 export interface PixelPos {
   x: number;
   y: number;
+  pressure?: number;
 }
 
 /** Допустимые уровни зума (шаг колеса мыши переключает соседние). */
-export const ZOOM_LEVELS: readonly number[] = [0.25, 0.5, 1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 32, 48, 64];
+export const ZOOM_LEVELS: readonly number[] = [
+  0.25, 0.5, 1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 32, 48, 64, 96, 128, 192, 256,
+];
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));

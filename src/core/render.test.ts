@@ -82,7 +82,7 @@ describe('PixelRenderer', () => {
     globalWithImageData.ImageData = class {
       data: Uint8ClampedArray;
       constructor(data: Uint8ClampedArray, public width: number, public height: number) {
-        this.data = data.slice(); // среда скопировала пиксели
+        this.data = data.slice(); // реализация с копированием
       }
     };
     const { canvas, calls } = makeCanvas();

@@ -3,6 +3,7 @@ import { rgbaToCss, rgbaToHex, hexToRgba } from './color';
 import {
   DEFAULT_PALETTE_ID,
   MAX_RECENT_COLORS,
+  MAX_CUSTOM_PALETTES,
   PALETTES,
   colorsEqual,
   constrainColor,
@@ -11,9 +12,25 @@ import {
   nearestPaletteColor,
   paletteIndexOf,
   pushRecentColor,
+  parseCustomPalettes,
 } from './palette';
 
 describe('палитры', () => {
+  it('проверяет и принимает пользовательские палитры проекта', () => {
+    const palette = {
+      id: 'custom-test',
+      name: 'Тестовая',
+      colors: [{ r: 10, g: 20, b: 30, a: 255 }],
+    };
+    expect(parseCustomPalettes([palette])).toMatchObject([palette]);
+    expect(() => parseCustomPalettes([{ ...palette, id: 'pico8' }])).toThrow();
+    expect(() => parseCustomPalettes([{ ...palette, colors: [] }])).toThrow();
+    expect(() => parseCustomPalettes(Array.from({ length: MAX_CUSTOM_PALETTES + 1 }, (_, index) => ({
+      ...palette,
+      id: `custom-${index}`,
+    })))).toThrow(/не больше/i);
+  });
+
   it('размеры пресетов и отсутствие дубликатов', () => {
     const counts = Object.fromEntries(PALETTES.map((p) => [p.id, p.colors.length]));
     expect(counts).toEqual({

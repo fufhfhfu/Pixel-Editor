@@ -1,5 +1,5 @@
 import type { PixelBuffer, RGBA } from '../state';
-import type { Tool, ToolContext, ToolMeta } from './types';
+import type { BrushShape, Tool, ToolContext, ToolMeta } from './types';
 
 export type ShapeDrawer = (
   buffer: PixelBuffer,
@@ -9,6 +9,9 @@ export type ShapeDrawer = (
   y1: number,
   size: number,
   color: RGBA,
+  shape?: BrushShape,
+  opacity?: number,
+  context?: ToolContext,
 ) => void;
 
 /**
@@ -46,12 +49,26 @@ export function createShapeTool(meta: ToolMeta, draw: ShapeDrawer): Tool {
     restorePreview(ctx.buffer);
     const previewPixels = new Map<number, number>();
     currentPreviewPixels = previewPixels;
-    draw(ctx.buffer, startX, startY, x, y, ctx.brushSize, ctx.color);
+    const pressure = ctx.pressure ?? 1;
+    const size = Math.max(1, Math.round(ctx.brushSize * Math.min(1, Math.max(0, pressure))));
+    let endX = x;
+    let endY = y;
+    const angleSnap = ctx.settings?.lineAngleSnap ?? 0;
+    if (meta.id === 'line' && angleSnap > 0) {
+      const dx = x - startX;
+      const dy = y - startY;
+      const distance = Math.hypot(dx, dy);
+      const step = (angleSnap * Math.PI) / 180;
+      const angle = Math.round(Math.atan2(dy, dx) / step) * step;
+      endX = Math.round(startX + Math.cos(angle) * distance);
+      endY = Math.round(startY + Math.sin(angle) * distance);
+    }
+    draw(ctx.buffer, startX, startY, endX, endY, size, ctx.color, ctx.brushShape, ctx.opacity, ctx);
     currentPreviewPixels = null;
     lastPreviewPixels = previewPixels;
     lastX = x;
     lastY = y;
-    lastSize = ctx.brushSize;
+    lastSize = Math.max(1, Math.round(ctx.brushSize * Math.min(1, Math.max(0, ctx.pressure ?? 1))));
     markBox(ctx.buffer, x, y, ctx.brushSize);
     ctx.invalidate();
   }

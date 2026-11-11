@@ -11,12 +11,11 @@
     ontitle: (value: string) => void;
     onimport: (file: File) => void;
     onexport: (format: 'markdown' | 'text' | 'json') => void;
-    onpdf: () => void;
     status: string;
     onclose: () => void;
   }
 
-  let { value, title, createdAt, updatedAt, returnFocusTo, oninput, ontitle, onimport, onexport, onpdf, status, onclose }: Props = $props();
+  let { value, title, createdAt, updatedAt, returnFocusTo, oninput, ontitle, onimport, onexport, status, onclose }: Props = $props();
   let closeButton: HTMLButtonElement | undefined = $state();
   let editor: HTMLTextAreaElement | undefined = $state();
   let format = $state<'markdown' | 'text' | 'json'>('markdown');
@@ -84,7 +83,6 @@
           <option value="json">JSON (.json)</option>
         </select>
         <button type="button" class="btn primary" onclick={() => onexport(format)} disabled={!value.trim()}>Экспортировать</button>
-        <button type="button" class="btn" onclick={onpdf} disabled={!value.trim()}>PDF</button>
       </div>
     </footer>
     <input bind:this={fileInput} class="hidden" type="file" accept=".txt,.md,.markdown,.json,text/plain,text/markdown,application/json" onchange={(event) => {

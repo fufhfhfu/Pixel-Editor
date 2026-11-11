@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { MAX_BRUSH_SIZE, MIN_BRUSH_SIZE, type Tool, type ToolId } from '../core/tools';
 
   interface Props {
@@ -13,8 +14,42 @@
   let { tools, activeToolId, brushSize, onselect, onbrush, onaddboard }: Props = $props();
 
   const brushSizes = Array.from({ length: MAX_BRUSH_SIZE - MIN_BRUSH_SIZE + 1 }, (_, i) => MIN_BRUSH_SIZE + i);
-  const brushEnabled = $derived(tools.find((t) => t.id === activeToolId)?.usesBrush ?? false);
+  let openBrushToolId = $state<ToolId | null>(null);
+  let previousActiveToolId = untrack(() => activeToolId);
+
+  $effect(() => {
+    if (activeToolId === previousActiveToolId) return;
+    previousActiveToolId = activeToolId;
+    openBrushToolId = tools.find((tool) => tool.id === activeToolId)?.usesBrush ? activeToolId : null;
+  });
+
+  function selectTool(tool: Tool): void {
+    const alreadySelected = tool.id === activeToolId;
+    onselect(tool.id);
+    if (!tool.usesBrush) {
+      openBrushToolId = null;
+      return;
+    }
+    openBrushToolId = alreadySelected && openBrushToolId === tool.id ? null : tool.id;
+  }
+
+  function closeBrushPanelOnOutsidePointer(event: PointerEvent): void {
+    if (!(event.target instanceof Node) || !panelElement?.contains(event.target)) {
+      openBrushToolId = null;
+    }
+  }
+
+  function closeBrushPanelOnEscape(event: KeyboardEvent): void {
+    if (event.key === 'Escape' && openBrushToolId) {
+      openBrushToolId = null;
+    }
+  }
+
+  let panelElement: HTMLElement | undefined = $state();
 </script>
+
+<svelte:document onpointerdown={closeBrushPanelOnOutsidePointer} />
+<svelte:window onkeydown={closeBrushPanelOnEscape} />
 
 {#snippet tip(title: string, key: string, hint?: string)}
   <span class="tip" role="tooltip">
@@ -61,7 +96,7 @@
   </svg>
 {/snippet}
 
-<aside class="panel" aria-label="Инструменты">
+<aside class="panel" aria-label="Инструменты" bind:this={panelElement}>
   <button
     type="button"
     class="add-board"
@@ -82,32 +117,39 @@
           aria-pressed={tool.id === activeToolId}
           aria-label="{tool.label} ({tool.hotkeyLabel})"
           aria-keyshortcuts={tool.hotkeyLabel}
-          onclick={() => onselect(tool.id)}
+          aria-expanded={tool.usesBrush ? openBrushToolId === tool.id : undefined}
+          aria-controls={tool.usesBrush ? `brush-options-${tool.id}` : undefined}
+          onclick={() => selectTool(tool)}
         >
           {@render icon(tool.id)}
         </button>
         {@render tip(tool.label, tool.hotkeyLabel, tool.hint)}
-      </div>
-    {/each}
-  </div>
-
-  <div class="rule"></div>
-
-  <div class="section brush" class:dim={!brushEnabled}>
-    {#each brushSizes as size (size)}
-      <div class="slot">
-        <button
-          type="button"
-          class="size"
-          class:active={size === brushSize}
-          aria-pressed={size === brushSize}
-          aria-label="Размер кисти {size} px ({size})"
-          aria-keyshortcuts={String(size)}
-          onclick={() => onbrush(size)}
-        >
-          <span class="dot" style:width="{size * 3 + 1}px" style:height="{size * 3 + 1}px"></span>
-        </button>
-        {@render tip(`Кисть ${size} px`, String(size), brushEnabled ? undefined : 'Не влияет на текущий инструмент')}
+        {#if tool.usesBrush && openBrushToolId === tool.id}
+          <div
+            id="brush-options-{tool.id}"
+            class="brush-popover"
+            role="group"
+            aria-label="Толщина инструмента «{tool.label}»"
+          >
+            <span class="brush-title">Толщина · {tool.label}</span>
+            <div class="brush-options">
+              {#each brushSizes as size (size)}
+                <button
+                  type="button"
+                  class="size"
+                  class:active={size === brushSize}
+                  aria-pressed={size === brushSize}
+                  aria-label="Толщина {size} px"
+                  aria-keyshortcuts={String(size)}
+                  onclick={() => onbrush(size)}
+                >
+                  <span class="dot" style:width="{size * 3 + 1}px" style:height="{size * 3 + 1}px"></span>
+                  <span>{size}</span>
+                </button>
+              {/each}
+            </div>
+          </div>
+        {/if}
       </div>
     {/each}
   </div>
@@ -131,17 +173,6 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
-  }
-
-  .brush {
-    display: grid;
-    grid-template-columns: repeat(2, 20px);
-    gap: 4px;
-    transition: opacity 0.12s;
-  }
-
-  .brush.dim {
-    opacity: 0.4;
   }
 
   .rule {
@@ -229,12 +260,6 @@
       flex-direction: row;
     }
 
-    .brush {
-      display: flex;
-      flex-direction: row;
-      gap: 4px;
-    }
-
     .rule {
       width: 1px;
       height: 28px;
@@ -245,26 +270,20 @@
     }
   }
 
-  @media (pointer: coarse) {
-    .size {
-      width: 32px;
-      height: 32px;
-    }
-
-    .brush {
-      grid-template-columns: repeat(2, 32px);
-    }
-  }
-
   .size {
     display: grid;
     place-items: center;
-    width: 20px;
-    height: 20px;
-    padding: 0;
+    grid-template-columns: 16px auto;
+    gap: 6px;
+    min-width: 46px;
+    min-height: 34px;
+    padding: 4px 7px;
     border: 1px solid var(--border);
-    border-radius: 5px;
+    border-radius: 6px;
     background: var(--panel-2);
+    color: var(--text);
+    font: inherit;
+    font-size: 12px;
     cursor: pointer;
   }
 
@@ -279,10 +298,40 @@
 
   .dot {
     display: block;
+    justify-self: center;
     max-width: 14px;
     max-height: 14px;
     background: var(--text);
     border-radius: 1px;
+  }
+
+  .brush-popover {
+    position: absolute;
+    top: 50%;
+    left: calc(100% + 9px);
+    z-index: 60;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 190px;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--panel-raised);
+    box-shadow: var(--shadow-md);
+    transform: translateY(-50%);
+  }
+
+  .brush-title {
+    color: var(--text-dim);
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .brush-options {
+    display: flex;
+    gap: 5px;
   }
 
   .tip {
@@ -320,5 +369,19 @@
     grid-column: 1 / -1;
     color: var(--text-dim);
     font-size: 12px;
+  }
+
+  @media (max-width: 859px) {
+    .brush-popover {
+      top: calc(100% + 8px);
+      left: 0;
+      transform: none;
+    }
+  }
+
+  @media (pointer: coarse) {
+    .size {
+      min-height: 40px;
+    }
   }
 </style>

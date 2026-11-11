@@ -170,6 +170,8 @@ describe('приложение целиком (jsdom)', () => {
     expect(viewport()).toBeTruthy();
     expect(document.querySelector('[aria-label="Инструменты"]')).toBeTruthy();
     expect(document.querySelector('[aria-label="Палитра"]')).toBeTruthy();
+    expect(document.querySelector('.brush-popover')).toBeNull();
+    expect(document.querySelector('.brush')).toBeNull();
     expect(document.querySelector('.add-board')?.textContent?.trim()).toBe('+');
     expect(document.body.textContent).toContain('Карандаш');
     expect(document.body.textContent).toContain('32×32');
@@ -178,6 +180,31 @@ describe('приложение целиком (jsdom)', () => {
     expect(Array.from((document.querySelector('#canvas-preset') as HTMLSelectElement).options).map((option) => option.value))
       .toEqual(['8x8', '16x16', '32x32', '64x64', '128x128', '256x256', '512x512', '1024x1024']);
     expect((document.querySelector('.board') as HTMLElement).style.backgroundColor).toBe('rgb(255, 255, 255)');
+  });
+
+  it('показывает настройки толщины в выдвижных панелях инструментов', async () => {
+    const pencil = document.querySelector('button[aria-label="Карандаш (P)"]') as HTMLButtonElement;
+    pencil.click();
+    await tick();
+    expect(pencil.getAttribute('aria-expanded')).toBe('true');
+    expect(document.querySelector('[aria-label="Толщина инструмента «Карандаш»"]')).toBeTruthy();
+
+    (document.querySelector('button[aria-label="Толщина 3 px"]') as HTMLButtonElement).click();
+    await tick();
+    expect(document.querySelector('.statusbar')?.textContent).toContain('Карандаш, 3 px');
+    expect(document.querySelector('[aria-label="Толщина 3 px"]')?.getAttribute('aria-pressed')).toBe('true');
+
+    const eraser = document.querySelector('button[aria-label="Ластик (E)"]') as HTMLButtonElement;
+    eraser.click();
+    await tick();
+    expect(pencil.getAttribute('aria-expanded')).toBe('false');
+    expect(eraser.getAttribute('aria-expanded')).toBe('true');
+    expect(document.querySelector('[aria-label="Толщина инструмента «Ластик»"]')).toBeTruthy();
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await tick();
+    expect(document.querySelector('[aria-label="Толщина инструмента «Ластик»"]')).toBeNull();
+    expect(document.querySelector('.statusbar')?.textContent).toContain('Ластик, 3 px');
   });
 
   it('сохраняет точку под курсором при зуме колёсиком без принудительного смещения', async () => {

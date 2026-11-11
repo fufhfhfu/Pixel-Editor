@@ -33,7 +33,11 @@
     type ExportFormat,
     type ExportScale,
   } from './core/export';
-  import { decodeRasterImage, MAX_IMAGE_FILE_BYTES, rasterImageToProject } from './core/imageImport';
+  import {
+    decodeRasterImage,
+    MAX_IMAGE_FILE_BYTES,
+    type DecodedRasterImage,
+  } from './core/imageImport';
   import { MAX_NOTES_IMPORT_BYTES, parseNotesImport } from './core/notesImport';
   import {
     MAX_PROJECT_REFERENCES,
@@ -272,7 +276,7 @@
   type PendingAction =
     | { kind: 'resize'; width: number; height: number }
     | { kind: 'import'; project: ProjectData; fileName: string }
-    | { kind: 'image'; project: ProjectData; fileName: string }
+    | { kind: 'image'; image: DecodedRasterImage; fileName: string; boardId: string }
     | { kind: 'clear' };
 
   interface Notice {
@@ -1421,7 +1425,7 @@
   }
 
   function findBoardPosition(width: number, height: number, origin: Artboard): { x: number; y: number } | null {
-    const gap = 8;
+    const gap = 32;
     for (let radius = 1; radius <= boards.length + 1; radius++) {
       const candidates: Array<{ x: number; y: number; distance: number }> = [];
       for (let row = -radius; row <= radius; row++) {
@@ -1453,13 +1457,14 @@
           Math.abs(candidate.x) > MAX_PROJECT_CANVAS_COORDINATE ||
           Math.abs(candidate.y) > MAX_PROJECT_CANVAS_COORDINATE
         ) continue;
-        const overlaps = boards.some((board) =>
-          candidate.x < board.x + board.buffer.width &&
-          candidate.x + width > board.x &&
-          candidate.y < board.y + board.buffer.height &&
-          candidate.y + height > board.y,
-        );
-        if (!overlaps) return { x: candidate.x, y: candidate.y };
+        const tooClose = boards.some((board) => {
+          const separatedX = candidate.x + width + gap <= board.x ||
+            board.x + board.buffer.width + gap <= candidate.x;
+          const separatedY = candidate.y + height + gap <= board.y ||
+            board.y + board.buffer.height + gap <= candidate.y;
+          return !separatedX && !separatedY;
+        });
+        if (!tooClose) return { x: candidate.x, y: candidate.y };
       }
     }
     return null;
@@ -2768,9 +2773,20 @@
     }
 
     try {
-      const image = await decodeRasterImage(file);
-      const project = rasterImageToProject(image, { paletteId, freeColor, primary, secondary, recent, customPalettes });
-      pending = { kind: 'image', project, fileName: file.name };
+      const targetBoard = boards.find((board) => board.id === activeBoardId);
+      if (!targetBoard) throw new Error('Выбранный холст не найден.');
+      if (targetBoard.layers.length >= MAX_PROJECT_LAYERS) {
+        notify(`На выбранном холсте уже достигнут лимит слоёв (${MAX_PROJECT_LAYERS}).`, 'error');
+        return;
+      }
+      if (getTotalLayerPixels() + targetBoard.buffer.width * targetBoard.buffer.height > MAX_PROJECT_TOTAL_PIXELS) {
+        notify('Превышен лимит общего объёма пиксельных данных проекта.', 'error');
+        return;
+      }
+      const image = await decodeRasterImage(file, {
+        fitWithin: { width: targetBoard.buffer.width, height: targetBoard.buffer.height },
+      });
+      pending = { kind: 'image', image, fileName: file.name, boardId: targetBoard.id };
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Не удалось декодировать изображение.', 'error');
     }
@@ -2997,9 +3013,41 @@
       });
       cursor = null;
       scheduleAutosave();
+    } else if (action.kind === 'image') {
+      const board = boards.find((entry) => entry.id === action.boardId);
+      if (!board) {
+        notify('Выбранный холст больше не существует. Изображение не импортировано.', 'error');
+        return;
+      }
+      if (board.layers.length >= MAX_PROJECT_LAYERS) {
+        notify(`На выбранном холсте уже достигнут лимит слоёв (${MAX_PROJECT_LAYERS}).`, 'error');
+        return;
+      }
+      if (getTotalLayerPixels() + board.buffer.width * board.buffer.height > MAX_PROJECT_TOTAL_PIXELS) {
+        notify('Превышен лимит общего объёма пиксельных данных проекта.', 'error');
+        return;
+      }
+      if (action.image.width !== board.buffer.width || action.image.height !== board.buffer.height) {
+        notify('Размер выбранного холста изменился. Импортируйте изображение повторно.', 'error');
+        return;
+      }
+      const id = `${board.id}-photo-${Date.now().toString(36)}-${layerSequence++}`;
+      const photoName = action.fileName.replace(/\.[^.]+$/, '').trim().slice(0, 75) ||
+        `Изображение ${board.layers.length + 1}`;
+      const layer = createRasterLayer(
+        id,
+        `Фото ${photoName}`,
+        board.buffer.width,
+        board.buffer.height,
+        action.image.pixels,
+      );
+      histories.set(getHistoryKey(board.id, layer), new History());
+      commitLayerStack(board.id, [...board.layers, layer], layer.id);
+      if (activeBoardId === board.id) cursor = null;
+      notify('Фото импортировано отдельным слоем на выбранный холст.');
     } else {
       applyProject(action.project);
-      notify(action.kind === 'image' ? 'Изображение импортировано.' : 'Проект открыт.');
+      notify('Проект открыт.');
     }
   }
 
@@ -3026,9 +3074,10 @@
     }
 
     if (action.kind === 'image') {
+      const board = boards.find((entry) => entry.id === action.boardId);
       return {
         title: 'Импортировать изображение?',
-        message: `Изображение «${action.fileName}» будет преобразовано в пиксельное изображение ${action.project.width}×${action.project.height} и заменит текущий рисунок. Продолжить?`,
+        message: `Фото «${action.fileName}» будет вписано в выбранный холст ${board?.buffer.width ?? action.image.width}×${board?.buffer.height ?? action.image.height} с сохранением пропорций и добавлено отдельным слоем. Остальные холсты не изменятся.`,
         confirmText: 'Импортировать',
       };
     }

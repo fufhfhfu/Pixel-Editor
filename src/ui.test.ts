@@ -790,7 +790,7 @@ describe('приложение целиком (jsdom)', () => {
 
     const secondBoardPoint = screenOf(5, 5, 1);
     const zoom = parseFloat(boards[1].style.width) / 32;
-    expect(boards[1].style.left).toBe(`${40 * zoom}px`);
+    expect(boards[1].style.left).toBe(`${64 * zoom}px`);
     const originalPositions = boards.map((board) => ({ left: board.style.left, top: board.style.top }));
     const start = secondBoardPoint;
     pointer('pointerdown', start, { button: 2, ctrlKey: true });
@@ -800,7 +800,7 @@ describe('приложение целиком (jsdom)', () => {
     await tick();
     expect(boards[0]!.style.left).toBe(originalPositions[0]!.left);
     expect(boards[0]!.style.top).toBe(originalPositions[0]!.top);
-    expect(boards[1]!.style.left).toBe(`${45 * zoom}px`);
+    expect(boards[1]!.style.left).toBe(`${69 * zoom}px`);
     expect(boards[1]!.style.top).toBe(`${3 * zoom}px`);
 
     key('KeyZ', { ctrlKey: true });
@@ -827,7 +827,7 @@ describe('приложение целиком (jsdom)', () => {
 
     const movedBoard = document.querySelectorAll<HTMLElement>('.board')[1];
     expect(movedBoard.classList.contains('selected')).toBe(true);
-    expect(movedBoard.style.left).toBe(`${45 * zoom}px`);
+    expect(movedBoard.style.left).toBe(`${69 * zoom}px`);
     expect(movedBoard.style.top).toBe(`${3 * zoom}px`);
     expect(boards[0]!.style.left).toBe(`${5 * zoom}px`);
     expect(boards[0]!.style.top).toBe(`${3 * zoom}px`);
@@ -844,8 +844,33 @@ describe('приложение целиком (jsdom)', () => {
     expect(boards[1]!.style.top).toBe(originalPositions[1]!.top);
     key('KeyY', { ctrlKey: true });
     await tick();
-    expect(document.querySelectorAll<HTMLElement>('.board')[1].style.left).toBe(`${45 * zoom}px`);
+    expect(document.querySelectorAll<HTMLElement>('.board')[1].style.left).toBe(`${69 * zoom}px`);
 
+  });
+
+  it('places new canvases with a visible gap from every existing canvas', async () => {
+    for (let index = 0; index < 4; index++) {
+      (document.querySelector('.add-board') as HTMLButtonElement).click();
+      await frame();
+    }
+
+    const boards = [...document.querySelectorAll<HTMLElement>('.board')];
+    expect(boards).toHaveLength(5);
+    const zoom = parseFloat(boards[0]!.style.width) / 32;
+    const positions = boards.map((board) => ({
+      x: parseFloat(board.style.left) / zoom,
+      y: parseFloat(board.style.top) / zoom,
+    }));
+
+    for (let first = 0; first < positions.length; first++) {
+      for (let second = first + 1; second < positions.length; second++) {
+        const a = positions[first]!;
+        const b = positions[second]!;
+        const gapX = Math.max(0, a.x - (b.x + 32), b.x - (a.x + 32));
+        const gapY = Math.max(0, a.y - (b.y + 32), b.y - (a.y + 32));
+        expect(gapX >= 32 || gapY >= 32).toBe(true);
+      }
+    }
   });
 
   it('swaps board positions when a dropped board covers at least half the other board', async () => {
@@ -922,7 +947,7 @@ describe('приложение целиком (jsdom)', () => {
     const boards = [...document.querySelectorAll<HTMLElement>('.board')];
     const zoom = parseFloat(boards[1].style.width) / 32;
     const start = screenOf(5, 5, 1);
-    const nearAlignedEdge = { x: start.x - 7 * zoom, y: start.y };
+    const nearAlignedEdge = { x: start.x - 33 * zoom, y: start.y };
 
     pointer('pointerdown', start, { button: 2, ctrlKey: true });
     pointer('pointermove', nearAlignedEdge, { button: -1, ctrlKey: true });
@@ -980,11 +1005,15 @@ describe('приложение целиком (jsdom)', () => {
     });
   });
 
-  it('импортирует BMP с исходным размером и подтверждает замену проекта', async () => {
+  it('импортирует фото отдельным слоем только в выбранный холст', async () => {
+    (document.querySelector('.add-board') as HTMLButtonElement).click();
+    await frame();
+    expect(document.querySelectorAll('.board')).toHaveLength(2);
+
     const close = vi.fn();
     vi.stubGlobal(
       'createImageBitmap',
-      vi.fn(async () => ({ width: 1024, height: 1024, close }) as unknown as ImageBitmap),
+      vi.fn(async () => ({ width: 128, height: 64, close }) as unknown as ImageBitmap),
     );
     const input = document.querySelector('input[type="file"]') as HTMLInputElement;
     Object.defineProperty(input, 'files', {
@@ -992,9 +1021,9 @@ describe('приложение целиком (jsdom)', () => {
       value: [new File(['bmp'], 'pixel-art.bmp', { type: 'image/bmp' })],
     });
     input.dispatchEvent(new Event('change', { bubbles: true }));
-    await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')?.textContent).toContain('1024×1024'));
+    await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')?.textContent).toContain('32×32'));
 
-    expect(rasterDrawCalls).toContainEqual([0, 0, 1024, 1024]);
+    expect(rasterDrawCalls).toContainEqual([0, 8, 32, 16]);
     expect(close).toHaveBeenCalledOnce();
 
     ([...document.querySelectorAll('[role="dialog"] button')].find(
@@ -1002,9 +1031,22 @@ describe('приложение целиком (jsdom)', () => {
     ) as HTMLButtonElement).click();
     await tick();
     await frame();
-    expect(document.body.textContent).toContain('1024×1024');
-    expect(canvasData).toHaveLength(1024 * 1024 * 4);
-    expect(canvasData![3]).toBe(255);
+    expect(document.querySelectorAll('.board')).toHaveLength(2);
+    expect(document.querySelectorAll('.board.selected')).toHaveLength(1);
+    expect((document.querySelector('.board.selected canvas') as HTMLCanvasElement).width).toBe(32);
+
+    (Array.from(document.querySelectorAll<HTMLButtonElement>('.panel-tabs button'))
+      .find((button) => button.textContent?.trim() === 'Layers') as HTMLButtonElement).click();
+    await tick();
+    expect(document.body.textContent).toContain('Фото pixel-art');
+
+    (document.querySelector('button[aria-label="Отменить"]') as HTMLButtonElement).click();
+    await tick();
+    expect(document.querySelectorAll('.board')).toHaveLength(2);
+    expect(document.body.textContent).not.toContain('Фото pixel-art');
+    (document.querySelector('button[aria-label="Повторить"]') as HTMLButtonElement).click();
+    await tick();
+    expect(document.body.textContent).toContain('Фото pixel-art');
   });
 
   it('экспортирует WebP выбранного размера и использует правильный MIME-тип', async () => {

@@ -42,6 +42,32 @@ describe('импорт растровых изображений', () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
+  it('вписывает изображение в выбранный холст по центру без обрезки и искажений', async () => {
+    const drawImage = vi.fn();
+    const close = vi.fn();
+    const context = {
+      imageSmoothingEnabled: false,
+      imageSmoothingQuality: 'low',
+      clearRect: vi.fn(),
+      drawImage,
+      getImageData: vi.fn(() => ({ data: new Uint8ClampedArray(32 * 32 * 4) })),
+    };
+    vi.stubGlobal('createImageBitmap', vi.fn(async () => ({ width: 128, height: 64, close })));
+    vi.stubGlobal(
+      'document',
+      { createElement: vi.fn(() => ({ getContext: vi.fn(() => context), width: 0, height: 0 })) },
+    );
+
+    const image = await decodeRasterImage(new File(['image'], 'photo.jpg'), {
+      fitWithin: { width: 32, height: 32 },
+    });
+
+    expect(image).toMatchObject({ width: 32, height: 32 });
+    expect(context.clearRect).toHaveBeenCalledWith(0, 0, 32, 32);
+    expect(drawImage).toHaveBeenCalledWith(expect.anything(), 0, 8, 32, 16);
+    expect(close).toHaveBeenCalledOnce();
+  });
+
   it('проверяет дополнительный лимит пикселей до выделения canvas и закрывает bitmap', async () => {
     const close = vi.fn();
     const getImageData = vi.fn();

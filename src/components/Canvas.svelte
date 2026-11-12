@@ -26,7 +26,6 @@
     centerView,
     ensurePixelVisible,
     fitView,
-    nearestZoomLevel,
     screenToPixel,
     zoomAt,
     type PixelPos,
@@ -34,6 +33,20 @@
   } from '../core/viewport';
   import type { GridMode } from '../core/preferences';
   import { referenceAtPoint, sampleReferenceColor, type ReferenceImage } from '../core/reference';
+  import {
+    getSceneBounds as getCanvasSceneBounds,
+    guideBox as getAlignmentGuideBox,
+    guideLine as getAlignmentGuideLine,
+    snapBoardPosition as snapCanvasBoardPosition,
+    type AlignmentGuide,
+    type CanvasBoardGeometry,
+  } from '../core/canvasNavigation';
+  import {
+    beginPinchGesture,
+    updatePinchGesture,
+    type PinchGesture,
+    type TouchPoint,
+  } from '../core/canvasGestures';
 
   interface Board {
     id: string;
@@ -282,13 +295,6 @@
     void currentActiveBoard;
   });
 
-  interface AlignmentGuide {
-    x1: number;
-    y1: number;
-    x2: number;
-    y2: number;
-  }
-
   interface Props {
     buffer: PixelBuffer;
     boards: readonly Board[];
@@ -413,7 +419,6 @@
 
   /** Ниже этого зума линии сетки слишком частые и не рисуются. */
   const GRID_MIN_ZOOM = 4;
-  const ALIGNMENT_SNAP_DISTANCE = 8;
   /** Накопленный deltaY колеса, соответствующий одному шагу зума. */
   const WHEEL_STEP = 100;
   const MAX_WHEEL_STEPS = 3;
@@ -425,16 +430,6 @@
     ArrowUp: [0, -1],
     ArrowDown: [0, 1],
   };
-
-  interface Gesture {
-    ids: [number, number];
-    startDistance: number;
-    startZoom: number;
-    startMidX: number;
-    startMidY: number;
-    startOffsetX: number;
-    startOffsetY: number;
-  }
 
   let viewportEl: HTMLDivElement | undefined = $state();
   let tiledPreviewCanvas: HTMLCanvasElement | undefined = $state();
@@ -497,8 +492,8 @@
   let polygonPoints = $state<PixelPos[]>([]);
   let panStart = { x: 0, y: 0, offsetX: 0, offsetY: 0 };
 
-  const touches = new Map<number, { x: number; y: number }>();
-  let gesture: Gesture | null = null;
+  const touches = new Map<number, TouchPoint>();
+  let gesture: PinchGesture | null = null;
 
   $effect(() => {
     if (selectionMode !== 'polygon') polygonPoints = [];
@@ -682,126 +677,22 @@
     return `${buffer.width}x${buffer.height}`;
   }
 
-  function snapBoardPosition(board: Board, x: number, y: number, ignoredBoardIds: ReadonlySet<string> = new Set([board.id])): {
-    x: number;
-    y: number;
-    guides: AlignmentGuide[];
-  } {
-    let bestX: { coordinate: number; edge: 'left' | 'right'; board: Board; distance: number } | null = null;
-    let bestY: { coordinate: number; edge: 'top' | 'bottom'; board: Board; distance: number } | null = null;
-    const threshold = Math.max(1, ALIGNMENT_SNAP_DISTANCE / view.zoom);
-
-    for (const other of boards) {
-      if (ignoredBoardIds.has(other.id)) continue;
-      for (const movingEdge of ['left', 'right'] as const) {
-        const movingCoordinate = x + (movingEdge === 'right' ? board.buffer.width : 0);
-        for (const stationaryEdge of ['left', 'right'] as const) {
-          const coordinate = other.x + (stationaryEdge === 'right' ? other.buffer.width : 0);
-          const distance = Math.abs(coordinate - movingCoordinate);
-          if (distance <= threshold && (!bestX || distance < bestX.distance)) {
-            bestX = { coordinate, edge: movingEdge, board: other, distance };
-          }
-        }
-      }
-      for (const movingEdge of ['top', 'bottom'] as const) {
-        const movingCoordinate = y + (movingEdge === 'bottom' ? board.buffer.height : 0);
-        for (const stationaryEdge of ['top', 'bottom'] as const) {
-          const coordinate = other.y + (stationaryEdge === 'bottom' ? other.buffer.height : 0);
-          const distance = Math.abs(coordinate - movingCoordinate);
-          if (distance <= threshold && (!bestY || distance < bestY.distance)) {
-            bestY = { coordinate, edge: movingEdge, board: other, distance };
-          }
-        }
-      }
-    }
-
-    let snappedX = bestX
-      ? bestX.coordinate - (bestX.edge === 'right' ? board.buffer.width : 0)
-      : x;
-    let snappedY = bestY
-      ? bestY.coordinate - (bestY.edge === 'bottom' ? board.buffer.height : 0)
-      : y;
-    if (snapToGrid) {
-      snappedX = Math.round(snappedX / gridSpacing) * gridSpacing;
-      snappedY = Math.round(snappedY / gridSpacing) * gridSpacing;
-    }
-    const guides: AlignmentGuide[] = [];
-
-    if (bestX) {
-      const movingY = bestX.edge === 'left' ? snappedY : snappedY + board.buffer.height;
-      const stationaryY = Math.abs(movingY - bestX.board.y) <=
-          Math.abs(movingY - (bestX.board.y + bestX.board.buffer.height))
-        ? bestX.board.y
-        : bestX.board.y + bestX.board.buffer.height;
-      guides.push({
-        x1: bestX.coordinate,
-        y1: movingY,
-        x2: bestX.coordinate,
-        y2: stationaryY,
-      });
-    }
-
-    if (bestY) {
-      const movingX = bestY.edge === 'top' ? snappedX : snappedX + board.buffer.width;
-      const stationaryX = Math.abs(movingX - bestY.board.x) <=
-          Math.abs(movingX - (bestY.board.x + bestY.board.buffer.width))
-        ? bestY.board.x
-        : bestY.board.x + bestY.board.buffer.width;
-      guides.push({
-        x1: movingX,
-        y1: bestY.coordinate,
-        x2: stationaryX,
-        y2: bestY.coordinate,
-      });
-    }
-
-    return { x: snappedX, y: snappedY, guides };
-  }
-
-  function guideBox(guide: AlignmentGuide): { left: number; top: number; width: number; height: number } {
+  function geometryForBoard(board: Board): CanvasBoardGeometry {
     return {
-      left: Math.min(guide.x1, guide.x2) * view.zoom,
-      top: Math.min(guide.y1, guide.y2) * view.zoom,
-      width: Math.max(1, Math.abs(guide.x2 - guide.x1) * view.zoom),
-      height: Math.max(1, Math.abs(guide.y2 - guide.y1) * view.zoom),
+      id: board.id,
+      x: board.x,
+      y: board.y,
+      width: board.buffer.width,
+      height: board.buffer.height,
     };
   }
 
-  function guideLine(guide: AlignmentGuide): { x1: number; y1: number; x2: number; y2: number } {
-    const box = guideBox(guide);
-    if (guide.x1 === guide.x2) {
-      return {
-        x1: box.width / 2,
-        y1: guide.y1 <= guide.y2 ? 0 : box.height,
-        x2: box.width / 2,
-        y2: guide.y1 <= guide.y2 ? box.height : 0,
-      };
-    }
-    if (guide.y1 === guide.y2) {
-      return {
-        x1: guide.x1 <= guide.x2 ? 0 : box.width,
-        y1: box.height / 2,
-        x2: guide.x1 <= guide.x2 ? box.width : 0,
-        y2: box.height / 2,
-      };
-    }
-    return {
-      x1: guide.x1 <= guide.x2 ? 0 : box.width,
-      y1: guide.y1 <= guide.y2 ? 0 : box.height,
-      x2: guide.x1 <= guide.x2 ? box.width : 0,
-      y2: guide.y1 <= guide.y2 ? box.height : 0,
-    };
-  }
-
-  function getSceneBounds(): { minX: number; minY: number; maxX: number; maxY: number; width: number; height: number } {
-    if (boards.length === 0) {
-      return { minX: 0, minY: 0, maxX: buffer.width, maxY: buffer.height, width: buffer.width, height: buffer.height };
-    }
-    const minX = Math.min(...boards.map((board) => board.x));
-    const minY = Math.min(...boards.map((board) => board.y));
-    const maxX = Math.max(...boards.map((board) => board.x + board.buffer.width));
-    const maxY = Math.max(...boards.map((board) => board.y + board.buffer.height));
-    return { minX, minY, maxX, maxY, width: maxX - minX, height: maxY - minY };
+  function getSceneBounds() {
+    return getCanvasSceneBounds(
+      boards.map(geometryForBoard),
+      buffer.width,
+      buffer.height,
+    );
   }
 
   function boardAt(clientX: number, clientY: number): Board | null {
@@ -895,40 +786,18 @@
   // ——— Касания: два пальца — масштаб и перемещение ———
 
   function startGesture(): void {
-    const [first, second] = [...touches.entries()];
-    if (!first || !second) return;
+    const nextGesture = beginPinchGesture(touches, originX, originY, view);
+    if (!nextGesture) return;
     // Первый палец уже мог начать штрих: он отменяется целиком, чтобы не остаться случайной точке
     session.abortAny();
-
-    const midX = (first[1].x + second[1].x) / 2 - originX;
-    const midY = (first[1].y + second[1].y) / 2 - originY;
-    gesture = {
-      ids: [first[0], second[0]],
-      startDistance: Math.max(1, Math.hypot(first[1].x - second[1].x, first[1].y - second[1].y)),
-      startZoom: view.zoom,
-      startMidX: midX,
-      startMidY: midY,
-      startOffsetX: view.offsetX,
-      startOffsetY: view.offsetY,
-    };
+    gesture = nextGesture;
     touchLocked = true;
   }
 
   function updateGesture(): void {
     if (!gesture) return;
-    const a = touches.get(gesture.ids[0]);
-    const b = touches.get(gesture.ids[1]);
-    if (!a || !b) return;
-
-    const distance = Math.hypot(a.x - b.x, a.y - b.y);
-    const midX = (a.x + b.x) / 2 - originX;
-    const midY = (a.y + b.y) / 2 - originY;
-    const zoom = nearestZoomLevel((gesture.startZoom * distance) / gesture.startDistance);
-
-    // Точка холста, бывшая под серединой в начале жеста, остаётся под серединой
-    const canvasX = (gesture.startMidX - gesture.startOffsetX) / gesture.startZoom;
-    const canvasY = (gesture.startMidY - gesture.startOffsetY) / gesture.startZoom;
-    view = { zoom, offsetX: Math.round(midX - canvasX * zoom), offsetY: Math.round(midY - canvasY * zoom) };
+    const nextView = updatePinchGesture(gesture, touches, originX, originY);
+    if (nextView) view = nextView;
   }
 
   function forgetTouch(pointerId: number): void {
@@ -1152,10 +1021,14 @@
         const movingBoard = boards.find((entry) => entry.id === movingBoardId);
         const initialPosition = movingBoardPositions.find((entry) => entry.id === movingBoardId);
         if (!movingBoard || !initialPosition) return;
-        const snapped = snapBoardPosition(
-          movingBoard,
+        const snapped = snapCanvasBoardPosition(
+          geometryForBoard(movingBoard),
+          boards.map(geometryForBoard),
           initialPosition.x + dx,
           initialPosition.y + dy,
+          view.zoom,
+          snapToGrid,
+          gridSpacing,
           new Set(movingBoardIds),
         );
         const offsetX = snapped.x - initialPosition.x;
@@ -1666,8 +1539,8 @@
         {/if}
       {/each}
       {#each alignmentGuides as guide, index (`${guide.x1}:${guide.y1}:${guide.x2}:${guide.y2}:${index}`)}
-        {@const box = guideBox(guide)}
-        {@const line = guideLine(guide)}
+        {@const box = getAlignmentGuideBox(guide, view.zoom)}
+        {@const line = getAlignmentGuideLine(guide, view.zoom)}
         <svg
           class="alignment-guide"
           style:left="{box.left}px"

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, tick, untrack } from 'svelte';
+  import { dispatchEditorCommand, type SelectionAction } from './editorCommands';
   import Canvas, { type ViewportGuide } from './components/Canvas.svelte';
   import ConfirmDialog from './components/ConfirmDialog.svelte';
   import HelpDialog from './components/HelpDialog.svelte';
@@ -48,6 +49,7 @@
     type ReferenceImage,
   } from './core/reference';
   import { History } from './core/history';
+  import { buildProjectSnapshot } from './core/projectSnapshot';
   import {
     advanceAnimation,
     createAnimationFrame,
@@ -181,11 +183,6 @@
     type WorkspacePanelId,
     type WorkspaceLayout,
   } from './core/workspace';
-  type SelectionAction =
-    | 'select-all' | 'select-opaque' | 'invert' | 'deselect' | 'copy' | 'cut' | 'paste' | 'clear' | 'crop'
-    | 'move-left' | 'move-right' | 'move-up' | 'move-down'
-    | 'flip-horizontal' | 'flip-vertical' | 'rotate-left' | 'rotate-right' | 'scale-up' | 'scale-down';
-
   interface Props {
     initialProject: ProjectData | null;
     initialLoadError: string | null;
@@ -955,80 +952,77 @@
     scheduleWorkspaceSave();
   }
 
-  function handleEditorCommand(command: string): void {
-    if (command.startsWith('tool:')) {
-      const toolId = command.slice(5);
+  const editorCommandActions = new Map<string, () => void>([
+    ['save', () => void saveProject()],
+    ['export', () => void exportImage()],
+    ['undo', undo],
+    ['redo', redo],
+    ['clear', requestClear],
+    ['delete-board', () => removeBoard(activeBoardId)],
+    ['select-all', () => runSelectionAction('select-all')],
+    ['select-opaque', () => runSelectionAction('select-opaque')],
+    ['selection-mode:none', () => { selectionMode = null; }],
+    ['selection-mode:rect', () => { selectionMode = 'rect'; }],
+    ['selection-mode:ellipse', () => { selectionMode = 'ellipse'; }],
+    ['selection-mode:lasso', () => { selectionMode = 'lasso'; }],
+    ['selection-mode:polygon', () => { selectionMode = 'polygon'; }],
+    ['selection-mode:wand', () => { selectionMode = 'wand'; }],
+    ['selection-mode:color', () => { selectionMode = 'color'; }],
+    ['selection-operation:replace', () => { selectionOperation = 'replace'; }],
+    ['selection-operation:add', () => { selectionOperation = 'add'; }],
+    ['selection-operation:subtract', () => { selectionOperation = 'subtract'; }],
+    ['selection-operation:intersect', () => { selectionOperation = 'intersect'; }],
+    ['toggle-grid', toggleGrid],
+    ['fit', fitCanvas],
+    ['center', () => canvasApi?.centerActiveBoard()],
+    ['zoom-in', () => canvasApi?.zoomBy(1)],
+    ['zoom-out', () => canvasApi?.zoomBy(-1)],
+    ['add-layer', addLayer],
+    ['duplicate-layer', () => duplicateLayer(activeLayerId)],
+    ['delete-layer', () => deleteLayer(activeLayerId)],
+    ['frame-add', addAnimationFrame],
+    ['frame-duplicate', duplicateAnimationFrameAtCurrent],
+    ['frame-remove', removeAnimationFrameAtCurrent],
+    ['frame-previous', () => selectAnimationFrame(Math.max(0, activeFrameIndex - 1))],
+    ['frame-next', () => selectAnimationFrame(Math.min(animationFrames.length - 1, activeFrameIndex + 1))],
+    ['animation-play', toggleAnimationPlayback],
+    ['workspace-drawing', () => selectWorkspace('drawing')],
+    ['workspace-animation', () => selectWorkspace('animation')],
+    ['workspace-tileset', () => selectWorkspace('tileset')],
+    ['workspace-minimal', () => selectWorkspace('minimal')],
+    ['toggle-tools', () => toggleWorkspaceDock('tools')],
+    ['toggle-palette', () => toggleWorkspaceDock('palette')],
+    ['toggle-timeline', () => toggleWorkspaceDock('timeline')],
+    ['preview', openPreviewWindow],
+    ['settings', () => {
+      settingsTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      settingsTab = 'general';
+      settingsOpen = true;
+    }],
+    ['help', () => {
+      helpTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      helpOpen = true;
+    }],
+    ['project-notes', () => showProjectNotes()],
+    ['welcome', () => showWelcome()],
+  ]);
+  const editorCommandContext = {
+    actions: editorCommandActions,
+    toolIds: TOOLS.map((tool) => tool.id),
+    panelIds: workspacePanels.map((panel) => panel.id),
+    selectTool: (toolId: string) => {
       const tool = TOOLS.find((entry) => entry.id === toolId);
       if (tool) selectTool(tool.id);
-      return;
-    }
-    if (command.startsWith('panel:')) {
-      const panel = workspacePanels.find((entry) => entry.id === command.slice(6));
+    },
+    selectPanel: (panelId: string) => {
+      const panel = workspacePanels.find((entry) => entry.id === panelId);
       if (panel) selectWorkspacePanel(panel.id);
-      return;
-    }
-    switch (command) {
-      case 'save': void saveProject(); break;
-      case 'export': void exportImage(); break;
-      case 'undo': undo(); break;
-      case 'redo': redo(); break;
-      case 'clear': requestClear(); break;
-      case 'delete-board': removeBoard(activeBoardId); break;
-      case 'select-all': runSelectionAction('select-all'); break;
-      case 'select-opaque': runSelectionAction('select-opaque'); break;
-      case 'selection-mode:none': selectionMode = null; break;
-      case 'selection-mode:rect': selectionMode = 'rect'; break;
-      case 'selection-mode:ellipse': selectionMode = 'ellipse'; break;
-      case 'selection-mode:lasso': selectionMode = 'lasso'; break;
-      case 'selection-mode:polygon': selectionMode = 'polygon'; break;
-      case 'selection-mode:wand': selectionMode = 'wand'; break;
-      case 'selection-mode:color': selectionMode = 'color'; break;
-      case 'selection-operation:replace': selectionOperation = 'replace'; break;
-      case 'selection-operation:add': selectionOperation = 'add'; break;
-      case 'selection-operation:subtract': selectionOperation = 'subtract'; break;
-      case 'selection-operation:intersect': selectionOperation = 'intersect'; break;
-      case 'toggle-grid': toggleGrid(); break;
-      case 'fit': fitCanvas(); break;
-      case 'center': canvasApi?.centerActiveBoard(); break;
-      case 'zoom-in': canvasApi?.zoomBy(1); break;
-      case 'zoom-out': canvasApi?.zoomBy(-1); break;
-      case 'add-layer': addLayer(); break;
-      case 'duplicate-layer': duplicateLayer(activeLayerId); break;
-      case 'delete-layer': deleteLayer(activeLayerId); break;
-      case 'frame-add': addAnimationFrame(); break;
-      case 'frame-duplicate': duplicateAnimationFrameAtCurrent(); break;
-      case 'frame-remove': removeAnimationFrameAtCurrent(); break;
-      case 'frame-previous': selectAnimationFrame(Math.max(0, activeFrameIndex - 1)); break;
-      case 'frame-next': selectAnimationFrame(Math.min(animationFrames.length - 1, activeFrameIndex + 1)); break;
-      case 'animation-play': toggleAnimationPlayback(); break;
-      case 'workspace-drawing': selectWorkspace('drawing'); break;
-      case 'workspace-animation': selectWorkspace('animation'); break;
-      case 'workspace-tileset': selectWorkspace('tileset'); break;
-      case 'workspace-minimal': selectWorkspace('minimal'); break;
-      case 'toggle-tools': toggleWorkspaceDock('tools'); break;
-      case 'toggle-palette': toggleWorkspaceDock('palette'); break;
-      case 'toggle-timeline': toggleWorkspaceDock('timeline'); break;
-      case 'preview': openPreviewWindow(); break;
-      case 'settings':
-        settingsTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-        settingsTab = 'general';
-        settingsOpen = true;
-        break;
-      case 'help':
-        helpTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-        helpOpen = true;
-        break;
-      case 'project-notes': showProjectNotes(); break;
-      case 'welcome': showWelcome(); break;
-      default: {
-        const action = ([
-          'invert', 'deselect', 'copy', 'cut', 'paste', 'clear', 'crop',
-          'move-left', 'move-right', 'move-up', 'move-down',
-          'flip-horizontal', 'flip-vertical', 'rotate-left', 'rotate-right', 'scale-up', 'scale-down',
-        ] as const).find((entry) => command === `selection-action:${entry}`);
-        if (action) runSelectionAction(action);
-      }
-    }
+    },
+    runSelectionAction,
+  };
+
+  function handleEditorCommand(command: string): void {
+    dispatchEditorCommand(command, editorCommandContext);
   }
 
   const editorMenuGroups = $derived<EditorMenuGroup[]>([
@@ -1126,10 +1120,8 @@
   // ——— Автосохранение ———
 
   function currentProject(): ProjectData {
-    return {
-      width: buffer.width,
-      height: buffer.height,
-      pixels: buffer.data,
+    return buildProjectSnapshot({
+      buffer,
       paletteId,
       freeColor,
       primary,
@@ -1137,42 +1129,15 @@
       recent,
       notes: notesText,
       references,
-      customPalettes: customPalettes.length ? customPalettes : undefined,
-      tilemap: tilemap ?? undefined,
+      customPalettes,
+      tilemap,
       brushes: brushLibrary,
       metadata: projectMetadata,
-      canvases: boards.map((board) => ({
-        id: board.id,
-        x: board.x,
-        y: board.y,
-        width: board.buffer.width,
-        height: board.buffer.height,
-        pixels: board.buffer.data,
-        activeLayerId: board.activeLayerId,
-        layers: board.layers.map((layer) => ({
-          id: layer.id,
-          name: layer.name,
-          pixels: layer.buffer.data,
-          visible: layer.visible,
-          locked: layer.locked,
-          opacity: layer.opacity,
-          blendMode: layer.blendMode,
-          alphaLock: layer.alphaLock,
-          clippingMask: layer.clippingMask,
-          role: layer.role ?? 'paint',
-          effects: layer.effects,
-          filters: layer.filters,
-          groupId: layer.groupId ?? null,
-          animationFrames: animationFramesByLayer.get(getAnimationLayerKey(board.id, layer.id))?.map((frame) => ({
-            id: frame.id,
-            durationMs: frame.durationMs,
-            pixels: frame.buffer.data,
-          })),
-        })),
-        groups: board.groups,
-      })),
-      activeCanvasId: activeBoardId,
-    };
+      boards,
+      activeBoardId,
+      getAnimationFrames: (boardId, layerId) =>
+        animationFramesByLayer.get(getAnimationLayerKey(boardId, layerId)),
+    });
   }
 
   function groupHasLock(groups: readonly LayerGroup[], groupId: string | null | undefined): boolean {

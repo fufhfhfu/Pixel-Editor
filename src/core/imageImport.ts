@@ -21,6 +21,8 @@ export interface RasterImportOptions {
   customPalettes?: Palette[];
 }
 
+export type RasterImportStage = 'decoding' | 'rasterizing' | 'complete';
+
 interface DecodedImageSource {
   source: CanvasImageSource;
   width: number;
@@ -55,7 +57,11 @@ async function decodeBitmap(file: File): Promise<DecodedImageSource> {
 
 export async function decodeRasterImage(
   file: File,
-  options: { maxPixels?: number; fitWithin?: { width: number; height: number } } = {},
+  options: {
+    maxPixels?: number;
+    fitWithin?: { width: number; height: number };
+    onProgress?: (stage: RasterImportStage) => void;
+  } = {},
 ): Promise<DecodedRasterImage> {
   assertImageFile(file);
   const maxPixels = options.maxPixels ?? MAX_DECODED_IMAGE_PIXELS;
@@ -63,6 +69,7 @@ export async function decodeRasterImage(
     throw new RangeError('Недопустимый лимит пикселей изображения.');
   }
   const target = options.fitWithin ? fitImageDimensions(options.fitWithin.width, options.fitWithin.height) : null;
+  options.onProgress?.('decoding');
   const bitmap = await decodeBitmap(file);
 
   try {
@@ -76,6 +83,7 @@ export async function decodeRasterImage(
       throw new RangeError('Изображение слишком большое для безопасной обработки.');
     }
 
+    options.onProgress?.('rasterizing');
     const { width, height } = target ?? fitImageDimensions(bitmap.width, bitmap.height);
     const canvas = document.createElement('canvas');
     canvas.width = width;
@@ -101,6 +109,7 @@ export async function decodeRasterImage(
       context.drawImage(bitmap.source, 0, 0, width, height);
     }
     const image = context.getImageData(0, 0, width, height);
+    options.onProgress?.('complete');
     return { width, height, pixels: image.data };
   } finally {
     bitmap.close();

@@ -42,6 +42,28 @@ describe('импорт растровых изображений', () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
+  it('сообщает этапы декодирования и подготовки пикселей', async () => {
+    const close = vi.fn();
+    const progress: string[] = [];
+    const context = {
+      imageSmoothingEnabled: false,
+      imageSmoothingQuality: 'low',
+      clearRect: vi.fn(),
+      drawImage: vi.fn(),
+      getImageData: vi.fn(() => ({ data: new Uint8ClampedArray(4) })),
+    };
+    vi.stubGlobal('createImageBitmap', vi.fn(async () => ({ width: 1, height: 1, close })));
+    vi.stubGlobal('document', {
+      createElement: vi.fn(() => ({ getContext: vi.fn(() => context), width: 0, height: 0 })),
+    });
+
+    await decodeRasterImage(new File(['image'], 'progress.png'), {
+      onProgress: (stage) => progress.push(stage),
+    });
+
+    expect(progress).toEqual(['decoding', 'rasterizing', 'complete']);
+  });
+
   it('вписывает изображение в выбранный холст по центру без обрезки и искажений', async () => {
     const drawImage = vi.fn();
     const close = vi.fn();

@@ -25,6 +25,8 @@ jobs:
       - run: npm test
       - run: npm run check
       - run: npm run build:renderer
+      - name: Check Electron security configuration
+        run: npm run security:check
       - name: Audit production dependencies
         run: npm audit --omit=dev
       - name: Audit all dependencies (fail on high or critical)

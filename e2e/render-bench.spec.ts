@@ -302,10 +302,22 @@ async function measureLayerToggle(layerName: string, visibleBefore: boolean) {
   }, { layerName, visibleBefore });
 }
 
+async function clickNativeMenuItem(menuLabel: string, itemLabel: string): Promise<void> {
+  await electronApp.evaluate(({ Menu, BrowserWindow }, labels) => {
+    const menuItem = Menu.getApplicationMenu()?.items
+      .find((item) => item.label === labels.menuLabel)?.submenu?.items
+      .find((item) => item.label === labels.itemLabel);
+    const window = BrowserWindow.getAllWindows()[0];
+    if (!menuItem?.click || !window) {
+      throw new Error(`В нативном меню не найдена команда «${labels.itemLabel}».`);
+    }
+    menuItem.click(menuItem, window, undefined!);
+  }, { menuLabel, itemLabel });
+}
+
 async function waitForAnimationControl(): Promise<void> {
   if (await page.locator('.timeline [aria-label="Воспроизвести"]').count()) return;
-  await page.locator('.menu-bar [data-menu="Анимация"]').click();
-  await page.getByRole('menuitem', { name: 'Показать Timeline' }).click();
+  await clickNativeMenuItem('Анимация', 'Показать или скрыть Timeline');
   await expect(page.locator('.timeline')).toBeVisible();
 }
 
@@ -323,6 +335,11 @@ test.describe.serial('Render performance baseline', () => {
     await expect(page.getByRole('heading', { name: 'Pixel Editor' })).toBeVisible({ timeout: 60_000 });
     const welcomeButton = page.getByRole('button', { name: 'Начать работу' });
     if (await welcomeButton.count()) await welcomeButton.click();
+    await electronApp.evaluate(({ BrowserWindow }) => {
+      const mainWindow = BrowserWindow.getAllWindows()[0];
+      mainWindow?.show();
+      mainWindow?.focus();
+    });
     await installRenderInstrumentation();
   });
 
@@ -408,6 +425,8 @@ test.describe.serial('Render performance baseline', () => {
 
     const environment = await page.evaluate(() => ({
       userAgent: navigator.userAgent,
+      visibilityState: document.visibilityState,
+      hasFocus: document.hasFocus(),
       viewport: { width: innerWidth, height: innerHeight },
       devicePixelRatio,
       hardwareConcurrency: navigator.hardwareConcurrency,

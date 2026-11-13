@@ -16,6 +16,7 @@ const {
 const { randomUUID } = require('node:crypto');
 const { pathToFileURL } = require('node:url');
 const { createFeedbackNotesStore } = require('./feedbackNotes.cjs');
+const { getSafeExternalUrl } = require('./security.cjs');
 const { isValidWindowState, restoreWindowState } = require('./windowState.cjs');
 
 const DEV_SERVER_URL = 'http://127.0.0.1:5173';
@@ -550,6 +551,7 @@ function createWindow() {
     autoHideMenuBar: false,
     show: false,
     webPreferences: {
+      devTools: !app.isPackaged,
       preload: path.join(__dirname, 'preload.cjs'),
       nodeIntegration: false,
       contextIsolation: true,
@@ -610,6 +612,7 @@ function createWindow() {
           minHeight: 240,
           backgroundColor: '#30323a',
           webPreferences: {
+            devTools: !app.isPackaged,
             nodeIntegration: false,
             contextIsolation: true,
             sandbox: true,
@@ -618,7 +621,12 @@ function createWindow() {
         },
       };
     }
-    if (url.startsWith('https://')) void shell.openExternal(url);
+    const externalUrl = getSafeExternalUrl(url);
+    if (externalUrl) {
+      void shell.openExternal(externalUrl).catch((error) => {
+        console.error('Не удалось открыть внешний URL.', error);
+      });
+    }
     return { action: 'deny' };
   });
   mainWindow.webContents.on('did-create-window', (childWindow) => {
@@ -933,6 +941,7 @@ ipcMain.handle('pixel-editor:export-notes-pdf', async (event, request) => {
     pdfWindow = new BrowserWindow({
       show: false,
       webPreferences: {
+        devTools: !app.isPackaged,
         nodeIntegration: false,
         contextIsolation: true,
         sandbox: true,

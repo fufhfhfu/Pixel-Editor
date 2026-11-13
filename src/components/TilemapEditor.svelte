@@ -17,7 +17,7 @@
     type TilemapGrid,
     type TilemapPoint,
   } from '../core/tilemap';
-  import { encodePng } from '../core/png';
+  import { encodePngWithWorker } from '../core/pngWorker';
   import { saveDesktopBlob } from '../core/desktopFiles';
   import { rgbaToCss } from '../core/color';
   import type { RGBA } from '../core/state';
@@ -548,7 +548,7 @@
     if (!tilemap) return;
     try {
       const atlas = buildTileAtlas(tilemap);
-      const png = await encodePng({ width: atlas.width, height: atlas.height, data: atlas.pixels });
+      const png = await encodePngWithWorker({ width: atlas.width, height: atlas.height, data: atlas.pixels });
       await saveDesktopBlob(new Blob([png], { type: 'image/png' }), 'tileset.png');
     } catch (reason) {
       error = reason instanceof Error ? reason.message : 'Не удалось сохранить PNG tileset.';

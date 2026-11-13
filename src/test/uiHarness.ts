@@ -19,8 +19,27 @@ export const desktopSaveProjectFile = vi.fn(async () => ({
   handle: 'test-project',
   recentProjects: [],
 } as const));
+export const desktopBeginBatchExport = vi.fn(async () => 'test-batch');
+export const desktopWriteBatchExport = vi.fn(async () => {});
+export const desktopEndBatchExport = vi.fn(async () => {});
 
 function installDomStubs(): void {
+  if (typeof Blob.prototype.arrayBuffer !== 'function') {
+    Object.defineProperty(Blob.prototype, 'arrayBuffer', {
+      configurable: true,
+      value(this: Blob): Promise<ArrayBuffer> {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            if (reader.result instanceof ArrayBuffer) resolve(reader.result);
+            else reject(new TypeError('Не удалось прочитать Blob как ArrayBuffer.'));
+          };
+          reader.onerror = () => reject(reader.error ?? new Error('Не удалось прочитать Blob.'));
+          reader.readAsArrayBuffer(this);
+        });
+      },
+    });
+  }
   const proto = HTMLCanvasElement.prototype as unknown as { getContext: () => unknown };
   proto.getContext = function (this: HTMLCanvasElement) {
     const canvas = this;
@@ -166,6 +185,9 @@ beforeEach(async () => {
   rasterDrawCalls.length = 0;
   desktopSaveFile.mockClear();
   desktopSaveProjectFile.mockClear();
+  desktopBeginBatchExport.mockClear();
+  desktopWriteBatchExport.mockClear();
+  desktopEndBatchExport.mockClear();
   localStorage.clear();
   localStorage.setItem(WELCOME_SEEN_KEY, 'true');
   Object.defineProperty(window, 'pixelEditorDesktop', {
@@ -173,6 +195,9 @@ beforeEach(async () => {
     value: {
       saveFile: desktopSaveFile,
       saveProjectFile: desktopSaveProjectFile,
+      beginBatchExport: desktopBeginBatchExport,
+      writeBatchExport: desktopWriteBatchExport,
+      endBatchExport: desktopEndBatchExport,
       updateWindowState: vi.fn(),
     },
   });

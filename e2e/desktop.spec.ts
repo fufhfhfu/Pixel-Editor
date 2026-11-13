@@ -227,8 +227,15 @@ test.describe.serial('Основные пользовательские пото
     await page.locator('.file-menu-panel button[title="Сохранить PNG"]').click();
     await expect(page.getByRole('status')).toContainText('PNG сохранён');
 
-    const png = await readFile(join(userDataPath, 'pixel-art-8x8@4x.png'));
+    const exportedPng = (await readdir(userDataPath)).find((fileName) =>
+      /^pixel-art-\d+x\d+@4x\.png$/u.test(fileName),
+    );
+    expect(exportedPng).toBeTruthy();
+    const png = await readFile(join(userDataPath, exportedPng!));
     expect(png.subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+
+    await page.locator('.bar button[title^="Сохранить проект"]').click();
+    await expect(page.getByRole('status')).toContainText('Проект сохранён в файл.');
   });
 
   test('edits settings and keeps keyboard focus inside the dialog', async () => {

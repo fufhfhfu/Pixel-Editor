@@ -39,6 +39,7 @@
     decodeRasterImage,
     MAX_IMAGE_FILE_BYTES,
     type DecodedRasterImage,
+    type RasterImportStage,
   } from './core/imageImport';
   import { MAX_NOTES_IMPORT_BYTES, parseNotesImportDocument } from './core/notesImport';
   import {
@@ -578,6 +579,8 @@
 
   let activeToolId = $state<ToolId>('pencil');
   let fillInProgress = $state(false);
+  let imageImportProgress = $state<{ fileName: string; stage: RasterImportStage } | null>(null);
+  let batchExportProgress = $state<{ completed: number; total: number } | null>(null);
   let selectionMask = $state.raw<SelectionMask | null>(null);
   let selectionMode = $state<SelectionMode | null>(null);
   let selectionOperation = $state<SelectionOperation>('replace');
@@ -2731,6 +2734,10 @@
   }
 
   async function importReference(file: File): Promise<void> {
+    if (imageImportProgress) {
+      notify('Дождитесь завершения текущего импорта изображения.', 'error');
+      return;
+    }
     const extension = file.name.split('.').at(-1)?.toLowerCase();
     if (!extension || !['png', 'jpg', 'jpeg', 'webp', 'bmp'].includes(extension)) {
       notify('Поддерживаются изображения PNG, JPEG, WebP и BMP.', 'error');
@@ -2748,7 +2755,11 @@
         notify('Достигнут общий лимит пикселей референсов. Удалите или уменьшите один из референсов.', 'error');
         return;
       }
-      const image = await decodeRasterImage(file, { maxPixels: availablePixels });
+      imageImportProgress = { fileName: file.name, stage: 'decoding' };
+      const image = await decodeRasterImage(file, {
+        maxPixels: availablePixels,
+        onProgress: (stage) => (imageImportProgress = { fileName: file.name, stage }),
+      });
 
       const board = boards.find((entry) => entry.id === activeBoardId)!;
       const scale = Math.max(MIN_REFERENCE_SCALE, Math.min(1, 256 / image.width, 256 / image.height));
@@ -2775,6 +2786,8 @@
       notify('Референс импортирован.');
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Не удалось импортировать референс.', 'error');
+    } finally {
+      imageImportProgress = null;
     }
   }
 
@@ -2997,6 +3010,10 @@
       return;
     }
 
+    if (imageImportProgress) {
+      notify('Дождитесь завершения текущего импорта изображения.', 'error');
+      return;
+    }
     if (!extension || !['png', 'jpg', 'jpeg', 'webp', 'bmp'].includes(extension)) {
       notify('Поддерживаются проекты JSON и изображения PNG, JPEG, WebP и BMP.', 'error');
       return;
@@ -3017,12 +3034,16 @@
         notify('Превышен лимит общего объёма пиксельных данных проекта.', 'error');
         return;
       }
+      imageImportProgress = { fileName: file.name, stage: 'decoding' };
       const image = await decodeRasterImage(file, {
         fitWithin: { width: targetBoard.buffer.width, height: targetBoard.buffer.height },
+        onProgress: (stage) => (imageImportProgress = { fileName: file.name, stage }),
       });
       pending = { kind: 'image', image, fileName: file.name, boardId: targetBoard.id };
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Не удалось декодировать изображение.', 'error');
+    } finally {
+      imageImportProgress = null;
     }
   }
 
@@ -3083,6 +3104,7 @@
     try {
       sessionId = await desktop.beginBatchExport();
       if (!sessionId) return;
+      batchExportProgress = { completed: 0, total: boards.length };
       const maxBatchScale = Math.min(...boards.map((board) =>
         getAvailableExportScales(board.buffer.width, board.buffer.height).at(-1) ?? 1));
       const scale = exportScale <= maxBatchScale ? exportScale : maxBatchScale;
@@ -3099,6 +3121,8 @@
         const blob = await exportPngBlob(exportBuffer, scale);
         const fileName = `pixel-editor-${Date.now()}-canvas-${index + 1}-${board.buffer.width * scale}x${board.buffer.height * scale}.png`;
         await desktop.writeBatchExport(sessionId, fileName, new Uint8Array(await blob.arrayBuffer()));
+        batchExportProgress = { completed: index + 1, total: boards.length };
+        await tick();
         notify(`Пакетный экспорт: ${index + 1} из ${boards.length}.`);
       }
       notify(`Экспортировано холстов: ${boards.length}.`);
@@ -3115,6 +3139,7 @@
           );
         }
       }
+      batchExportProgress = null;
     }
   }
 
@@ -4018,6 +4043,27 @@
       <span>Выполняется заливка. Редактор временно заблокирован.</span>
     </div>
   {/if}
+  {#if imageImportProgress || batchExportProgress}
+    <div class="operation-progress" role="status" aria-live="polite">
+      {#if imageImportProgress}
+        <span>
+          {imageImportProgress.stage === 'decoding'
+            ? `Декодирование «${imageImportProgress.fileName}»…`
+            : imageImportProgress.stage === 'rasterizing'
+              ? `Подготовка пикселей «${imageImportProgress.fileName}»…`
+              : `Изображение «${imageImportProgress.fileName}» обработано.`}
+        </span>
+        <progress aria-label="Обработка изображения"></progress>
+      {:else if batchExportProgress}
+        <span>Пакетный экспорт: {batchExportProgress.completed} из {batchExportProgress.total}</span>
+        <progress
+          aria-label="Пакетный экспорт"
+          value={batchExportProgress.completed}
+          max={batchExportProgress.total}
+        ></progress>
+      {/if}
+    </div>
+  {/if}
 </div>
 
 {#if notice}
@@ -4129,6 +4175,28 @@
     background: rgba(8, 10, 16, 0.62);
     color: var(--text);
     cursor: progress;
+  }
+
+  .operation-progress {
+    position: fixed;
+    z-index: 108;
+    right: 20px;
+    bottom: 20px;
+    display: grid;
+    gap: 8px;
+    width: min(320px, calc(100vw - 40px));
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--panel);
+    color: var(--text);
+    box-shadow: var(--shadow-md);
+    font-size: 13px;
+  }
+
+  .operation-progress progress {
+    width: 100%;
+    accent-color: var(--accent);
   }
 
   .fill-spinner {

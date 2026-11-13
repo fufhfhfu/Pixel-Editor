@@ -146,6 +146,11 @@ for (const target of targets) {
 
       await expect(appPage.getByRole('heading', { name: 'Pixel Editor' })).toBeVisible({ timeout: 15_000 });
       expect(new URL(appPage.url()).protocol).toBe('file:');
+      const contentSecurityPolicy = await appPage
+        .locator('meta[http-equiv="Content-Security-Policy"]')
+        .getAttribute('content');
+      expect(contentSecurityPolicy).toContain("script-src 'self'");
+      expect(contentSecurityPolicy).not.toContain('ws://');
       await expect.poll(() =>
         appPage.evaluate(() => typeof window.pixelEditorDesktop?.saveFile),
       ).toBe('function');

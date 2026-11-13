@@ -12,7 +12,7 @@ workerScope.onmessage = async (event: MessageEvent<{ width: number; height: numb
       height: event.data.height,
       data: new Uint8ClampedArray(event.data.data),
     });
-    workerScope.postMessage(bytes, [bytes.buffer]);
+    workerScope.postMessage({ bytes: bytes.buffer }, [bytes.buffer]);
   } catch (error) {
     workerScope.postMessage({ error: error instanceof Error ? error.message : 'PNG encoding failed.' });
   }

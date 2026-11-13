@@ -6,6 +6,8 @@ import { parseProject, type ProjectData } from './core/project';
 import { computeFloodFillOutput, type FloodFillWorkerRequest } from './core/tools/floodFillWorker';
 import {
   canvasAlpha,
+  desktopBeginBatchExport,
+  desktopWriteBatchExport,
   desktopSaveFile,
   drawStroke,
   frame,
@@ -20,6 +22,62 @@ import {
 } from './test/uiHarness';
 
 describe('Project files and dialogs', () => {
+  it('показывает числовой прогресс пакетного экспорта', async () => {
+    (document.querySelector('.add-board') as HTMLButtonElement).click();
+    await frame();
+    const releases: Array<() => void> = [];
+    desktopWriteBatchExport.mockImplementation(() => new Promise<void>((resolve) => releases.push(resolve)));
+
+    (document.querySelector('[data-menu="Файл"]') as HTMLButtonElement).click();
+    await tick();
+    const batchExport = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'))
+      .find((button) => button.textContent?.trim() === 'Пакетный экспорт холстов…');
+    expect(batchExport).toBeTruthy();
+    batchExport?.click();
+
+    await vi.waitFor(() => expect(desktopBeginBatchExport).toHaveBeenCalledOnce());
+    await vi.waitFor(() => {
+      expect(
+        desktopWriteBatchExport.mock.calls.length > 0 || document.querySelector('[role="alert"]'),
+      ).toBeTruthy();
+    });
+    expect(desktopWriteBatchExport).toHaveBeenCalledTimes(1);
+    expect(document.querySelector('.operation-progress')?.textContent ?? '').toContain('0 из 2');
+
+    releases.shift()?.();
+    await vi.waitFor(() => {
+      expect(document.querySelector('.operation-progress')?.textContent).toContain('1 из 2');
+      expect(desktopWriteBatchExport).toHaveBeenCalledTimes(2);
+    });
+    releases.shift()?.();
+    await vi.waitFor(() => expect(document.querySelector('.operation-progress')).toBeNull());
+  });
+
+  it('показывает статус во время декодирования изображения', async () => {
+    let resolveBitmap!: (bitmap: ImageBitmap) => void;
+    vi.stubGlobal('createImageBitmap', vi.fn(() => new Promise<ImageBitmap>((resolve) => {
+      resolveBitmap = resolve;
+    })));
+    const input = document.querySelector('.menu-bar input[type="file"]') as HTMLInputElement;
+    Object.defineProperty(input, 'files', {
+      configurable: true,
+      value: [new File(['image'], 'slow.png', { type: 'image/png' })],
+    });
+
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    await tick();
+    expect(document.querySelector('.operation-progress')?.textContent).toContain('Декодирование «slow.png»');
+
+    resolveBitmap({
+      width: 1,
+      height: 1,
+      close: vi.fn(),
+    } as unknown as ImageBitmap);
+    await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')?.textContent)
+      .toContain('Импортировать изображение?'));
+    expect(document.querySelector('.operation-progress')).toBeNull();
+  });
+
   it('imports project notes from Markdown into the project notes editor', async () => {
     (document.querySelector('[data-menu="Файл"]') as HTMLButtonElement).click();
     await tick();

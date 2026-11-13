@@ -74,6 +74,7 @@
     shortcutRow('paste', 'Вставить скопированную область по центру холста'),
   ]);
   const file = $derived<Row[]>([
+    { keys: ['Ctrl+Shift+P'], action: 'Найти команду в редакторе' },
     shortcutRow('undo', 'Отменить последнее действие'),
     shortcutRow('redo', 'Повторить отменённое действие'),
     shortcutRow('save', 'Сохранить проект в файл JSON'),

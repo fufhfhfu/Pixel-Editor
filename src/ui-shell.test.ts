@@ -77,6 +77,54 @@ describe('UI shell and editor controls', () => {
     expect(document.querySelector('[role="dialog"]')?.textContent).toContain('Тема оформления');
   });
 
+  it('объединяет команды вида и находит команды через поиск', async () => {
+    const groups = Array.from(document.querySelectorAll<HTMLButtonElement>('.menu-bar [data-menu]'));
+    expect(groups).toHaveLength(9);
+    expect(groups.some((button) => button.dataset.menu === 'Изображение')).toBe(false);
+
+    document.querySelector<HTMLButtonElement>('[data-menu="Вид"]')!.click();
+    await tick();
+    const viewItems = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'));
+    expect(viewItems.filter((button) => button.textContent?.includes('Вписать холсты'))).toHaveLength(1);
+    expect(viewItems.filter((button) => button.textContent?.includes('Центрировать холст'))).toHaveLength(1);
+
+    document.querySelector<HTMLButtonElement>('[aria-label="Поиск команд"]')!.click();
+    await tick();
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"][aria-labelledby="command-search-title"]')!;
+    const input = dialog.querySelector<HTMLInputElement>('[aria-label="Поиск команд"]')!;
+    expect(document.activeElement).toBe(input);
+    input.value = 'сетку';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await tick();
+
+    const result = dialog.querySelector<HTMLButtonElement>('[role="option"]')!;
+    expect(result).toBeTruthy();
+    const selectedLabel = result.querySelector('span')?.textContent?.trim();
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    await tick();
+    expect(document.querySelector('[aria-labelledby="command-search-title"]')).toBeNull();
+
+    document.querySelector<HTMLButtonElement>('[data-menu="Вид"]')!.click();
+    await tick();
+    expect(document.querySelector('[role="menu"]')?.textContent).not.toContain(selectedLabel);
+
+    document.querySelector<HTMLButtonElement>('[data-menu="Вид"]')!.click();
+    const previousFocus = document.activeElement;
+    window.dispatchEvent(new KeyboardEvent('keydown', {
+      code: 'KeyP',
+      ctrlKey: true,
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    }));
+    await tick();
+    expect(document.querySelector('[aria-labelledby="command-search-title"]')).toBeTruthy();
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    await tick();
+    expect(document.querySelector('[aria-labelledby="command-search-title"]')).toBeNull();
+    expect(document.activeElement).toBe(previousFocus);
+  });
+
   it('переносит заметки обратной связи на верхнюю панель рядом со справкой', async () => {
     const helpButton = document.querySelector<HTMLButtonElement>('.bar [aria-label="Справка"]')!;
     const notesButton = document.querySelector<HTMLButtonElement>('.bar [aria-label="Заметки обратной связи"]')!;

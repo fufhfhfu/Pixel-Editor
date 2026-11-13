@@ -10,13 +10,15 @@
     "desktop:dev": "npm run dev",
     "build:renderer": "vite build",
     "build:icon": "node scripts/generate-icon.cjs",
-    "dist:win": "npm run check && npm test && npm run build:icon && npm run build:renderer && electron-builder --win nsis portable --publish never",
+    "dist:win": "npm run check && npm test && npm run build:icon && npm run build:renderer && electron-builder --win nsis portable --publish never && npm run test:smoke:desktop",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
     "test:e2e:desktop": "playwright test",
+    "test:smoke:desktop": "playwright test --config=playwright.smoke.config.ts",
     "check:e2e": "tsc --noEmit -p tsconfig.e2e.json",
     "test:watch": "vitest",
-    "bench": "tsx scripts/bench.ts"
+    "bench": "tsx scripts/bench.ts",
+    "bench:render": "playwright test --config=playwright.bench.config.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.65.0",

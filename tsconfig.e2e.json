@@ -4,5 +4,13 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["e2e/desktop.spec.ts", "playwright.config.ts", "src/desktop.d.ts"]
+  "include": [
+    "e2e/desktop.spec.ts",
+    "e2e/render-bench.spec.ts",
+    "e2e/smoke.spec.ts",
+    "playwright.bench.config.ts",
+    "playwright.config.ts",
+    "playwright.smoke.config.ts",
+    "src/desktop.d.ts"
+  ]
 }

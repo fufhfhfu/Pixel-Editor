@@ -547,6 +547,7 @@
   let feedbackNotesTrigger = $state<HTMLElement | null>(null);
   let projectNotesOpen = $state(false);
   let projectNotesTrigger = $state<HTMLElement | null>(null);
+  let commandSearchOpen = $state(false);
   let notesText = $state(start?.notes ?? '');
   let notesTitle = $state('Заметки проекта');
   let notesCreatedAt = $state(Date.now());
@@ -1074,10 +1075,6 @@
       { label: 'Уменьшить', command: 'zoom-out' },
       { label: 'Предпросмотр', command: 'preview', separatorBefore: true },
     ] },
-    { label: 'Изображение', items: [
-      { label: 'Центрировать холст', command: 'center' },
-      { label: 'Вписать холсты в окно', command: 'fit' },
-    ] },
     { label: 'Холст', items: [
       { label: 'Удалить активный холст', command: 'delete-board', disabled: boards.length <= 1 },
     ] },
@@ -1095,7 +1092,7 @@
     ] },
     { label: 'Анимация', items: [
       { label: animationPlaying ? 'Остановить' : 'Воспроизвести', command: 'animation-play' },
-      { label: 'Показать Timeline', command: 'toggle-timeline' },
+      { label: workspaceLayout.timelineVisible ? 'Скрыть Timeline' : 'Показать Timeline', command: 'toggle-timeline' },
     ] },
     { label: 'Инструменты', items: TOOLS.map((tool) => ({
       label: `${tool.label} (${shortcutLabel(`tool:${tool.id}`)})`,
@@ -1108,7 +1105,6 @@
       { label: 'Рабочее пространство: Минимальное', command: 'workspace-minimal' },
       { label: workspaceLayout.toolsVisible ? 'Скрыть инструменты' : 'Показать инструменты', command: 'toggle-tools', separatorBefore: true },
       { label: workspaceLayout.paletteVisible ? 'Скрыть палитру' : 'Показать палитру', command: 'toggle-palette' },
-      { label: workspaceLayout.timelineVisible ? 'Скрыть Timeline' : 'Показать Timeline', command: 'toggle-timeline' },
       ...workspacePanels.map((panel) => ({
         label: `Панель: ${panel.label}`,
         command: `panel:${panel.id}`,
@@ -3171,7 +3167,7 @@
   }
 
   function onKeyDown(e: KeyboardEvent): void {
-    if (fillInProgress || pending || welcomeOpen || feedbackNotesOpen || projectNotesOpen || helpOpen || settingsOpen || isTypingTarget(e.target)) return;
+    if (fillInProgress || pending || welcomeOpen || feedbackNotesOpen || projectNotesOpen || commandSearchOpen || helpOpen || settingsOpen || isTypingTarget(e.target)) return;
 
     if (e.repeat) return;
     const resolution = resolveShortcutEvent(shortcuts, pendingShortcutSequence, e);
@@ -3271,6 +3267,8 @@
 <div class="app">
   <EditorMenuBar
     groups={editorMenuGroups}
+    canSearch={!fillInProgress && !pending && !welcomeOpen && !feedbackNotesOpen && !projectNotesOpen && !helpOpen && !settingsOpen}
+    onsearchchange={(open) => (commandSearchOpen = open)}
     oncommand={handleEditorCommand}
     onopen={(file) => void importProjectFile(file)}
     onsettings={(trigger) => openSettings('general', trigger)}

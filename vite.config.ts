@@ -3,6 +3,7 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   plugins: [svelte()],
+  base: './',
   // Svelte-компоненты в jsdom должны использовать DOM-совместимый runtime.
   resolve: process.env.VITEST ? { conditions: ['browser'] } : undefined,
   test: {

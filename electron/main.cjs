@@ -15,6 +15,21 @@ const FILE_TYPES = {
 
 let mainWindow;
 let feedbackNotesStore;
+let startupErrorShown = false;
+
+function showStartupError(message, error) {
+  if (startupErrorShown) return;
+  startupErrorShown = true;
+
+  const details = error instanceof Error ? error.message : String(error);
+  console.error(message, error);
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
+  dialog.showErrorBox(
+    'Не удалось запустить Pixel Editor',
+    `${message}\n\nПодробности: ${details}\n\nПерезапустите приложение. Если ошибка повторится, переустановите его.`,
+  );
+  app.quit();
+}
 
 function assertMainWindowSender(event) {
   if (!mainWindow || event.sender !== mainWindow.webContents) {
@@ -81,14 +96,23 @@ function createWindow() {
   mainWindow.webContents.on('will-navigate', (event, url) => {
     if (!isAllowedPage(url)) event.preventDefault();
   });
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    if (details.reason === 'clean-exit') return;
+    showStartupError(
+      'Процесс окна редактора аварийно завершился.',
+      new Error(`Причина: ${details.reason}; код завершения: ${details.exitCode}.`),
+    );
+  });
   mainWindow.on('closed', () => {
     mainWindow = undefined;
   });
 
   if (app.isPackaged) {
-    void mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
+    void mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'))
+      .catch((error) => showStartupError('Не удалось загрузить интерфейс приложения.', error));
   } else {
-    void mainWindow.loadURL(DEV_SERVER_URL);
+    void mainWindow.loadURL(DEV_SERVER_URL)
+      .catch((error) => showStartupError('Не удалось подключиться к серверу разработки.', error));
     if (process.env.PIXEL_EDITOR_DEVTOOLS === '1') void mainWindow.webContents.openDevTools();
   }
 }
@@ -162,7 +186,7 @@ app.whenReady().then(() => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
-});
+}).catch((error) => showStartupError('Не удалось подготовить приложение к запуску.', error));
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

@@ -10,21 +10,29 @@ export function trapFocus(
   node: HTMLElement,
   returnFocusTo: HTMLElement | null = document.activeElement instanceof HTMLElement ? document.activeElement : null,
 ): { destroy(): void } {
+  function isVisible(element: HTMLElement): boolean {
+    if (element.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
+    const style = getComputedStyle(element);
+    return style.display !== 'none' &&
+      style.visibility !== 'hidden' &&
+      style.visibility !== 'collapse' &&
+      element.getClientRects().length > 0;
+  }
 
   function onKeydown(e: KeyboardEvent): void {
     if (e.key !== 'Tab') return;
-    const items = Array.from(node.querySelectorAll<HTMLElement>(FOCUSABLE));
+    const items = Array.from(node.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(isVisible);
     if (items.length === 0) {
       e.preventDefault();
       return;
     }
     const first = items[0];
     const last = items[items.length - 1];
-    const active = document.activeElement;
-    if (e.shiftKey && (active === first || !node.contains(active))) {
+    const activeIndex = items.indexOf(document.activeElement as HTMLElement);
+    if (e.shiftKey && activeIndex <= 0) {
       e.preventDefault();
       last.focus();
-    } else if (!e.shiftKey && (active === last || !node.contains(active))) {
+    } else if (!e.shiftKey && (activeIndex === -1 || activeIndex === items.length - 1)) {
       e.preventDefault();
       first.focus();
     }

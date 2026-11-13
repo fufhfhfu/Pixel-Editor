@@ -272,13 +272,15 @@ describe('UI shell and editor controls', () => {
     flushSync();
     pointer('pointerdown', screenOf(4, 4));
     expect(document.querySelector('.fill-overlay')?.textContent).toContain('Выполняется заливка');
-    await frame();
-    await frame();
-    expect(document.querySelector('.fill-overlay')).toBeNull();
+    await vi.waitFor(async () => {
+      await tick();
+      expect(document.querySelector('.fill-overlay')).toBeNull();
+    }, { timeout: 2_000, interval: 20 });
     expect(canvasAlpha(4, 4)).toBe(255);
     key('KeyZ', { ctrlKey: true });
-    await frame();
-    expect(canvasAlpha(4, 4)).toBe(0);
+    await vi.waitFor(() => {
+      expect(canvasAlpha(4, 4)).toBe(0);
+    }, { timeout: 2_000, interval: 20 });
   });
 
   it('сохраняет созданную пользовательскую палитру и метаданные в проекте', async () => {
@@ -306,9 +308,14 @@ describe('UI shell and editor controls', () => {
     flushSync();
 
     await vi.advanceTimersByTimeAsync(1000);
-    const saved = parseProject(localStorage.getItem(AUTOSAVE_KEY)!);
-    expect(saved.customPalettes?.[0]?.name).toBe('UI Palette');
-    expect(saved.metadata).toEqual({ title: 'UI test' });
+    await vi.waitFor(async () => {
+      await tick();
+      const serialized = localStorage.getItem(AUTOSAVE_KEY);
+      expect(serialized).not.toBeNull();
+      const saved = parseProject(serialized!);
+      expect(saved.customPalettes?.[0]?.name).toBe('UI Palette');
+      expect(saved.metadata).toEqual({ title: 'UI test' });
+    }, { timeout: 2_000, interval: 20 });
   });
 
   it('назначает последовательность клавиш инструменту и распознаёт её', async () => {

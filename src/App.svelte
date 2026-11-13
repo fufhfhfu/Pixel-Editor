@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, tick, untrack } from 'svelte';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { dispatchEditorCommand, type SelectionAction } from './editorCommands';
   import Canvas, { type ViewportGuide } from './components/Canvas.svelte';
   import ConfirmDialog from './components/ConfirmDialog.svelte';
@@ -22,6 +22,7 @@
   import TimelinePanel from './components/TimelinePanel.svelte';
   import EditorMenuBar, { type EditorMenuGroup } from './components/EditorMenuBar.svelte';
   import LayersPanel from './components/LayersPanel.svelte';
+  import RecentProjectsDialog from './components/RecentProjectsDialog.svelte';
   import {
     DEFAULT_EXPORT_SCALE,
     exportPngBlob,
@@ -117,7 +118,7 @@
     AutosaveRepository,
     type AutosaveStorageMode,
   } from './core/autosave';
-  import { saveDesktopBlob } from './core/desktopFiles';
+  import { saveDesktopBlob, saveDesktopProject } from './core/desktopFiles';
   import { DEFAULT_GRID_SIZE, PixelBuffer, isValidCanvasSize, type RGBA } from './core/state';
   import {
     compositeLayers,
@@ -272,7 +273,13 @@
   /** Действие, которое ждёт подтверждения в диалоге. */
   type PendingAction =
     | { kind: 'resize'; width: number; height: number }
-    | { kind: 'import'; project: ProjectData; fileName: string }
+    | {
+        kind: 'import';
+        project: ProjectData;
+        fileName: string;
+        projectHandle: string | null;
+        restoringBackup: boolean;
+      }
     | { kind: 'image'; image: DecodedRasterImage; fileName: string; boardId: string }
     | { kind: 'clear' };
 
@@ -587,6 +594,11 @@
   const BRUSH_LIBRARY_KEY = 'pixel-editor:brush-library';
   let brushLibrary = $state.raw<BrushDefinition[]>(start?.brushes?.map((brush) => ({ ...brush, mask: [...brush.mask] })) ?? []);
   let projectMetadata = $state.raw<ProjectMetadata>(start?.metadata ?? {});
+  let projectFileName = $state<string | null>(null);
+  let projectHandle = $state<string | null>(null);
+  let projectHasUnsavedChanges = $state(false);
+  let recentProjects = $state<DesktopRecentProject[]>([]);
+  let recentProjectsOpen = $state(false);
   let brushPanelName = $state('Моя кисть');
   let brushPanelType = $state<BrushType>('pencil');
   let selectedBrushId = $state('');
@@ -650,6 +662,7 @@
   let autosaveFailureReported = false;
   let autosaveArmed = false;
   let autosaveRevision = 0;
+  let suppressNextProjectDirtyMark = false;
 
   const activeTool = $derived(getTool(activeToolId));
   function shortcutLabel(actionId: string): string {
@@ -676,6 +689,18 @@
 
   $effect(() => {
     document.documentElement.dataset.theme = theme;
+  });
+
+  $effect(() => {
+    const updateWindowState = window.pixelEditorDesktop?.updateWindowState;
+    if (typeof updateWindowState === 'function') {
+      updateWindowState({
+        fileName: projectFileName,
+        dirty: projectHasUnsavedChanges,
+        canUndo,
+        canRedo,
+      });
+    }
   });
 
   // ——— Уведомления ———
@@ -712,7 +737,7 @@
     notesText = value;
     notesUpdatedAt = Date.now();
     notesStatus = 'сохраняется…';
-    scheduleAutosave();
+    scheduleAutosave(false);
   }
 
   async function importNotesFile(file: File): Promise<void> {
@@ -955,7 +980,18 @@
 
   const editorCommandActions = new Map<string, () => void>([
     ['save', () => void saveProject()],
+    ['save-as', () => void saveProject(true)],
     ['export', () => void exportImage()],
+    ['batch-export', () => void exportAllBoards()],
+    ['recent-projects', () => void showRecentProjects()],
+    ['save-before-close', () => {
+      void saveProject().then(async (saved) => {
+        if (saved) await window.pixelEditorDesktop?.closeWindowAfterSave();
+      }).catch((error: unknown) => notify(
+        `Не удалось сохранить проект перед закрытием: ${error instanceof Error ? error.message : String(error)}`,
+        'error',
+      ));
+    }],
     ['undo', undo],
     ['redo', redo],
     ['clear', requestClear],
@@ -1030,7 +1066,10 @@
     { label: 'Файл', items: [
       { label: 'Открыть…', command: 'open' },
       { label: 'Сохранить проект', command: 'save' },
+      { label: 'Сохранить как…', command: 'save-as' },
       { label: 'Экспорт изображения', command: 'export' },
+      { label: 'Пакетный экспорт холстов…', command: 'batch-export' },
+      { label: 'Недавние проекты…', command: 'recent-projects' },
       { label: 'Заметки проекта…', command: 'project-notes', separatorBefore: true },
     ] },
     { label: 'Правка', items: [
@@ -1622,7 +1661,8 @@
     }
   }
 
-  function scheduleAutosave(): void {
+  function scheduleAutosave(markProjectDirty = true): void {
+    if (markProjectDirty) projectHasUnsavedChanges = true;
     if (!autosaveRepository.canPersist) {
       saveStatus = 'unavailable';
       return;
@@ -1663,7 +1703,38 @@
       autosaveArmed = true;
       return;
     }
-    scheduleAutosave();
+    const markAsUnsaved = !suppressNextProjectDirtyMark;
+    suppressNextProjectDirtyMark = false;
+    scheduleAutosave(markAsUnsaved);
+  });
+
+  onMount(() => {
+    const desktop = window.pixelEditorDesktop;
+    if (
+      typeof desktop?.onOpenProject !== 'function' ||
+      typeof desktop.takePendingProject !== 'function' ||
+      typeof desktop.listRecentProjects !== 'function'
+    ) return;
+
+    const handleOpenProject = (payload: DesktopOpenProjectPayload) => {
+      void importProjectFile(new File([payload.data], payload.fileName), payload.handle);
+    };
+    const unsubscribe = desktop.onOpenProject(handleOpenProject);
+    void desktop.takePendingProject()
+      .then((payload) => {
+        if (payload) handleOpenProject(payload);
+      })
+      .catch((error: unknown) => notify(
+        `Не удалось получить проект, переданный при запуске: ${error instanceof Error ? error.message : String(error)}`,
+        'error',
+      ));
+    void desktop.listRecentProjects()
+      .then((projects) => (recentProjects = projects))
+      .catch((error: unknown) => notify(
+        `Не удалось загрузить список недавних проектов: ${error instanceof Error ? error.message : String(error)}`,
+        'error',
+      ));
+    return unsubscribe;
   });
 
   onDestroy(() => {
@@ -2800,28 +2871,70 @@
 
   // ——— Файлы: проект JSON и PNG ———
 
-  async function saveProject(): Promise<void> {
-    const filename = `pixel-art-${boards.length}-canvases.json`;
+  async function saveProject(forceDialog = false): Promise<boolean> {
+    const filename = `pixel-art-${boards.length}-canvases.pxproj`;
     try {
       const text = serializeProject(currentProject());
       const blob = new Blob([text], { type: 'application/json' });
-      if (await saveDesktopBlob(blob, filename) === 'saved') notify('Проект сохранён в файл.');
+      const result = await saveDesktopProject(blob, filename, projectHandle, forceDialog);
+      if (result.status === 'cancelled') return false;
+      projectFileName = result.fileName;
+      projectHandle = result.handle;
+      recentProjects = result.recentProjects;
+      projectHasUnsavedChanges = false;
+      notify('Проект сохранён в файл.');
+      return true;
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Не удалось сохранить проект.', 'error');
+      return false;
     }
   }
 
-  async function importProjectFile(file: File): Promise<void> {
+  async function importProjectFile(file: File, knownHandle: string | null = null): Promise<void> {
     const extension = file.name.split('.').at(-1)?.toLowerCase();
-    if (extension === 'json') {
+    if (extension === 'json' || extension === 'pxproj') {
       if (file.size > MAX_PROJECT_JSON_LENGTH) {
         notify('Файл слишком большой для проекта.', 'error');
         return;
       }
+      let handle = knownHandle;
       try {
+        const registerSelectedProject = window.pixelEditorDesktop?.registerSelectedProject;
+        if (!handle && typeof registerSelectedProject === 'function') {
+          handle = (await registerSelectedProject(file)).handle;
+        }
         const project = parseProject(await file.text());
-        pending = { kind: 'import', project, fileName: file.name };
+        pending = {
+          kind: 'import',
+          project,
+          fileName: file.name,
+          projectHandle: handle,
+          restoringBackup: false,
+        };
       } catch (error) {
+        if (handle) {
+          try {
+            const backup = await window.pixelEditorDesktop?.getLatestProjectBackup(handle);
+            if (backup) {
+              const project = parseProject(new TextDecoder().decode(backup.data));
+              pending = {
+                kind: 'import',
+                project,
+                fileName: file.name,
+                projectHandle: handle,
+                restoringBackup: true,
+              };
+              notify('Файл проекта повреждён; доступна резервная копия для восстановления.');
+              return;
+            }
+          } catch (backupError) {
+            notify(
+              `Проект и его резервная копия не читаются: ${backupError instanceof Error ? backupError.message : String(backupError)}`,
+              'error',
+            );
+            return;
+          }
+        }
         notify(error instanceof ProjectFormatError ? error.message : 'Не удалось прочитать файл проекта.', 'error');
       }
       return;
@@ -2856,6 +2969,26 @@
     }
   }
 
+  async function openRecentProject(id: string): Promise<void> {
+    try {
+      const payload = await window.pixelEditorDesktop?.openRecentProject(id);
+      if (!payload) throw new Error('Список недавних проектов недоступен.');
+      recentProjectsOpen = false;
+      await importProjectFile(new File([payload.data], payload.fileName), payload.handle);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Не удалось открыть недавний проект.', 'error');
+    }
+  }
+
+  async function showRecentProjects(): Promise<void> {
+    try {
+      recentProjects = (await window.pixelEditorDesktop?.listRecentProjects()) ?? [];
+      recentProjectsOpen = true;
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Не удалось загрузить список недавних проектов.', 'error');
+    }
+  }
+
   async function exportImage(): Promise<void> {
     const { width, height } = activeBoard.buffer;
     const exportLayers = activeBoard.layers.filter((layer) => layer.role !== 'reference');
@@ -2882,8 +3015,55 @@
     }
   }
 
+  async function exportAllBoards(): Promise<void> {
+    const desktop = window.pixelEditorDesktop;
+    if (!desktop) {
+      notify('Пакетный экспорт доступен только в настольном приложении.', 'error');
+      return;
+    }
+
+    let sessionId: string | null = null;
+    try {
+      sessionId = await desktop.beginBatchExport();
+      if (!sessionId) return;
+      const maxBatchScale = Math.min(...boards.map((board) =>
+        getAvailableExportScales(board.buffer.width, board.buffer.height).at(-1) ?? 1));
+      const scale = exportScale <= maxBatchScale ? exportScale : maxBatchScale;
+
+      for (let index = 0; index < boards.length; index++) {
+        const board = boards[index]!;
+        const exportLayers = board.layers.filter((layer) => layer.role !== 'reference');
+        const base = exportLayers.length
+          ? compositeLayers(board.buffer.width, board.buffer.height, exportLayers, undefined, undefined, board.groups)
+          : new PixelBuffer(board.buffer.width, board.buffer.height);
+        const exportBuffer = includeReferencesInExport
+          ? applyReferencesToBuffer(base, board.x, board.y, references)
+          : base;
+        const blob = await exportPngBlob(exportBuffer, scale);
+        const fileName = `pixel-editor-${Date.now()}-canvas-${index + 1}-${board.buffer.width * scale}x${board.buffer.height * scale}.png`;
+        await desktop.writeBatchExport(sessionId, fileName, new Uint8Array(await blob.arrayBuffer()));
+        notify(`Пакетный экспорт: ${index + 1} из ${boards.length}.`);
+      }
+      notify(`Экспортировано холстов: ${boards.length}.`);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Не удалось экспортировать холсты.', 'error');
+    } finally {
+      if (sessionId) {
+        try {
+          await desktop.endBatchExport(sessionId);
+        } catch (error) {
+          notify(
+            `Не удалось завершить сеанс пакетного экспорта: ${error instanceof Error ? error.message : String(error)}`,
+            'error',
+          );
+        }
+      }
+    }
+  }
+
   /** Подставляет в редактор загруженный проект; история при этом начинается заново. */
   function applyProject(project: ProjectData): void {
+    suppressNextProjectDirtyMark = true;
     buffer.setClipMask(null);
     selectionMask = null;
     selectionPreview = null;
@@ -3008,7 +3188,7 @@
     pending = { kind: 'resize', width, height };
   }
 
-  function confirmPending(): void {
+  async function confirmPending(): Promise<void> {
     const action = pending;
     pending = null;
     if (!action) return;
@@ -3111,7 +3291,20 @@
       notify('Фото импортировано отдельным слоем на выбранный холст.');
     } else {
       applyProject(action.project);
-      notify('Проект открыт.');
+      projectFileName = action.fileName;
+      projectHandle = action.projectHandle;
+      projectHasUnsavedChanges = action.restoringBackup;
+      let recentWarning: string | null = null;
+      if (projectHandle && window.pixelEditorDesktop) {
+        try {
+          recentProjects = await window.pixelEditorDesktop.setCurrentProject(projectHandle);
+        } catch (error) {
+          recentWarning = `Проект открыт, но не удалось обновить список недавних файлов: ${error instanceof Error ? error.message : String(error)}`;
+        }
+      }
+      notify(recentWarning ?? (action.restoringBackup
+        ? 'Проект восстановлен из резервной копии. Сохраните его, чтобы заменить повреждённый файл.'
+        : 'Проект открыт.'), recentWarning ? 'error' : 'info');
     }
   }
 
@@ -3130,6 +3323,13 @@
 
     if (action.kind === 'import') {
       const { width, height } = action.project;
+      if (action.restoringBackup) {
+        return {
+          title: 'Восстановить проект из резервной копии?',
+          message: `Основной файл «${action.fileName}» повреждён. Будет восстановлена последняя корректная копия; сохраните проект, чтобы заменить повреждённый файл.`,
+          confirmText: 'Восстановить',
+        };
+      }
       return {
         title: 'Открыть проект?',
         message: `Файл «${action.fileName}» (${width}×${height}) заменит текущий рисунок. История действий будет очищена, отменить замену нельзя.`,
@@ -3242,6 +3442,22 @@
     shortcutSequenceTimer = undefined;
   }
 
+  function onFileDragOver(event: DragEvent): void {
+    if (event.dataTransfer && Array.from(event.dataTransfer.types).includes('Files')) {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'copy';
+    }
+  }
+
+  function onFileDrop(event: DragEvent): void {
+    if (!event.dataTransfer || !Array.from(event.dataTransfer.types).includes('Files')) return;
+    event.preventDefault();
+    const files = Array.from(event.dataTransfer.files);
+    if (files.length > 1) notify('За один раз можно открыть или импортировать один файл.', 'error');
+    const file = files[0];
+    if (file) void importProjectFile(file);
+  }
+
   if (storage) {
     try {
       const savedBrushes = storage.getItem(BRUSH_LIBRARY_KEY);
@@ -3261,7 +3477,14 @@
   if (brushLibraryError) notify(brushLibraryError, 'error');
 </script>
 
-<svelte:window onkeydown={onKeyDown} onkeyup={onKeyUp} onblur={onWindowBlur} onpagehide={flushAutosave} />
+<svelte:window
+  onkeydown={onKeyDown}
+  onkeyup={onKeyUp}
+  onblur={onWindowBlur}
+  onpagehide={flushAutosave}
+  ondragover={onFileDragOver}
+  ondrop={onFileDrop}
+/>
 <svelte:document onvisibilitychange={onVisibilityChange} />
 
 <div class="app">
@@ -3288,7 +3511,7 @@
     onundo={undo}
     onredo={redo}
     onopen={importProjectFile}
-    onsave={saveProject}
+    onsave={() => void saveProject()}
     onexport={exportImage}
     onformat={(format) => (exportFormat = format)}
     onscale={(scale) => {
@@ -3798,6 +4021,14 @@
     cancelText="Отмена"
     onconfirm={confirmPending}
     oncancel={cancelPending}
+  />
+{/if}
+
+{#if recentProjectsOpen}
+  <RecentProjectsDialog
+    projects={recentProjects}
+    onselect={(id) => void openRecentProject(id)}
+    onclose={() => (recentProjectsOpen = false)}
   />
 {/if}
 

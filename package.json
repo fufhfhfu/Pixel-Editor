@@ -74,8 +74,18 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Pixel Editor"
+      "shortcutName": "Pixel Editor",
+      "include": "electron/installer.nsh"
     },
+    "fileAssociations": [
+      {
+        "ext": "pxproj",
+        "name": "Pixel Editor project",
+        "description": "Pixel Editor project",
+        "role": "Editor",
+        "mimeType": "application/vnd.pixel-editor.project+json"
+      }
+    ],
     "portable": {
       "artifactName": "${productName}-${version}-portable.${ext}"
     }

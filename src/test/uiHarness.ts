@@ -12,7 +12,13 @@ interface PutCall {
 export const putCalls: PutCall[] = [];
 export let canvasData: Uint8ClampedArray | null = null;
 export const rasterDrawCalls: number[][] = [];
-export const desktopSaveFile = vi.fn(async () => 'saved' as const);
+export const desktopSaveFile = vi.fn(async () => ({ status: 'saved', fileName: 'art.json' } as const));
+export const desktopSaveProjectFile = vi.fn(async () => ({
+  status: 'saved',
+  fileName: 'art.pxproj',
+  handle: 'test-project',
+  recentProjects: [],
+} as const));
 
 function installDomStubs(): void {
   const proto = HTMLCanvasElement.prototype as unknown as { getContext: () => unknown };
@@ -159,11 +165,16 @@ beforeEach(async () => {
   canvasData = null;
   rasterDrawCalls.length = 0;
   desktopSaveFile.mockClear();
+  desktopSaveProjectFile.mockClear();
   localStorage.clear();
   localStorage.setItem(WELCOME_SEEN_KEY, 'true');
   Object.defineProperty(window, 'pixelEditorDesktop', {
     configurable: true,
-    value: { saveFile: desktopSaveFile },
+    value: {
+      saveFile: desktopSaveFile,
+      saveProjectFile: desktopSaveProjectFile,
+      updateWindowState: vi.fn(),
+    },
   });
   document.body.innerHTML = '<div id="app"></div>';
   await mountApp();

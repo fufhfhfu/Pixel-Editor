@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { onDestroy, tick } from 'svelte';
   import CommandSearch from './CommandSearch.svelte';
 
   export interface EditorMenuItem {
@@ -27,6 +27,17 @@
   let openGroup = $state<string | null>(null);
   let root: HTMLElement;
   let fileInput: HTMLInputElement;
+  const desktop = window.pixelEditorDesktop;
+  const onNativeMenuCommand = desktop?.onMenuCommand;
+  const nativeMenuAvailable = typeof onNativeMenuCommand === 'function';
+  const unsubscribeMenuCommand = nativeMenuAvailable
+    ? onNativeMenuCommand((command) => {
+        if (command === 'open') fileInput.click();
+        else oncommand(command);
+      })
+    : undefined;
+
+  onDestroy(() => unsubscribeMenuCommand?.());
 
   function closeMenu(restoreFocus = false): void {
     const previous = openGroup;
@@ -100,34 +111,39 @@
 <svelte:window onkeydown={onWindowKeydown} />
 
 <nav class="menu-bar" aria-label="Главное меню" bind:this={root}>
-  {#each groups as group (group.label)}
-    <div class="menu">
-      <button type="button" class="menu-trigger" aria-haspopup="menu"
-        aria-expanded={openGroup === group.label} data-menu={group.label}
-        onkeydown={(event) => onTriggerKeydown(event, group.label)}
-        onclick={() => (openGroup = openGroup === group.label ? null : group.label)}>
-        {group.label}
-      </button>
-      {#if openGroup === group.label}
-        <div class="menu-popup" role="menu" aria-label={group.label}>
-          {#each group.items as item (`${group.label}-${item.command}`)}
-            {#if item.separatorBefore}<div class="separator" role="separator"></div>{/if}
-            <button type="button" role="menuitem" tabindex="-1" disabled={item.disabled}
-              onclick={() => selectCommand(item.command)}>{item.label}</button>
-          {/each}
-        </div>
+  {#if nativeMenuAvailable}
+    <button type="button" class="menu-trigger" aria-label="Настройки"
+      onclick={(event) => onsettings(event.currentTarget)}>Настройки</button>
+  {:else}
+    {#each groups as group (group.label)}
+      <div class="menu">
+        <button type="button" class="menu-trigger" aria-haspopup="menu"
+          aria-expanded={openGroup === group.label} data-menu={group.label}
+          onkeydown={(event) => onTriggerKeydown(event, group.label)}
+          onclick={() => (openGroup = openGroup === group.label ? null : group.label)}>
+          {group.label}
+        </button>
+        {#if openGroup === group.label}
+          <div class="menu-popup" role="menu" aria-label={group.label}>
+            {#each group.items as item (`${group.label}-${item.command}`)}
+              {#if item.separatorBefore}<div class="separator" role="separator"></div>{/if}
+              <button type="button" role="menuitem" tabindex="-1" disabled={item.disabled}
+                onclick={() => selectCommand(item.command)}>{item.label}</button>
+            {/each}
+          </div>
+        {/if}
+      </div>
+      {#if group.label === 'Окно'}
+        <button type="button" class="menu-trigger" aria-label="Настройки"
+          onclick={(event) => {
+            closeMenu();
+            onsettings(event.currentTarget);
+          }}>Настройки</button>
       {/if}
-    </div>
-    {#if group.label === 'Окно'}
-      <button type="button" class="menu-trigger" aria-label="Настройки"
-        onclick={(event) => {
-          closeMenu();
-          onsettings(event.currentTarget);
-        }}>Настройки</button>
-    {/if}
-  {/each}
+    {/each}
+  {/if}
   <CommandSearch {groups} {canSearch} onsearchchange={onSearchChange} onselect={selectCommand} />
-  <input class="hidden" type="file" accept=".json,.png,.jpg,.jpeg,.webp,.bmp,application/json,image/png,image/jpeg,image/webp,image/bmp"
+  <input class="hidden" type="file" accept=".pxproj,.json,.png,.jpg,.jpeg,.webp,.bmp,application/json,image/png,image/jpeg,image/webp,image/bmp"
     tabindex="-1" aria-hidden="true" bind:this={fileInput} onchange={onFileChange} />
 </nav>
 

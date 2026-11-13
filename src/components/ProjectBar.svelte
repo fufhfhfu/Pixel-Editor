@@ -148,7 +148,7 @@
     <input
       class="hidden"
       type="file"
-      accept=".json,.png,.jpg,.jpeg,.webp,.bmp,application/json,image/png,image/jpeg,image/webp,image/bmp"
+      accept=".pxproj,.json,.png,.jpg,.jpeg,.webp,.bmp,application/json,image/png,image/jpeg,image/webp,image/bmp"
       tabindex="-1"
       aria-hidden="true"
       bind:this={fileInput}

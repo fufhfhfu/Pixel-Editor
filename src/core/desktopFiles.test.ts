@@ -7,7 +7,7 @@ afterEach(() => {
 
 describe('сохранение файлов настольного приложения', () => {
   it('передаёт содержимое в системный диалог Electron', async () => {
-    const saveFile = vi.fn(async () => 'saved' as const);
+    const saveFile = vi.fn(async () => ({ status: 'saved', fileName: 'art.png' } as const));
     vi.stubGlobal('window', { pixelEditorDesktop: { saveFile } });
 
     await expect(saveDesktopBlob(new Blob(['pixels'], { type: 'image/png' }), 'art.png')).resolves.toBe('saved');

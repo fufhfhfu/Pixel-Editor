@@ -1,5 +1,5 @@
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from '@playwright/test';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,6 +14,19 @@ const onePixelPng = Buffer.from(
 let electronApp: ElectronApplication;
 let page: Page;
 let userDataPath: string;
+
+async function clickNativeMenuItem(menuLabel: string, itemLabel: string): Promise<void> {
+  await electronApp.evaluate(({ Menu, BrowserWindow }, labels) => {
+    const menuItem = Menu.getApplicationMenu()?.items
+      .find((item) => item.label === labels.menuLabel)?.submenu?.items
+      .find((item) => item.label === labels.itemLabel);
+    const window = BrowserWindow.getAllWindows()[0];
+    if (!menuItem?.click || !window) {
+      throw new Error(`В нативном меню не найдена команда «${labels.itemLabel}».`);
+    }
+    menuItem.click(menuItem, window, undefined!);
+  }, { menuLabel, itemLabel });
+}
 
 test.describe.serial('Основные пользовательские потоки Electron', () => {
   test.describe.configure({ timeout: 180_000 });
@@ -34,6 +47,12 @@ test.describe.serial('Основные пользовательские пото
     await expect.poll(() =>
       page.evaluate(() => typeof window.pixelEditorDesktop?.saveFile),
     ).toBe('function');
+    await expect.poll(() =>
+      electronApp.evaluate(({ Menu }) => Menu.getApplicationMenu()?.items.map((item) => item.label) ?? []),
+    ).toEqual(['Файл', 'Правка', 'Вид', 'Холст', 'Слой', 'Кадр', 'Анимация', 'Инструменты', 'Окно']);
+    await expect.poll(() =>
+      electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.getTitle()),
+    ).toBe('Pixel Editor');
 
     const welcomeButton = page.getByRole('button', { name: 'Начать работу' });
     if (await welcomeButton.count()) await welcomeButton.click();
@@ -58,8 +77,11 @@ test.describe.serial('Основные пользовательские пото
   test('creates, saves, and opens a project', async () => {
     await page.locator('.bar button[title^="Сохранить проект"]').click();
     await expect(page.getByRole('status')).toContainText('Проект сохранён в файл.');
+    await expect.poll(() =>
+      electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.getTitle()),
+    ).toBe('Pixel Editor — pixel-art-1-canvases.pxproj');
 
-    const savedProjectPath = join(userDataPath, 'pixel-art-1-canvases.json');
+    const savedProjectPath = join(userDataPath, 'pixel-art-1-canvases.pxproj');
     const savedProject = JSON.parse(await readFile(savedProjectPath, 'utf8')) as {
       format: string;
       version: number;
@@ -68,6 +90,26 @@ test.describe.serial('Основные пользовательские пото
     expect(savedProject.format).toBe('pixel-editor-project');
     expect(savedProject.version).toBeGreaterThanOrEqual(1);
     expect(savedProject.canvases).toHaveLength(1);
+
+    await electronApp.evaluate(({ dialog }, directory) => {
+      Object.defineProperty(dialog, 'showSaveDialog', {
+        configurable: true,
+        value: async () => ({ canceled: false, filePath: `${directory}\\saved-as-project.pxproj` }),
+      });
+    }, userDataPath);
+    await clickNativeMenuItem('Файл', 'Сохранить как…');
+    await expect.poll(() =>
+      electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.getTitle()),
+    ).toBe('Pixel Editor — saved-as-project.pxproj');
+    await electronApp.evaluate(({ dialog }, directory) => {
+      Object.defineProperty(dialog, 'showSaveDialog', {
+        configurable: true,
+        value: async (_window: unknown, options: { defaultPath?: string }) => ({
+          canceled: false,
+          filePath: `${directory}\\${options.defaultPath ?? 'pixel-editor-export'}`,
+        }),
+      });
+    }, userDataPath);
 
     const importedProjectPath = join(userDataPath, 'imported-project.json');
     await writeFile(importedProjectPath, JSON.stringify({
@@ -82,13 +124,25 @@ test.describe.serial('Основные пользовательские пото
       recent: [],
     }));
 
-    await page.locator('.menu-bar [data-menu="Файл"]').click();
-    await page.getByRole('menuitem', { name: 'Открыть…' }).click();
+    await clickNativeMenuItem('Файл', 'Открыть…');
     await page.locator('.menu-bar input[type="file"]').setInputFiles(importedProjectPath);
     await page.getByRole('dialog', { name: 'Открыть проект?' }).getByRole('button', { name: 'Открыть', exact: true }).click();
 
     await expect(page.locator('.board.selected > canvas:not(.transform-preview):not(.selection-overlay)'))
       .toHaveJSProperty('width', 8);
+    await expect(page.getByRole('status')).toContainText('Проект открыт.');
+    await expect.poll(() =>
+      electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.getTitle()),
+    ).toBe('Pixel Editor — imported-project.json');
+  });
+
+  test('opens a project from the recent-projects list', async () => {
+    await clickNativeMenuItem('Файл', 'Недавние проекты…');
+    const dialog = page.getByRole('dialog', { name: 'Недавние проекты' });
+    await expect(dialog.getByRole('button', { name: /imported-project\.json/u })).toBeVisible();
+    await dialog.getByRole('button', { name: /imported-project\.json/u }).click();
+    await page.getByRole('dialog', { name: 'Открыть проект?' })
+      .getByRole('button', { name: 'Открыть', exact: true }).click();
     await expect(page.getByRole('status')).toContainText('Проект открыт.');
   });
 
@@ -106,16 +160,65 @@ test.describe.serial('Основные пользовательские пото
     await expect(redo).toBeEnabled();
     await redo.click();
     await expect(undo).toBeEnabled();
+    await expect.poll(() =>
+      electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.getTitle()),
+    ).toBe('Pixel Editor — imported-project.json *');
+    await page.locator('.bar button[title^="Сохранить проект"]').click();
+    await expect.poll(() =>
+      electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.getTitle()),
+    ).toBe('Pixel Editor — imported-project.json');
+  });
+
+  test('restores a project from its latest backup after corruption', async () => {
+    const projectPath = join(userDataPath, 'imported-project.json');
+    await writeFile(projectPath, '{ broken project');
+    await clickNativeMenuItem('Файл', 'Недавние проекты…');
+    await page.getByRole('dialog', { name: 'Недавние проекты' })
+      .getByRole('button', { name: /imported-project\.json/u }).click();
+    await expect(page.getByRole('status')).toContainText('доступна резервная копия');
+    await page.getByRole('dialog', { name: 'Восстановить проект из резервной копии?' })
+      .getByRole('button', { name: 'Восстановить', exact: true }).click();
+    await expect(page.getByRole('status')).toContainText('Проект восстановлен из резервной копии.');
+    await expect.poll(() =>
+      electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.getTitle()),
+    ).toBe('Pixel Editor — imported-project.json *');
+  });
+
+  test('toggles native fullscreen and persists safe window bounds', async () => {
+    await clickNativeMenuItem('Вид', 'Полноэкранный режим');
+    await expect.poll(() =>
+      electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.isFullScreen()),
+    ).toBe(true);
+    await expect.poll(() =>
+      electronApp.evaluate(({ Menu }) => Menu.getApplicationMenu()?.getMenuItemById('view-fullscreen')?.checked),
+    ).toBe(true);
+    await clickNativeMenuItem('Вид', 'Полноэкранный режим');
+    await expect.poll(() =>
+      electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.isFullScreen()),
+    ).toBe(false);
+    await expect.poll(() =>
+      electronApp.evaluate(({ Menu }) => Menu.getApplicationMenu()?.getMenuItemById('view-fullscreen')?.checked),
+    ).toBe(false);
+
+    await electronApp.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows()[0]?.setBounds({ x: 120, y: 100, width: 1100, height: 760 });
+    });
+    await expect.poll(async () => {
+      const state = JSON.parse(await readFile(join(userDataPath, 'window-state.json'), 'utf8')) as {
+        bounds: { x: number; y: number; width: number; height: number };
+      };
+      return state.bounds;
+    }, { timeout: 5_000 }).toEqual({ x: 120, y: 100, width: 1100, height: 760 });
   });
 
   test('imports an image and exports a PNG', async () => {
-    await page.locator('.menu-bar [data-menu="Файл"]').click();
-    await page.getByRole('menuitem', { name: 'Открыть…' }).click();
-    await page.locator('.menu-bar input[type="file"]').setInputFiles({
-      name: 'one-pixel.png',
-      mimeType: 'image/png',
-      buffer: onePixelPng,
-    });
+    await page.evaluate((encodedImage) => {
+      const bytes = Uint8Array.from(atob(encodedImage), (character) => character.charCodeAt(0));
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([bytes], 'one-pixel.png', { type: 'image/png' }));
+      window.dispatchEvent(new DragEvent('dragover', { dataTransfer: transfer, bubbles: true, cancelable: true }));
+      window.dispatchEvent(new DragEvent('drop', { dataTransfer: transfer, bubbles: true, cancelable: true }));
+    }, onePixelPng.toString('base64'));
     await page.getByRole('dialog', { name: 'Импортировать изображение?' })
       .getByRole('button', { name: 'Импортировать', exact: true }).click();
     await expect(page.getByRole('status')).toContainText('Фото импортировано отдельным слоем на выбранный холст.');
@@ -161,9 +264,70 @@ test.describe.serial('Основные пользовательские пото
     await expect(page.locator('.board.selected')).toHaveCount(1);
   });
 
+  test('exports all canvases to a selected folder', async () => {
+    await electronApp.evaluate(({ dialog }, directory) => {
+      Object.defineProperty(dialog, 'showOpenDialog', {
+        configurable: true,
+        value: async () => ({ canceled: false, filePaths: [directory] }),
+      });
+    }, userDataPath);
+    await clickNativeMenuItem('Файл', 'Пакетный экспорт холстов…');
+    await expect(page.getByRole('status')).toContainText('Экспортировано холстов: 2.');
+    const exportedFiles = (await readdir(userDataPath)).filter((name) =>
+      /^pixel-editor-\d{13}-canvas-[12]-\d+x\d+\.png$/u.test(name),
+    );
+    expect(exportedFiles).toHaveLength(2);
+  });
+
+  test('opens a project sent by a second application launch', async () => {
+    const projectPath = join(userDataPath, 'command-line-project.pxproj');
+    await writeFile(projectPath, JSON.stringify({
+      format: 'pixel-editor-project',
+      version: 1,
+      savedAt: '2026-11-12T00:00:00.000Z',
+      width: 7,
+      height: 7,
+      pixels: Buffer.alloc(7 * 7 * 4).toString('base64'),
+      palette: { id: 'pico8', freeColor: false },
+      colors: { primary: [255, 0, 77, 255], secondary: [255, 241, 232, 255] },
+      recent: [],
+    }));
+    await electronApp.evaluate(({ app }, filePath) => {
+      app.emit('second-instance', {}, [process.execPath, filePath], process.cwd());
+    }, projectPath);
+    await page.getByRole('dialog', { name: 'Открыть проект?' })
+      .getByRole('button', { name: 'Открыть', exact: true }).click();
+    await expect(page.locator('.board.selected > canvas:not(.transform-preview):not(.selection-overlay)'))
+      .toHaveJSProperty('width', 7);
+  });
+
+  test('keeps the window open when closing a dirty project is cancelled', async () => {
+    const canvas = page.locator('.board.selected > canvas:not(.transform-preview):not(.selection-overlay)');
+    const bounds = await canvas.boundingBox();
+    if (!bounds) throw new Error('Активный холст не отображается.');
+    await page.mouse.click(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+    await expect.poll(() =>
+      electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.getTitle()),
+    ).toContain(' *');
+    await electronApp.evaluate(({ dialog, BrowserWindow }) => {
+      const originalShowMessageBox = dialog.showMessageBox;
+      Object.defineProperty(dialog, 'showMessageBox', {
+        configurable: true,
+        value: async () => ({ response: 2 }),
+      });
+      BrowserWindow.getAllWindows()[0]?.close();
+      Object.defineProperty(dialog, 'showMessageBox', {
+        configurable: true,
+        value: originalShowMessageBox,
+      });
+    });
+    await expect.poll(() =>
+      electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.getTitle()),
+    ).toContain(' *');
+  });
+
   test('imports project notes from Markdown', async () => {
-    await page.locator('.menu-bar [data-menu="Файл"]').click();
-    await page.getByRole('menuitem', { name: 'Заметки проекта…' }).click();
+    await clickNativeMenuItem('Файл', 'Заметки проекта…');
     await page.locator('input[accept*=".markdown"]').setInputFiles({
       name: 'project-notes.md',
       mimeType: 'text/markdown',
@@ -172,5 +336,8 @@ test.describe.serial('Основные пользовательские пото
 
     await expect(page.getByRole('textbox', { name: 'Текст заметок' }))
       .toHaveValue('# Project notes\n\nImport works in Electron.');
+    await page.getByRole('dialog', { name: 'Заметки' }).getByRole('button', { name: 'Закрыть' }).click();
+    await page.locator('.bar button[title^="Сохранить проект"]').click();
+    await expect(page.getByRole('status')).toContainText('Проект сохранён в файл.');
   });
 });

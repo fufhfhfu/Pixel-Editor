@@ -81,6 +81,25 @@ describe('проект JSON', () => {
     expect(parseProject(serializeProject(sample())).notes).toBeUndefined();
   });
 
+  it('сохраняет заголовок и даты заметок в версии 13', () => {
+    const project = {
+      ...sample(),
+      notes: 'Project notes',
+      notesMetadata: { title: 'Planning', createdAt: 1_700_000_000_000, updatedAt: 1_700_000_100_000 },
+    };
+    const json = serializeProject(project);
+
+    expect(JSON.parse(json).version).toBe(13);
+    expect(parseProject(json)).toMatchObject({
+      notes: project.notes,
+      notesMetadata: project.notesMetadata,
+    });
+    expect(() => serializeProject({
+      ...project,
+      notesMetadata: { ...project.notesMetadata, updatedAt: project.notesMetadata.createdAt - 1 },
+    })).toThrow(/метаданные заметок/i);
+  });
+
   it('проверяет метаданные JSON до применения', () => {
     expect(parseProjectMetadataJson('{"title":"Sprite","tags":["game"]}')).toEqual({
       title: 'Sprite',

@@ -2,11 +2,13 @@ const { app, BrowserWindow, dialog, ipcMain, Menu, screen, shell } = require('el
 const path = require('node:path');
 const {
   copyFile,
+  mkdtemp,
   mkdir,
   readFile,
   readdir,
   realpath,
   rename,
+  rm,
   stat,
   unlink,
   writeFile,
@@ -25,6 +27,7 @@ const PROJECT_EXTENSIONS = ['.pxproj', '.json'];
 const MAX_PROJECT_FILE_BYTES = 32 * 1024 * 1024;
 const MAX_RECENT_PROJECTS = 10;
 const RECENT_PROJECTS_FILENAME = 'recent-projects.json';
+const NOTES_BACKUP_FILENAME = 'project-notes-backup.json';
 const PROJECT_BACKUP_DIRECTORY = '.pixel-editor-backups';
 const PROJECT_BACKUP_RETENTION = 3;
 const FILE_TYPES = {
@@ -53,6 +56,9 @@ let rendererReady = false;
 let pendingProjectOpen;
 let recentProjects = [];
 let recentProjectsPath;
+let notesBackupPath;
+let latestNotesBackup = null;
+let persistedNotesBackup = null;
 const projectHandles = new Map();
 const projectExportSessions = new Map();
 let startupProjectPath = findProjectPathArgument(process.argv);
@@ -414,6 +420,42 @@ async function flushWindowStateSave() {
   }
 }
 
+async function loadNotesBackup() {
+  try {
+    const stored = JSON.parse(await readFile(notesBackupPath, 'utf8'));
+    if (!isValidNotesBackup(stored)) throw new TypeError('Файл резервной копии заметок имеет некорректный формат.');
+    latestNotesBackup = stored;
+    persistedNotesBackup = stored;
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return;
+    console.error('Не удалось прочитать резервную копию заметок.', error);
+    latestNotesBackup = null;
+  }
+}
+
+async function persistNotesBackup() {
+  if (!notesBackupPath || !latestNotesBackup) return;
+  const temporaryPath = `${notesBackupPath}.${process.pid}.tmp`;
+  try {
+    await writeFile(temporaryPath, JSON.stringify({
+      format: 'pixel-editor-notes',
+      version: 1,
+      ...latestNotesBackup,
+      backedUpAt: new Date().toISOString(),
+    }));
+    await rename(temporaryPath, notesBackupPath);
+    persistedNotesBackup = { ...latestNotesBackup };
+  } catch (error) {
+    console.error('Не удалось сохранить резервную копию заметок.', error);
+    try {
+      await unlink(temporaryPath);
+    } catch (cleanupError) {
+      if (cleanupError.code !== 'ENOENT') console.error('Не удалось удалить временный файл резервной копии заметок.', cleanupError);
+    }
+    throw error;
+  }
+}
+
 function showStartupError(message, error) {
   if (startupErrorShown) return;
   startupErrorShown = true;
@@ -460,18 +502,38 @@ function updateWindowState(event, state) {
     )) ||
     typeof state.dirty !== 'boolean' ||
     typeof state.canUndo !== 'boolean' ||
-    typeof state.canRedo !== 'boolean'
+    typeof state.canRedo !== 'boolean' ||
+    !isValidNotesBackup(state.notesBackup)
   ) {
     console.error('Отклонено некорректное состояние окна.');
     return;
   }
 
+  latestNotesBackup = { ...state.notesBackup };
   const projectLabel = state.fileName ?? (state.dirty ? 'Новый проект' : null);
   projectIsDirty = state.dirty;
   mainWindow.setTitle(
     `${APP_TITLE}${projectLabel ? ` — ${projectLabel}` : ''}${state.dirty ? ' *' : ''}`,
   );
   updateNativeMenuState(state);
+}
+
+function isValidNotesBackup(value) {
+  return Boolean(
+    value &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    typeof value.title === 'string' &&
+    value.title.length <= 200 &&
+    typeof value.notes === 'string' &&
+    value.notes.length <= 5 * 1024 * 1024 &&
+    Number.isSafeInteger(value.createdAt) &&
+    Number.isSafeInteger(value.updatedAt) &&
+    value.createdAt >= 0 &&
+    value.updatedAt >= value.createdAt &&
+    Number.isFinite(new Date(value.createdAt).getTime()) &&
+    Number.isFinite(new Date(value.updatedAt).getTime()),
+  );
 }
 
 function createWindow() {
@@ -808,6 +870,93 @@ ipcMain.handle('pixel-editor:close-after-save', (event) => {
   mainWindow.close();
 });
 
+ipcMain.handle('pixel-editor:get-notes-backup', (event) => {
+  assertMainWindowSender(event);
+  return persistedNotesBackup ? { ...persistedNotesBackup } : null;
+});
+
+function escapeHtml(value) {
+  return value.replace(/[&<>"']/gu, (character) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  })[character]);
+}
+
+function validateNotesPdfRequest(request) {
+  if (
+    !request ||
+    typeof request !== 'object' ||
+    Array.isArray(request) ||
+    !isValidNotesBackup(request)
+  ) {
+    throw new TypeError('Некорректное содержимое заметок для PDF.');
+  }
+  return request;
+}
+
+ipcMain.handle('pixel-editor:export-notes-pdf', async (event, request) => {
+  assertMainWindowSender(event);
+  const notes = validateNotesPdfRequest(request);
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Экспортировать заметки в PDF',
+    defaultPath: 'pixel-editor-notes.pdf',
+    filters: [{ name: 'PDF document', extensions: ['pdf'] }],
+  });
+  if (result.canceled || !result.filePath) return { status: 'cancelled' };
+
+  let outputPath = result.filePath;
+  if (!path.extname(outputPath)) outputPath += '.pdf';
+  if (path.extname(outputPath).toLowerCase() !== '.pdf') {
+    throw new TypeError('Заметки можно экспортировать только в PDF.');
+  }
+
+  const temporaryDirectory = await mkdtemp(path.join(app.getPath('temp'), 'pixel-editor-notes-'));
+  const htmlPath = path.join(temporaryDirectory, 'notes.html');
+  const pdfTemporaryPath = `${outputPath}.${process.pid}.${randomUUID()}.tmp`;
+  const title = escapeHtml(notes.title || 'Заметки проекта');
+  const content = escapeHtml(notes.notes);
+  const created = new Date(notes.createdAt).toLocaleString('ru-RU');
+  const updated = new Date(notes.updatedAt).toLocaleString('ru-RU');
+  const html = `<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>${title}</title><style>
+    @page { size: A4; margin: 20mm; }
+    body { font: 11pt/1.55 Arial, sans-serif; color: #202124; }
+    h1 { font-size: 20pt; margin: 0 0 8mm; }
+    .dates { color: #5f6368; font-size: 9pt; margin-bottom: 10mm; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+  </style></head><body><h1>${title}</h1><div class="dates">Создано: ${created}<br>Изменено: ${updated}</div><pre>${content}</pre></body></html>`;
+  let pdfWindow;
+  try {
+    await writeFile(htmlPath, html, 'utf8');
+    pdfWindow = new BrowserWindow({
+      show: false,
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+        sandbox: true,
+        webSecurity: true,
+      },
+    });
+    await pdfWindow.loadFile(htmlPath);
+    const pdf = await pdfWindow.webContents.printToPDF({ pageSize: 'A4', printBackground: true });
+    await writeFile(pdfTemporaryPath, pdf);
+    await rename(pdfTemporaryPath, outputPath);
+    return { status: 'saved', fileName: path.basename(outputPath) };
+  } catch (error) {
+    try {
+      await unlink(pdfTemporaryPath);
+    } catch (cleanupError) {
+      if (cleanupError.code !== 'ENOENT') console.error('Не удалось удалить временный PDF.', cleanupError);
+    }
+    throw error;
+  } finally {
+    if (pdfWindow && !pdfWindow.isDestroyed()) pdfWindow.destroy();
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
 ipcMain.handle('pixel-editor:save-file', async (event, request) => {
   if (!mainWindow || event.sender !== mainWindow.webContents) {
     throw new Error('Запрос сохранения поступил из неизвестного окна.');
@@ -863,7 +1012,9 @@ app.whenReady().then(async () => {
   feedbackNotesStore = createFeedbackNotesStore(app.getPath('userData'));
   windowStatePath = path.join(app.getPath('userData'), WINDOW_STATE_FILENAME);
   recentProjectsPath = path.join(app.getPath('userData'), RECENT_PROJECTS_FILENAME);
+  notesBackupPath = path.join(app.getPath('userData'), NOTES_BACKUP_FILENAME);
   await loadRecentProjects();
+  await loadNotesBackup();
   savedWindowState = await loadWindowState();
   buildNativeMenu();
   createWindow();
@@ -881,7 +1032,16 @@ app.on('before-quit', (event) => {
   if (quitAfterWindowStateSave) return;
   event.preventDefault();
   quitAfterWindowStateSave = true;
-  void flushWindowStateSave().finally(() => app.quit());
+  void Promise.all([flushWindowStateSave(), persistNotesBackup()])
+    .then(() => app.quit())
+    .catch((error) => {
+      console.error('Не удалось завершить сохранение данных при закрытии приложения.', error);
+      dialog.showErrorBox(
+        'Не удалось сохранить данные Pixel Editor',
+        error instanceof Error ? error.message : String(error),
+      );
+      app.quit();
+    });
 });
 
 app.on('window-all-closed', () => {

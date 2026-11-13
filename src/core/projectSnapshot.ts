@@ -1,6 +1,6 @@
 import type { AnimationFrame } from './animation';
 import type { Palette } from './palette';
-import type { ProjectData, ProjectMetadata } from './project';
+import type { ProjectData, ProjectMetadata, ProjectNotesMetadata } from './project';
 import type { PixelBuffer, RGBA } from './state';
 import type { LayerGroup, RasterLayer } from './layers';
 import type { ReferenceImage } from './reference';
@@ -25,6 +25,7 @@ export interface ProjectSnapshotInput {
   secondary: RGBA;
   recent: RGBA[];
   notes: string;
+  notesMetadata: ProjectNotesMetadata;
   references: ReferenceImage[];
   customPalettes: Palette[];
   tilemap: TilemapData | null;
@@ -46,6 +47,7 @@ export function buildProjectSnapshot(input: ProjectSnapshotInput): ProjectData {
     secondary: input.secondary,
     recent: input.recent,
     notes: input.notes,
+    notesMetadata: input.notesMetadata,
     references: input.references,
     customPalettes: input.customPalettes.length ? input.customPalettes : undefined,
     tilemap: input.tilemap ?? undefined,

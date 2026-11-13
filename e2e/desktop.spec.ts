@@ -328,16 +328,79 @@ test.describe.serial('Основные пользовательские пото
 
   test('imports project notes from Markdown', async () => {
     await clickNativeMenuItem('Файл', 'Заметки проекта…');
+    const notesDialog = page.getByRole('dialog', { name: 'Заметки' });
     await page.locator('input[accept*=".markdown"]').setInputFiles({
       name: 'project-notes.md',
       mimeType: 'text/markdown',
       buffer: Buffer.from('# Project notes\n\nImport works in Electron.'),
     });
 
-    await expect(page.getByRole('textbox', { name: 'Текст заметок' }))
+    const notesEditor = page.getByRole('textbox', { name: 'Текст заметок' });
+    await expect(notesEditor)
       .toHaveValue('# Project notes\n\nImport works in Electron.');
-    await page.getByRole('dialog', { name: 'Заметки' }).getByRole('button', { name: 'Закрыть' }).click();
+    const noteTitle = notesDialog.getByRole('textbox', { name: 'Название заметки' });
+    await noteTitle.fill('Project notebook');
+    await expect.poll(() =>
+      electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.getTitle()),
+    ).toContain(' *');
+    const search = notesDialog.getByRole('searchbox', { name: 'Поиск в заметках' });
+    await search.fill('works');
+    await notesDialog.getByRole('button', { name: 'Следующее совпадение' }).click();
+    await expect.poll(() => notesEditor.evaluate((element: HTMLTextAreaElement) => ({
+      selected: element.value.slice(element.selectionStart, element.selectionEnd),
+    }))).toEqual({ selected: 'works' });
+
+    await notesDialog.getByRole('combobox', { name: 'Формат экспорта заметок' }).selectOption('pdf');
+    await notesDialog.getByRole('button', { name: 'Экспортировать' }).click();
+    await expect.poll(async () => {
+      try {
+        return (await readFile(join(userDataPath, 'pixel-editor-notes.pdf'))).subarray(0, 4).toString();
+      } catch {
+        return '';
+      }
+    }, { timeout: 15_000 }).toBe('%PDF');
+
+    await notesDialog.getByRole('button', { name: 'Закрыть' }).click();
     await page.locator('.bar button[title^="Сохранить проект"]').click();
     await expect(page.getByRole('status')).toContainText('Проект сохранён в файл.');
+    const savedFileName = await electronApp.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows()[0]?.getTitle().split(' — ').at(-1),
+    );
+    if (!savedFileName) throw new Error('В заголовке окна не указано имя сохранённого проекта.');
+    const savedNotesProject = JSON.parse(await readFile(join(userDataPath, savedFileName), 'utf8')) as {
+      notesMetadata: { title: string; createdAt: number; updatedAt: number };
+    };
+    expect(savedNotesProject.notesMetadata.title).toBe('Project notebook');
+    expect(savedNotesProject.notesMetadata.createdAt).toBeGreaterThan(0);
+    expect(savedNotesProject.notesMetadata.updatedAt).toBeGreaterThanOrEqual(savedNotesProject.notesMetadata.createdAt);
+
+    await electronApp.close();
+    electronApp = await electron.launch({
+      executablePath: electronExecutable,
+      args: [process.cwd(), `--user-data-dir=${userDataPath}`],
+    });
+    page = await electronApp.firstWindow();
+    await expect(page.getByRole('heading', { name: 'Pixel Editor' })).toBeVisible({ timeout: 60_000 });
+    await electronApp.evaluate(({ dialog }, directory) => {
+      Object.defineProperty(dialog, 'showSaveDialog', {
+        configurable: true,
+        value: async (_window: unknown, options: { defaultPath?: string }) => ({
+          canceled: false,
+          filePath: `${directory}\\${options.defaultPath ?? 'pixel-editor-export'}`,
+        }),
+      });
+    }, userDataPath);
+    await expect.poll(() => page.evaluate(() => window.pixelEditorDesktop?.getNotesBackup()))
+      .toMatchObject({ title: 'Project notebook', notes: '# Project notes\n\nImport works in Electron.' });
+    await clickNativeMenuItem('Файл', 'Заметки проекта…');
+    const reopenedNotes = page.getByRole('dialog', { name: 'Заметки' });
+    await expect(reopenedNotes.getByRole('textbox', { name: 'Название заметки' })).toHaveValue('Project notebook');
+    await reopenedNotes.getByRole('textbox', { name: 'Текст заметок' }).fill('Changed after reopening.');
+    await reopenedNotes.getByRole('button', { name: 'Восстановить копию' }).click();
+    await expect(reopenedNotes.getByRole('textbox', { name: 'Текст заметок' }))
+      .toHaveValue('# Project notes\n\nImport works in Electron.');
+    await reopenedNotes.getByRole('button', { name: 'Закрыть' }).click();
+    await page.locator('.bar button[title^="Сохранить проект"]').click();
+    await expect(page.getByText('Проект сохранён в файл.')).toBeVisible();
   });
 });

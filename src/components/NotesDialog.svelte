@@ -6,22 +6,54 @@
     title: string;
     createdAt: number;
     updatedAt: number;
+    backup: DesktopNotesBackup | null;
     returnFocusTo: HTMLElement | null;
     oninput: (value: string) => void;
     ontitle: (value: string) => void;
     onimport: (file: File) => void;
-    onexport: (format: 'markdown' | 'text' | 'json') => void;
+    onexport: (format: 'markdown' | 'text' | 'json' | 'pdf') => void;
+    onrestore: () => void;
     status: string;
     onclose: () => void;
   }
 
-  let { value, title, createdAt, updatedAt, returnFocusTo, oninput, ontitle, onimport, onexport, status, onclose }: Props = $props();
+  let {
+    value,
+    title,
+    createdAt,
+    updatedAt,
+    backup,
+    returnFocusTo,
+    oninput,
+    ontitle,
+    onimport,
+    onexport,
+    onrestore,
+    status,
+    onclose,
+  }: Props = $props();
   let closeButton: HTMLButtonElement | undefined = $state();
   let editor: HTMLTextAreaElement | undefined = $state();
-  let format = $state<'markdown' | 'text' | 'json'>('markdown');
+  let format = $state<'markdown' | 'text' | 'json' | 'pdf'>('markdown');
   let fileInput: HTMLInputElement | undefined = $state();
   let search = $state('');
-  const matchCount = $derived(search.trim() ? value.toLocaleLowerCase().split(search.trim().toLocaleLowerCase()).length - 1 : 0);
+  let activeMatchIndex = $state(0);
+  const matches = $derived.by(() => {
+    const query = search.trim();
+    if (!query) return [];
+    const escaped = query.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+    const expression = new RegExp(escaped, 'giu');
+    return Array.from(value.matchAll(expression), (match) => ({
+      start: match.index,
+      end: match.index + match[0].length,
+    }));
+  });
+  const backupDiffers = $derived(backup !== null && (
+    backup.title !== title ||
+    backup.notes !== value ||
+    backup.createdAt !== createdAt ||
+    backup.updatedAt !== updatedAt
+  ));
 
   $effect(() => {
     closeButton?.focus();
@@ -37,6 +69,14 @@
   function onBackdropMousedown(event: MouseEvent): void {
     if (event.target === event.currentTarget) onclose();
   }
+
+  function moveMatch(direction: -1 | 1): void {
+    if (matches.length === 0) return;
+    activeMatchIndex = (activeMatchIndex + direction + matches.length) % matches.length;
+    const match = matches[activeMatchIndex]!;
+    editor?.focus();
+    editor?.setSelectionRange(match.start, match.end);
+  }
 </script>
 
 <svelte:window onkeydown={onKeydown} />
@@ -46,7 +86,7 @@
     <header>
       <div>
         <h2 id="notes-title" class="sr-only">Заметки</h2>
-        <input class="title" aria-label="Название заметки" value={title} oninput={(event) => ontitle(event.currentTarget.value)} />
+        <input class="title" aria-label="Название заметки" maxlength="200" value={title} oninput={(event) => ontitle(event.currentTarget.value)} />
         <p>Идеи, палитры и комментарии к текущему проекту</p>
       </div>
       <button type="button" class="btn" bind:this={closeButton} onclick={onclose}>Закрыть</button>
@@ -58,12 +98,20 @@
       value={value}
       aria-label="Текст заметок"
       placeholder="Введите заметки к проекту…"
-      oninput={(event) => oninput(event.currentTarget.value)}
+      oninput={(event) => {
+        activeMatchIndex = 0;
+        oninput(event.currentTarget.value);
+      }}
     ></textarea>
 
     <div class="note-tools">
-      <input class="search" type="search" placeholder="Поиск в заметках…" aria-label="Поиск в заметках" bind:value={search} />
-      {#if search.trim()}<span>{matchCount} совпадений</span>{/if}
+      <input class="search" type="search" placeholder="Поиск в заметках…" aria-label="Поиск в заметках" bind:value={search} oninput={() => (activeMatchIndex = 0)} />
+      {#if search.trim()}
+        <span aria-live="polite">{matches.length} совпадений</span>
+        <button type="button" class="template" aria-label="Предыдущее совпадение" onclick={() => moveMatch(-1)} disabled={matches.length === 0}>↑</button>
+        <button type="button" class="template" aria-label="Следующее совпадение" onclick={() => moveMatch(1)} disabled={matches.length === 0}>↓</button>
+        {#if matches.length > 0}<span>{activeMatchIndex + 1} / {matches.length}</span>{/if}
+      {/if}
     </div>
 
     <div class="templates" aria-label="Шаблоны заметок">
@@ -81,10 +129,19 @@
           <option value="markdown">Markdown (.md)</option>
           <option value="text">Текст (.txt)</option>
           <option value="json">JSON (.json)</option>
+          {#if typeof window !== 'undefined' && window.pixelEditorDesktop?.exportNotesPdf}
+            <option value="pdf">PDF (.pdf)</option>
+          {/if}
         </select>
         <button type="button" class="btn primary" onclick={() => onexport(format)} disabled={!value.trim()}>Экспортировать</button>
       </div>
     </footer>
+    {#if backupDiffers}
+      <aside class="backup" aria-label="Резервная копия заметок">
+        <span>Есть копия «{backup!.title || 'Без названия'}» от {new Date(backup!.updatedAt).toLocaleString('ru-RU')}.</span>
+        <button type="button" class="btn" onclick={onrestore}>Восстановить копию</button>
+      </aside>
+    {/if}
     <input bind:this={fileInput} class="hidden" type="file" accept=".txt,.md,.markdown,.json,text/plain,text/markdown,application/json" onchange={(event) => {
       const file = event.currentTarget.files?.[0];
       event.currentTarget.value = '';
@@ -205,6 +262,19 @@
     align-items: center;
     gap: 8px;
     margin-top: 10px;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+
+  .backup {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 12px;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
     color: var(--text-dim);
     font-size: 12px;
   }

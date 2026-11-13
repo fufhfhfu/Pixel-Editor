@@ -16,6 +16,7 @@ describe('снимок проекта редактора', () => {
       secondary: { r: 255, g: 255, b: 255, a: 255 },
       recent: [],
       notes: 'Project notes',
+      notesMetadata: { title: 'Planning', createdAt: 100, updatedAt: 200 },
       references: [],
       customPalettes: [],
       tilemap: null,
@@ -35,6 +36,7 @@ describe('снимок проекта редактора', () => {
     });
 
     expect(project.notes).toBe('Project notes');
+    expect(project.notesMetadata).toEqual({ title: 'Planning', createdAt: 100, updatedAt: 200 });
     expect(project.canvases?.[0]).toMatchObject({
       id: 'canvas-1',
       x: -3,

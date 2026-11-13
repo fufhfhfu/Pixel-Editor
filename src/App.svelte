@@ -40,7 +40,7 @@
     MAX_IMAGE_FILE_BYTES,
     type DecodedRasterImage,
   } from './core/imageImport';
-  import { MAX_NOTES_IMPORT_BYTES, parseNotesImport } from './core/notesImport';
+  import { MAX_NOTES_IMPORT_BYTES, parseNotesImportDocument } from './core/notesImport';
   import {
     MAX_PROJECT_REFERENCES,
     MAX_REFERENCE_TOTAL_PIXELS,
@@ -85,6 +85,7 @@
     serializeProject,
     type ProjectData,
     type ProjectMetadata,
+    type ProjectNotesMetadata,
   } from './core/project';
   import {
     loadEditorPreferences,
@@ -369,6 +370,7 @@
   const savedShortcuts = loadShortcutMap(storage);
   const savedWorkspace = loadWorkspaceLayout(storage);
   const start = untrack(() => initialProject);
+  const initialNotesCreatedAt = start?.notesMetadata?.createdAt ?? Date.now();
   const startupStorageMode = untrack(() => initialStorageMode);
   const startPalette = PALETTES.find((entry) => entry.id === start?.paletteId) ??
     start?.customPalettes?.find((entry) => entry.id === start?.paletteId) ??
@@ -556,10 +558,11 @@
   let projectNotesTrigger = $state<HTMLElement | null>(null);
   let commandSearchOpen = $state(false);
   let notesText = $state(start?.notes ?? '');
-  let notesTitle = $state('Заметки проекта');
-  let notesCreatedAt = $state(Date.now());
-  let notesUpdatedAt = $state(Date.now());
+  let notesTitle = $state(start?.notesMetadata?.title ?? 'Заметки проекта');
+  let notesCreatedAt = $state(initialNotesCreatedAt);
+  let notesUpdatedAt = $state(start?.notesMetadata?.updatedAt ?? initialNotesCreatedAt);
   let notesStatus = $state('сохранено в проекте');
+  let notesBackup = $state<DesktopNotesBackup | null>(null);
   let helpOpen = $state(false);
   let helpTrigger = $state<HTMLElement | null>(null);
   let settingsOpen = $state(false);
@@ -699,6 +702,12 @@
         dirty: projectHasUnsavedChanges,
         canUndo,
         canRedo,
+        notesBackup: {
+          title: notesTitle,
+          notes: notesText,
+          createdAt: notesCreatedAt,
+          updatedAt: notesUpdatedAt,
+        },
       });
     }
   });
@@ -728,16 +737,31 @@
     feedbackNotesOpen = true;
   }
 
-  function showProjectNotes(trigger: HTMLElement | null = null): void {
+  async function showProjectNotes(trigger: HTMLElement | null = null): Promise<void> {
     projectNotesTrigger = trigger?.isConnected ? trigger : null;
+    try {
+      notesBackup = await window.pixelEditorDesktop?.getNotesBackup() ?? null;
+    } catch (error) {
+      notify(
+        `Не удалось проверить резервную копию заметок: ${error instanceof Error ? error.message : String(error)}`,
+        'error',
+      );
+    }
     projectNotesOpen = true;
+  }
+
+  function updateProjectNotesTitle(value: string): void {
+    notesTitle = value.slice(0, 200);
+    notesUpdatedAt = Date.now();
+    notesStatus = 'сохраняется…';
+    scheduleAutosave();
   }
 
   function updateProjectNotes(value: string): void {
     notesText = value;
     notesUpdatedAt = Date.now();
     notesStatus = 'сохраняется…';
-    scheduleAutosave(false);
+    scheduleAutosave();
   }
 
   async function importNotesFile(file: File): Promise<void> {
@@ -746,21 +770,49 @@
       return;
     }
     try {
-      updateProjectNotes(parseNotesImport(file.name, await file.text()));
+      const imported = parseNotesImportDocument(file.name, await file.text());
+      updateProjectNotes(imported.notes);
+      if (imported.title !== undefined) notesTitle = imported.title;
+      if (imported.createdAt !== undefined && imported.updatedAt !== undefined) {
+        notesCreatedAt = imported.createdAt;
+        notesUpdatedAt = imported.updatedAt;
+      }
       notify('Заметки импортированы в проект.');
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Не удалось импортировать заметки.', 'error');
     }
   }
 
-  async function exportProjectNotes(format: 'markdown' | 'text' | 'json'): Promise<void> {
+  async function exportProjectNotes(format: 'markdown' | 'text' | 'json' | 'pdf'): Promise<void> {
+    if (format === 'pdf') {
+      try {
+        const result = await window.pixelEditorDesktop?.exportNotesPdf({
+          title: notesTitle,
+          notes: notesText,
+          createdAt: notesCreatedAt,
+          updatedAt: notesUpdatedAt,
+        });
+        if (result?.status === 'saved') notify('Заметки экспортированы в PDF.');
+      } catch (error) {
+        notify(error instanceof Error ? error.message : 'Не удалось экспортировать заметки в PDF.', 'error');
+      }
+      return;
+    }
     const config = format === 'json'
       ? { filename: 'pixel-editor-notes.json', mime: 'application/json' }
       : format === 'text'
         ? { filename: 'pixel-editor-notes.txt', mime: 'text/plain' }
         : { filename: 'pixel-editor-notes.md', mime: 'text/markdown' };
     const content = format === 'json'
-      ? JSON.stringify({ format: 'pixel-editor-notes', version: 1, exportedAt: new Date().toISOString(), notes: notesText }, null, 2)
+      ? JSON.stringify({
+          format: 'pixel-editor-notes',
+          version: 1,
+          exportedAt: new Date().toISOString(),
+          title: notesTitle,
+          createdAt: notesCreatedAt,
+          updatedAt: notesUpdatedAt,
+          notes: notesText,
+        }, null, 2)
       : format === 'text'
         ? `${notesText.trim()}\n`
         : `# Заметки Pixel Editor\n\n${notesText.trim()}\n`;
@@ -1163,6 +1215,11 @@
       secondary,
       recent,
       notes: notesText,
+      notesMetadata: {
+        title: notesTitle,
+        createdAt: notesCreatedAt,
+        updatedAt: notesUpdatedAt,
+      },
       references,
       customPalettes,
       tilemap,
@@ -3141,7 +3198,9 @@
     secondary = project.secondary;
     recent = project.recent;
     notesText = project.notes ?? '';
-    notesUpdatedAt = Date.now();
+    notesTitle = project.notesMetadata?.title ?? 'Заметки проекта';
+    notesCreatedAt = project.notesMetadata?.createdAt ?? Date.now();
+    notesUpdatedAt = project.notesMetadata?.updatedAt ?? notesCreatedAt;
     notesStatus = 'сохранено в проекте';
     references = project.references?.map((reference) => ({ ...reference })) ?? [];
     tilemap = project.tilemap ?? null;
@@ -3150,11 +3209,23 @@
       brushLibrary = mergeBrushDefinitions(brushLibrary, project.brushes);
       persistBrushLibrary();
     }
+
     stopAnimationPlayback();
     selectedReferenceId = references[0]?.id ?? null;
     syncHistory();
     cursor = null;
     scheduleAutosave();
+  }
+
+  function restoreNotesBackup(): void {
+    if (!notesBackup) return;
+    notesTitle = notesBackup.title;
+    notesText = notesBackup.notes;
+    notesCreatedAt = notesBackup.createdAt;
+    notesUpdatedAt = notesBackup.updatedAt;
+    notesStatus = 'восстановлено из резервной копии';
+    scheduleAutosave();
+    notify('Резервная копия заметок восстановлена.');
   }
 
   function updateTilemap(next: TilemapData, groupId: string | null = null): void {
@@ -3984,12 +4055,14 @@
     title={notesTitle}
     createdAt={notesCreatedAt}
     updatedAt={notesUpdatedAt}
+    backup={notesBackup}
     status={notesStatus}
     returnFocusTo={projectNotesTrigger}
     oninput={updateProjectNotes}
-    ontitle={(value) => (notesTitle = value)}
+    ontitle={updateProjectNotesTitle}
     onimport={importNotesFile}
     onexport={exportProjectNotes}
+    onrestore={restoreNotesBackup}
     onclose={() => (projectNotesOpen = false)}
   />
 {/if}

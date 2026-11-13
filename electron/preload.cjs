@@ -24,6 +24,12 @@ contextBridge.exposeInMainWorld('pixelEditorDesktop', {
   getLatestProjectBackup(handle) {
     return ipcRenderer.invoke('pixel-editor:latest-project-backup', handle);
   },
+  getNotesBackup() {
+    return ipcRenderer.invoke('pixel-editor:get-notes-backup');
+  },
+  exportNotesPdf(request) {
+    return ipcRenderer.invoke('pixel-editor:export-notes-pdf', request);
+  },
   takePendingProject() {
     return ipcRenderer.invoke('pixel-editor:take-pending-project');
   },

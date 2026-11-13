@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MAX_NOTES_IMPORT_BYTES, parseNotesImport } from './notesImport';
+import { MAX_NOTES_IMPORT_BYTES, parseNotesImport, parseNotesImportDocument } from './notesImport';
 
 describe('notes import', () => {
   it('imports plain text and Markdown without modifying their contents', () => {
@@ -16,6 +16,27 @@ describe('notes import', () => {
       notes: 'Saved notes',
     }))).toBe('Saved notes');
     expect(parseNotesImport('notes.json', JSON.stringify({ notes: 'Imported notes' }))).toBe('Imported notes');
+  });
+
+  it('preserves note title and timestamps from exported JSON', () => {
+    expect(parseNotesImportDocument('notes.json', JSON.stringify({
+      format: 'pixel-editor-notes',
+      version: 1,
+      title: 'Planning',
+      createdAt: 1_700_000_000_000,
+      updatedAt: 1_700_000_100_000,
+      notes: 'Saved notes',
+    }))).toEqual({
+      title: 'Planning',
+      createdAt: 1_700_000_000_000,
+      updatedAt: 1_700_000_100_000,
+      notes: 'Saved notes',
+    });
+    expect(() => parseNotesImportDocument('notes.json', JSON.stringify({
+      notes: 'Invalid dates',
+      createdAt: 10,
+      updatedAt: 9,
+    }))).toThrow(/некорректные даты/i);
   });
 
   it('rejects unsupported extensions and malformed or incompatible JSON', () => {

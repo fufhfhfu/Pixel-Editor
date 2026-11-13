@@ -21,6 +21,13 @@ declare global {
     data: Uint8Array;
   }
 
+  interface DesktopNotesBackup {
+    title: string;
+    notes: string;
+    createdAt: number;
+    updatedAt: number;
+  }
+
   type DesktopProjectSaveResult =
     | { status: 'saved'; fileName: string; handle: string; recentProjects: DesktopRecentProject[] }
     | { status: 'cancelled' };
@@ -42,6 +49,8 @@ declare global {
     listRecentProjects(): Promise<DesktopRecentProject[]>;
     openRecentProject(id: string): Promise<DesktopOpenProjectPayload>;
     getLatestProjectBackup(handle: string): Promise<DesktopProjectBackup | null>;
+    getNotesBackup(): Promise<DesktopNotesBackup | null>;
+    exportNotesPdf(request: DesktopNotesBackup): Promise<DesktopSaveResult>;
     takePendingProject(): Promise<DesktopOpenProjectPayload | null>;
     onOpenProject(callback: (project: DesktopOpenProjectPayload) => void): () => void;
     beginBatchExport(): Promise<string | null>;
@@ -53,6 +62,7 @@ declare global {
       dirty: boolean;
       canUndo: boolean;
       canRedo: boolean;
+      notesBackup: DesktopNotesBackup;
     }): void;
     onMenuCommand(callback: (command: string) => void): () => void;
     listFeedbackNotes(): Promise<FeedbackNote[]>;

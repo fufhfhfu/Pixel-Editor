@@ -4,6 +4,7 @@
   import Canvas, { type ViewportGuide } from './components/Canvas.svelte';
   import ConfirmDialog from './components/ConfirmDialog.svelte';
   import HelpDialog from './components/HelpDialog.svelte';
+  import AboutDialog from './components/AboutDialog.svelte';
   import FeedbackNotesDialog from './components/FeedbackNotesDialog.svelte';
   import NotesDialog from './components/NotesDialog.svelte';
   import WelcomeDialog from './components/WelcomeDialog.svelte';
@@ -566,6 +567,8 @@
   let notesBackup = $state<DesktopNotesBackup | null>(null);
   let helpOpen = $state(false);
   let helpTrigger = $state<HTMLElement | null>(null);
+  let aboutOpen = $state(false);
+  let aboutTrigger = $state<HTMLElement | null>(null);
   let settingsOpen = $state(false);
   let settingsTab = $state<'general' | 'background' | 'hotkeys'>('general');
   let settingsTrigger = $state<HTMLElement | null>(null);
@@ -1095,6 +1098,10 @@
       helpTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       helpOpen = true;
     }],
+    ['about', () => {
+      aboutTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      aboutOpen = true;
+    }],
     ['project-notes', () => showProjectNotes()],
     ['welcome', () => showWelcome()],
   ]);
@@ -1204,6 +1211,7 @@
         command: `panel:${panel.id}`,
         separatorBefore: panel.id === 'colors',
       })),
+      { label: 'О программе и обновлениях…', command: 'about', separatorBefore: true },
     ] },
   ]);
 
@@ -3463,7 +3471,7 @@
   }
 
   function onKeyDown(e: KeyboardEvent): void {
-    if (fillInProgress || pending || welcomeOpen || feedbackNotesOpen || projectNotesOpen || commandSearchOpen || helpOpen || settingsOpen || isTypingTarget(e.target)) return;
+    if (fillInProgress || pending || welcomeOpen || feedbackNotesOpen || projectNotesOpen || commandSearchOpen || helpOpen || aboutOpen || settingsOpen || isTypingTarget(e.target)) return;
 
     if (e.repeat) return;
     const resolution = resolveShortcutEvent(shortcuts, pendingShortcutSequence, e);
@@ -3527,7 +3535,7 @@
     const action = getTemporaryActionForCode(shortcuts, e.code);
     if (action === 'temporary-picker') temporaryPicker = false;
     if (action === 'pan') spaceHeld = false;
-    if (action && !pending && !welcomeOpen && !feedbackNotesOpen && !projectNotesOpen && !helpOpen && !settingsOpen && !isTypingTarget(e.target)) e.preventDefault();
+    if (action && !pending && !welcomeOpen && !feedbackNotesOpen && !projectNotesOpen && !helpOpen && !aboutOpen && !settingsOpen && !isTypingTarget(e.target)) e.preventDefault();
   }
 
   function onWindowBlur(): void {
@@ -3586,7 +3594,7 @@
 <div class="app">
   <EditorMenuBar
     groups={editorMenuGroups}
-    canSearch={!fillInProgress && !pending && !welcomeOpen && !feedbackNotesOpen && !projectNotesOpen && !helpOpen && !settingsOpen}
+    canSearch={!fillInProgress && !pending && !welcomeOpen && !feedbackNotesOpen && !projectNotesOpen && !helpOpen && !aboutOpen && !settingsOpen}
     onsearchchange={(open) => (commandSearchOpen = open)}
     oncommand={handleEditorCommand}
     onopen={(file) => void importProjectFile(file)}
@@ -4076,6 +4084,13 @@
     {shortcuts}
     returnFocusTo={helpTrigger}
     onclose={() => (helpOpen = false)}
+  />
+{/if}
+
+{#if aboutOpen}
+  <AboutDialog
+    returnFocusTo={aboutTrigger}
+    onclose={() => (aboutOpen = false)}
   />
 {/if}
 

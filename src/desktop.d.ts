@@ -28,11 +28,30 @@ declare global {
     updatedAt: number;
   }
 
+  interface DesktopAppInfo {
+    version: string;
+    updatesSupported: boolean;
+  }
+
+  type DesktopUpdateStatus =
+    | { status: 'idle' }
+    | { status: 'checking' }
+    | { status: 'current'; version: string }
+    | { status: 'available'; version: string }
+    | { status: 'downloading'; percent: number }
+    | { status: 'downloaded'; version: string }
+    | { status: 'error'; message: string };
+
   type DesktopProjectSaveResult =
     | { status: 'saved'; fileName: string; handle: string; recentProjects: DesktopRecentProject[] }
     | { status: 'cancelled' };
 
   interface PixelEditorDesktop {
+    getAppInfo(): Promise<DesktopAppInfo>;
+    checkForUpdates(): Promise<void>;
+    downloadUpdate(): Promise<void>;
+    installUpdate(): Promise<void>;
+    onUpdateStatus(callback: (status: DesktopUpdateStatus) => void): () => void;
     saveFile(request: {
       suggestedName: string;
       mimeType: string;

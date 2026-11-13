@@ -1,6 +1,23 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('pixelEditorDesktop', {
+  getAppInfo() {
+    return ipcRenderer.invoke('pixel-editor:app-info');
+  },
+  checkForUpdates() {
+    return ipcRenderer.invoke('pixel-editor:check-updates');
+  },
+  downloadUpdate() {
+    return ipcRenderer.invoke('pixel-editor:download-update');
+  },
+  installUpdate() {
+    return ipcRenderer.invoke('pixel-editor:install-update');
+  },
+  onUpdateStatus(callback) {
+    const listener = (_event, status) => callback(status);
+    ipcRenderer.on('pixel-editor:update-status', listener);
+    return () => ipcRenderer.removeListener('pixel-editor:update-status', listener);
+  },
   saveFile(request) {
     return ipcRenderer.invoke('pixel-editor:save-file', request);
   },

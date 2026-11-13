@@ -10,9 +10,10 @@
     "desktop:dev": "npm run dev",
     "build:renderer": "vite build",
     "build:icon": "node scripts/generate-icon.cjs",
-    "dist:win": "npm run check && npm test && npm run build:icon && npm run build:renderer && npm run security:check && electron-builder --win nsis portable --publish never && npm run test:smoke:desktop",
+    "dist:win": "npm run check && npm test && npm run build:icon && npm run build:renderer && npm run security:check && electron-builder --win nsis portable --publish never && npm run checksums:win && npm run test:smoke:desktop",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "security:check": "node scripts/security-check.cjs",
+    "checksums:win": "node scripts/checksums-win.cjs",
     "test": "vitest run",
     "test:e2e:desktop": "playwright test",
     "test:smoke:desktop": "playwright test --config=playwright.smoke.config.ts",
@@ -53,6 +54,7 @@
     ],
     "win": {
       "icon": "electron/icon.ico",
+      "verifyUpdateCodeSignature": true,
       "target": [
         {
           "target": "nsis",
@@ -67,16 +69,26 @@
           ]
         }
       ],
-      "artifactName": "${productName}-${version}-${arch}.${ext}"
+      "artifactName": "Pixel-Editor-${version}-${arch}.${ext}"
     },
     "nsis": {
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
+      "multiLanguageInstaller": true,
+      "installerLanguages": [
+        "en_US",
+        "ru_RU"
+      ],
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "Pixel Editor",
       "include": "electron/installer.nsh"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "fufhfhfu",
+      "repo": "Pixel-Editor"
     },
     "fileAssociations": [
       {
@@ -88,7 +100,11 @@
       }
     ],
     "portable": {
-      "artifactName": "${productName}-${version}-portable.${ext}"
+      "artifactName": "Pixel-Editor-${version}-portable.${ext}"
     }
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.11",
+    "js-yaml": "^4.1.0"
   }
 }

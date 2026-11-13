@@ -28,6 +28,38 @@ async function clickNativeMenuItem(menuLabel: string, itemLabel: string): Promis
   }, { menuLabel, itemLabel });
 }
 
+async function configureSaveDialog(directory: string): Promise<void> {
+  await electronApp.evaluate(({ dialog }, targetDirectory) => {
+    Object.defineProperty(dialog, 'showSaveDialog', {
+      configurable: true,
+      value: async (_window: unknown, options: { defaultPath?: string }) => ({
+        canceled: false,
+        filePath: `${targetDirectory}\\${options.defaultPath ?? 'pixel-editor-export'}`,
+      }),
+    });
+  }, directory);
+}
+
+async function relaunchAfterCrash(): Promise<void> {
+  const child = electronApp.process();
+  const exited = new Promise<void>((resolve, reject) => {
+    child.once('exit', () => resolve());
+    child.once('error', reject);
+  });
+  await electronApp.evaluate(({ app }) => {
+    setTimeout(() => app.exit(23), 100);
+    return true;
+  });
+  await exited;
+  electronApp = await electron.launch({
+    executablePath: electronExecutable,
+    args: [process.cwd(), `--user-data-dir=${userDataPath}`],
+  });
+  page = await electronApp.firstWindow();
+  await expect(page.getByRole('heading', { name: 'Pixel Editor' })).toBeVisible({ timeout: 60_000 });
+  await configureSaveDialog(userDataPath);
+}
+
 test.describe.serial('Основные пользовательские потоки Electron', () => {
   test.describe.configure({ timeout: 180_000 });
 
@@ -57,15 +89,7 @@ test.describe.serial('Основные пользовательские пото
     const welcomeButton = page.getByRole('button', { name: 'Начать работу' });
     if (await welcomeButton.count()) await welcomeButton.click();
 
-    await electronApp.evaluate(({ dialog }, directory) => {
-      Object.defineProperty(dialog, 'showSaveDialog', {
-        configurable: true,
-        value: async (_window: unknown, options: { defaultPath?: string }) => ({
-          canceled: false,
-          filePath: `${directory}\\${options.defaultPath ?? 'pixel-editor-export'}`,
-        }),
-      });
-    }, userDataPath);
+    await configureSaveDialog(userDataPath);
   });
 
   test.afterAll(async () => {
@@ -101,15 +125,7 @@ test.describe.serial('Основные пользовательские пото
     await expect.poll(() =>
       electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.getTitle()),
     ).toBe('Pixel Editor — saved-as-project.pxproj');
-    await electronApp.evaluate(({ dialog }, directory) => {
-      Object.defineProperty(dialog, 'showSaveDialog', {
-        configurable: true,
-        value: async (_window: unknown, options: { defaultPath?: string }) => ({
-          canceled: false,
-          filePath: `${directory}\\${options.defaultPath ?? 'pixel-editor-export'}`,
-        }),
-      });
-    }, userDataPath);
+    await configureSaveDialog(userDataPath);
 
     const importedProjectPath = join(userDataPath, 'imported-project.json');
     await writeFile(importedProjectPath, JSON.stringify({
@@ -279,7 +295,7 @@ test.describe.serial('Основные пользовательские пото
       });
     }, userDataPath);
     await clickNativeMenuItem('Файл', 'Пакетный экспорт холстов…');
-    await expect(page.getByRole('status')).toContainText('Экспортировано холстов: 2.');
+    await expect(page.locator('.toast')).toContainText('Экспортировано холстов: 2.');
     const exportedFiles = (await readdir(userDataPath)).filter((name) =>
       /^pixel-editor-\d{13}-canvas-[12]-\d+x\d+\.png$/u.test(name),
     );
@@ -331,6 +347,83 @@ test.describe.serial('Основные пользовательские пото
     await expect.poll(() =>
       electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.getTitle()),
     ).toContain(' *');
+  });
+
+  test('recovers project and feedback notes after an unexpected application exit', async () => {
+    await page.getByRole('button', { name: 'Заметки обратной связи' }).click();
+    const feedbackDialog = page.getByRole('dialog', { name: 'Заметки обратной связи' });
+    await feedbackDialog.getByRole('button', { name: /Новая заметка/u }).click();
+    await feedbackDialog.getByLabel('Название', { exact: true }).fill('Crash recovery note');
+    await feedbackDialog.getByLabel('Описание', { exact: true }).fill('Persist this feedback across an unexpected exit.');
+    await feedbackDialog.getByRole('button', { name: 'Сохранить', exact: true }).click();
+    await expect(feedbackDialog.getByRole('heading', { name: 'Crash recovery note' })).toBeVisible();
+    await feedbackDialog.getByRole('button', { name: 'Закрыть заметки' }).click();
+
+    await clickNativeMenuItem('Файл', 'Заметки проекта…');
+    const projectNotes = page.getByRole('dialog', { name: 'Заметки' });
+    await projectNotes.getByRole('textbox', { name: 'Текст заметок' }).fill('Autosaved before the application crash.');
+    await projectNotes.getByRole('button', { name: 'Закрыть' }).click();
+    await expect(page.locator('.statusbar .save')).toContainText('сохраняется');
+    await expect(page.locator('.statusbar .save')).toContainText('сохранено в', { timeout: 10_000 });
+
+    await relaunchAfterCrash();
+    await clickNativeMenuItem('Файл', 'Заметки проекта…');
+    await expect(page.getByRole('dialog', { name: 'Заметки' })
+      .getByRole('textbox', { name: 'Текст заметок' }))
+      .toHaveValue('Autosaved before the application crash.');
+    await page.getByRole('dialog', { name: 'Заметки' }).getByRole('button', { name: 'Закрыть' }).click();
+
+    await page.getByRole('button', { name: 'Заметки обратной связи' }).click();
+    const recoveredFeedback = page.getByRole('dialog', { name: 'Заметки обратной связи' });
+    await expect(recoveredFeedback.getByRole('button', { name: /Crash recovery note/u })).toBeVisible();
+    await recoveredFeedback.getByRole('button', { name: /Crash recovery note/u }).click();
+    await expect(recoveredFeedback.getByText('Persist this feedback across an unexpected exit.')).toBeVisible();
+    await recoveredFeedback.getByRole('button', { name: 'Закрыть заметки' }).click();
+  });
+
+  test('keeps window bounds and renderer scale aligned with Windows display metrics', async () => {
+    const display = await electronApp.evaluate(({ screen, BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0];
+      if (!window) throw new Error('Окно редактора не создано.');
+      const bounds = window.getBounds();
+      const display = screen.getDisplayMatching(bounds);
+      return {
+        bounds,
+        workArea: display.workArea,
+        scaleFactor: display.scaleFactor,
+        displayCount: screen.getAllDisplays().length,
+      };
+    });
+    const rendererScale = await page.evaluate(() => window.devicePixelRatio);
+    expect(rendererScale).toBeCloseTo(display.scaleFactor, 1);
+    expect(display.bounds.width).toBeGreaterThan(0);
+    expect(display.bounds.height).toBeGreaterThan(0);
+    expect(display.bounds.x + display.bounds.width).toBeGreaterThan(display.workArea.x);
+    expect(display.bounds.y + display.bounds.height).toBeGreaterThan(display.workArea.y);
+    expect(display.displayCount).toBeGreaterThanOrEqual(1);
+  });
+
+  test('moves the editor between connected Windows displays', async () => {
+    const displays = await electronApp.evaluate(({ screen }) => screen.getAllDisplays().map((display) => ({
+      id: display.id,
+      workArea: display.workArea,
+    })));
+    test.skip(displays.length < 2, 'Requires two connected Windows displays.');
+
+    const secondary = displays[1]!;
+    const targetBounds = await electronApp.evaluate(({ BrowserWindow }, workArea) => {
+      const window = BrowserWindow.getAllWindows()[0];
+      if (!window) throw new Error('Окно редактора не создано.');
+      const [width, height] = window.getSize();
+      const x = workArea.x + Math.max(0, Math.floor((workArea.width - width) / 2));
+      const y = workArea.y + Math.max(0, Math.floor((workArea.height - height) / 2));
+      window.setBounds({ x, y, width, height });
+      return { x, y };
+    }, secondary.workArea);
+    await expect.poll(() =>
+      electronApp.evaluate(({ screen }, point) => screen.getDisplayNearestPoint(point).id, targetBounds),
+    ).toBe(secondary.id);
+    await expect(page.getByRole('heading', { name: 'Pixel Editor' })).toBeVisible();
   });
 
   test('imports project notes from Markdown', async () => {

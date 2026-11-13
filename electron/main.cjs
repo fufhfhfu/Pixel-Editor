@@ -1,4 +1,5 @@
 const { app, BrowserWindow, dialog, ipcMain, Menu, screen, shell } = require('electron');
+const { autoUpdater } = require('electron-updater');
 const path = require('node:path');
 const {
   copyFile,
@@ -17,6 +18,7 @@ const { randomUUID } = require('node:crypto');
 const { pathToFileURL } = require('node:url');
 const { createFeedbackNotesStore } = require('./feedbackNotes.cjs');
 const { getSafeExternalUrl } = require('./security.cjs');
+const { hasPublisherName } = require('./updateConfig.cjs');
 const { isValidWindowState, restoreWindowState } = require('./windowState.cjs');
 
 const DEV_SERVER_URL = 'http://127.0.0.1:5173';
@@ -60,6 +62,8 @@ let recentProjectsPath;
 let notesBackupPath;
 let latestNotesBackup = null;
 let persistedNotesBackup = null;
+let updateState = 'idle';
+let availableUpdateVersion = null;
 const projectHandles = new Map();
 const projectExportSessions = new Map();
 let startupProjectPath = findProjectPathArgument(process.argv);
@@ -77,8 +81,56 @@ const NATIVE_MENU_COMMANDS = new Set([
   'tool:filledRect', 'tool:circle', 'tool:filledCircle', 'tool:ellipse', 'tool:filledEllipse',
   'tool:triangle', 'tool:filledTriangle', 'tool:polygon', 'tool:filledPolygon', 'tool:gradient', 'tool:dither',
   'workspace-drawing', 'workspace-animation', 'workspace-tileset', 'workspace-minimal',
-  'toggle-tools', 'toggle-palette', 'toggle-timeline', 'settings', 'help',
+  'toggle-tools', 'toggle-palette', 'toggle-timeline', 'settings', 'help', 'about',
 ]);
+
+autoUpdater.autoDownload = false;
+autoUpdater.autoInstallOnAppQuit = false;
+
+function publishUpdateStatus(status) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('pixel-editor:update-status', status);
+  }
+}
+
+autoUpdater.on('update-available', (info) => {
+  updateState = 'available';
+  availableUpdateVersion = info.version;
+  publishUpdateStatus({ status: 'available', version: info.version });
+});
+autoUpdater.on('update-not-available', (info) => {
+  updateState = 'current';
+  availableUpdateVersion = null;
+  publishUpdateStatus({ status: 'current', version: info.version });
+});
+autoUpdater.on('download-progress', (progress) => {
+  updateState = 'downloading';
+  publishUpdateStatus({
+    status: 'downloading',
+    percent: Number.isFinite(progress.percent) ? Math.max(0, Math.min(100, progress.percent)) : 0,
+  });
+});
+autoUpdater.on('update-downloaded', (info) => {
+  updateState = 'downloaded';
+  publishUpdateStatus({ status: 'downloaded', version: info.version });
+});
+autoUpdater.on('error', (error) => {
+  updateState = 'error';
+  publishUpdateStatus({
+    status: 'error',
+    message: (error instanceof Error ? error.message : String(error)).slice(0, 1000),
+  });
+});
+
+async function hasSignedUpdateConfiguration() {
+  if (!app.isPackaged || process.platform !== 'win32') return false;
+  try {
+    return hasPublisherName(await readFile(path.join(process.resourcesPath, 'app-update.yml'), 'utf8'));
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return false;
+    throw error;
+  }
+}
 
 function sendMenuCommand(command) {
   if (!NATIVE_MENU_COMMANDS.has(command)) {
@@ -341,6 +393,8 @@ function buildNativeMenu() {
       nativeCommand('Показать или скрыть палитру', 'toggle-palette'),
       nativeCommand('Настройки…', 'settings'),
       nativeCommand('Справка', 'help'),
+      { type: 'separator' },
+      nativeCommand('О программе и обновлениях…', 'about'),
     ] },
   ]);
   Menu.setApplicationMenu(nativeMenu);
@@ -998,6 +1052,62 @@ ipcMain.handle('pixel-editor:feedback-notes:create', (event, draft) => {
 ipcMain.handle('pixel-editor:feedback-notes:update', (event, number, draft) => {
   assertMainWindowSender(event);
   return feedbackNotesStore.update(number, draft);
+});
+
+ipcMain.handle('pixel-editor:app-info', async (event) => {
+  assertMainWindowSender(event);
+  return {
+    version: app.getVersion(),
+    updatesSupported: await hasSignedUpdateConfiguration(),
+  };
+});
+
+ipcMain.handle('pixel-editor:check-updates', async (event) => {
+  assertMainWindowSender(event);
+  if (!await hasSignedUpdateConfiguration()) {
+    throw new Error('Проверка обновлений доступна только в подписанной сборке Windows.');
+  }
+  if (updateState === 'checking' || updateState === 'downloading' || updateState === 'downloaded') {
+    throw new Error('Проверка или установка обновления уже выполняется.');
+  }
+
+  updateState = 'checking';
+  publishUpdateStatus({ status: 'checking' });
+  try {
+    await autoUpdater.checkForUpdates();
+  } catch (error) {
+    updateState = 'error';
+    throw error;
+  }
+});
+
+ipcMain.handle('pixel-editor:download-update', async (event) => {
+  assertMainWindowSender(event);
+  if (!await hasSignedUpdateConfiguration()) {
+    throw new Error('Загрузка обновлений доступна только в подписанной сборке Windows.');
+  }
+  if (updateState !== 'available' || !availableUpdateVersion) {
+    throw new Error('Сначала проверьте наличие обновлений.');
+  }
+  updateState = 'downloading';
+  publishUpdateStatus({ status: 'downloading', percent: 0 });
+  try {
+    await autoUpdater.downloadUpdate();
+  } catch (error) {
+    updateState = 'error';
+    throw error;
+  }
+});
+
+ipcMain.handle('pixel-editor:install-update', (event) => {
+  assertMainWindowSender(event);
+  if (updateState !== 'downloaded') {
+    throw new Error('Обновление ещё не загружено.');
+  }
+  if (projectIsDirty) {
+    throw new Error('Сначала сохраните проект или закройте его без изменений, затем повторите установку.');
+  }
+  autoUpdater.quitAndInstall(false, true);
 });
 
 if (hasSingleInstanceLock) {

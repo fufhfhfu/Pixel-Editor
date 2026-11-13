@@ -24,7 +24,7 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.65.0",
-    "@sveltejs/vite-plugin-svelte": "^5.0.3",
+    "@sveltejs/vite-plugin-svelte": "^7.3.1",
     "@tsconfig/svelte": "^5.0.4",
     "@types/node": "^26.6.6",
     "concurrently": "^10.0.6",

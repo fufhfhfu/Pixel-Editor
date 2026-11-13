@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
   ZOOM_LEVELS,
-  clampView,
   ensurePixelVisible,
   fitView,
   nearestZoomLevel,
@@ -47,11 +46,5 @@ describe('viewport', () => {
     const moved = ensurePixelVisible(view, 60, 2, 400, 300);
     expect(moved.offsetX + 60 * 10 + 10).toBeLessThanOrEqual(400);
     expect(moved.offsetY).toBe(0);
-  });
-
-  it('clampView не теряет холст из виду даже в узком окне', () => {
-    const v = clampView({ zoom: 8, offsetX: -99999, offsetY: 99999 }, 32, 32, 60, 40);
-    expect(v.offsetX).toBeGreaterThan(-32 * 8);
-    expect(v.offsetY).toBeLessThan(40);
   });
 });

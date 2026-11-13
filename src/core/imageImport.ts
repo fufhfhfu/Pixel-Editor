@@ -21,6 +21,8 @@ export interface RasterImportOptions {
   customPalettes?: Palette[];
 }
 
+export type RasterImportStage = 'decoding' | 'rasterizing' | 'complete';
+
 interface DecodedImageSource {
   source: CanvasImageSource;
   width: number;
@@ -55,13 +57,19 @@ async function decodeBitmap(file: File): Promise<DecodedImageSource> {
 
 export async function decodeRasterImage(
   file: File,
-  options: { maxPixels?: number } = {},
+  options: {
+    maxPixels?: number;
+    fitWithin?: { width: number; height: number };
+    onProgress?: (stage: RasterImportStage) => void;
+  } = {},
 ): Promise<DecodedRasterImage> {
   assertImageFile(file);
   const maxPixels = options.maxPixels ?? MAX_DECODED_IMAGE_PIXELS;
   if (!Number.isSafeInteger(maxPixels) || maxPixels < 1) {
     throw new RangeError('Недопустимый лимит пикселей изображения.');
   }
+  const target = options.fitWithin ? fitImageDimensions(options.fitWithin.width, options.fitWithin.height) : null;
+  options.onProgress?.('decoding');
   const bitmap = await decodeBitmap(file);
 
   try {
@@ -75,7 +83,8 @@ export async function decodeRasterImage(
       throw new RangeError('Изображение слишком большое для безопасной обработки.');
     }
 
-    const { width, height } = fitImageDimensions(bitmap.width, bitmap.height);
+    options.onProgress?.('rasterizing');
+    const { width, height } = target ?? fitImageDimensions(bitmap.width, bitmap.height);
     const canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
@@ -85,8 +94,22 @@ export async function decodeRasterImage(
     context.imageSmoothingEnabled = true;
     context.imageSmoothingQuality = 'high';
     context.clearRect(0, 0, width, height);
-    context.drawImage(bitmap.source, 0, 0, width, height);
+    if (target) {
+      const scale = Math.min(width / bitmap.width, height / bitmap.height);
+      const drawWidth = bitmap.width * scale;
+      const drawHeight = bitmap.height * scale;
+      context.drawImage(
+        bitmap.source,
+        (width - drawWidth) / 2,
+        (height - drawHeight) / 2,
+        drawWidth,
+        drawHeight,
+      );
+    } else {
+      context.drawImage(bitmap.source, 0, 0, width, height);
+    }
     const image = context.getImageData(0, 0, width, height);
+    options.onProgress?.('complete');
     return { width, height, pixels: image.data };
   } finally {
     bitmap.close();

@@ -27,14 +27,14 @@
     border: 1px solid var(--border);
     border-left: 3px solid var(--accent);
     border-radius: var(--radius);
-    background: #232634;
-    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+    background: var(--panel-raised);
+    box-shadow: var(--shadow-md);
     transform: translateX(-50%);
     line-height: 1.4;
   }
 
   .toast.error {
-    border-left-color: #ff5d73;
+    border-left-color: var(--danger);
   }
 
   .text {

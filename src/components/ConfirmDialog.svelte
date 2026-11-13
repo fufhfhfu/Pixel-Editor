@@ -53,8 +53,8 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: rgba(5, 6, 10, 0.65);
-    backdrop-filter: blur(2px);
+    background: color-mix(in srgb, var(--bg) 62%, transparent);
+    backdrop-filter: blur(8px);
   }
 
   .dialog {
@@ -63,7 +63,7 @@
     border: 1px solid var(--border);
     border-radius: 12px;
     background: var(--panel);
-    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
+    box-shadow: var(--shadow-md), 0 0 0 1px color-mix(in srgb, var(--border) 60%, transparent);
   }
 
   h2 {

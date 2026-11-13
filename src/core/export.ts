@@ -3,7 +3,7 @@
  * scaleNearest и кодирование PNG — чистые функции; Blob использует DOM.
  */
 
-import { encodePng } from './png';
+import { encodePngWithWorker } from './pngWorker';
 import type { PixelBuffer } from './state';
 
 /** Допустимые масштабы экспорта PNG. */
@@ -100,7 +100,7 @@ export function scaleNearest(buffer: PixelBuffer, scale: number): RawImage {
  * canvas хранит пиксели premultiplied и искажает цвета полупрозрачных пикселей.
  */
 export async function exportPngBlob(buffer: PixelBuffer, scale: number): Promise<Blob> {
-  const bytes = await encodePng(scaleNearest(buffer, scale));
+  const bytes = await encodePngWithWorker(scaleNearest(buffer, scale));
   return new Blob([bytes], { type: 'image/png' });
 }
 

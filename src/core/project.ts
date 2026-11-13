@@ -9,6 +9,7 @@
  *   "palette": { "id": "pico8", "freeColor": false },
  *   "colors": { "primary": [r, g, b, a], "secondary": [r, g, b, a] },
  *   "recent": [[r, g, b, a], …],
+ *   "notes": "заметки проекта",
  *   "references": [{ "id": "…", "pixels": "<RGBA в base64>", "…" : "…" }]
  * }
  */
@@ -54,7 +55,7 @@ import {
 } from './tools/brushLibrary';
 
 export const PROJECT_FORMAT = 'pixel-editor-project';
-export const PROJECT_VERSION = 11;
+export const PROJECT_VERSION = 13;
 export const MAX_PROJECT_CANVASES = 32;
 export const MAX_PROJECT_TOTAL_PIXELS = 4_194_304;
 export const MAX_PROJECT_ANIMATION_PIXELS = 16_777_216;
@@ -131,6 +132,14 @@ export interface ProjectData {
   brushes?: BrushDefinition[];
   metadata?: ProjectMetadata;
   customPalettes?: Palette[];
+  notes?: string;
+  notesMetadata?: ProjectNotesMetadata;
+}
+
+export interface ProjectNotesMetadata {
+  title: string;
+  createdAt: number;
+  updatedAt: number;
 }
 
 /** Файл не является корректным проектом; message можно показывать пользователю. */
@@ -172,6 +181,12 @@ export function serializeProject(project: ProjectData): string {
   const animationFrames = project.animationFrames;
   const brushes = project.brushes === undefined ? undefined : parseProjectBrushes(project.brushes);
   const metadata = project.metadata;
+  const notes = project.notes;
+  const notesMetadata = project.notesMetadata;
+  if (notes !== undefined && (typeof notes !== 'string' || notes.length > 5 * 1024 * 1024)) {
+    throw new ProjectFormatError('Заметки проекта превышают допустимый размер 5 МБ.');
+  }
+  if (notesMetadata !== undefined) validateProjectNotesMetadata(notesMetadata);
   let customPalettes: Palette[] | undefined;
   if (project.customPalettes !== undefined) {
     try {
@@ -357,7 +372,11 @@ export function serializeProject(project: ProjectData): string {
   }
   const common = {
     format: PROJECT_FORMAT,
-    version: customPalettes !== undefined
+    version: notesMetadata !== undefined
+      ? 13
+      : notes !== undefined
+      ? 12
+      : customPalettes !== undefined
       ? 11
       : brushes !== undefined || metadata !== undefined
       ? 10
@@ -375,6 +394,8 @@ export function serializeProject(project: ProjectData): string {
     ...(brushes !== undefined ? { brushes } : {}),
     ...(metadata !== undefined ? { metadata } : {}),
     ...(customPalettes !== undefined ? { customPalettes } : {}),
+    ...(notes !== undefined ? { notes } : {}),
+    ...(notesMetadata !== undefined ? { notesMetadata } : {}),
   };
   if (canvases !== undefined) {
     const serialized = JSON.stringify({
@@ -520,6 +541,22 @@ function validateProjectMetadata(value: unknown): asserts value is ProjectMetada
   }
 }
 
+function validateProjectNotesMetadata(value: unknown): asserts value is ProjectNotesMetadata {
+  if (
+    !isRecord(value) ||
+    typeof value.title !== 'string' ||
+    value.title.length > 200 ||
+    !Number.isSafeInteger(value.createdAt) ||
+    !Number.isSafeInteger(value.updatedAt) ||
+    (value.createdAt as number) < 0 ||
+    (value.updatedAt as number) < (value.createdAt as number) ||
+    !Number.isFinite(new Date(value.createdAt as number).getTime()) ||
+    !Number.isFinite(new Date(value.updatedAt as number).getTime())
+  ) {
+    throw new ProjectFormatError('В проекте указаны некорректные метаданные заметок.');
+  }
+}
+
 export function parseProjectMetadataJson(json: string): ProjectMetadata {
   if (json.length > MAX_PROJECT_METADATA_LENGTH) {
     throw new ProjectFormatError('Метаданные проекта превышают допустимый размер.');
@@ -641,6 +678,8 @@ export function parseProject(text: string): ProjectData {
   let brushes: BrushDefinition[] | undefined;
   let metadata: ProjectMetadata | undefined;
   let customPalettes: Palette[] | undefined;
+  let notes: string | undefined;
+  let notesMetadata: ProjectNotesMetadata | undefined;
 
   if ((version >= 2 && version <= 5) || (version >= 6 && raw.canvases !== undefined)) {
     if (!Array.isArray(raw.canvases) || raw.canvases.length === 0 || raw.canvases.length > MAX_PROJECT_CANVASES) {
@@ -948,6 +987,16 @@ export function parseProject(text: string): ProjectData {
       throw new ProjectFormatError(error instanceof Error ? error.message : 'Некорректные пользовательские палитры.');
     }
   }
+  if (version >= 12 && raw.notes !== undefined) {
+    if (typeof raw.notes !== 'string' || raw.notes.length > 5 * 1024 * 1024) {
+      throw new ProjectFormatError('В проекте указаны некорректные заметки или они превышают допустимый размер 5 МБ.');
+    }
+    notes = raw.notes;
+  }
+  if (version >= 13 && raw.notesMetadata !== undefined) {
+    validateProjectNotesMetadata(raw.notesMetadata);
+    notesMetadata = raw.notesMetadata;
+  }
 
   const paletteInfo = isRecord(raw.palette) ? raw.palette : {};
   const known = typeof paletteInfo.id === 'string' &&
@@ -978,7 +1027,7 @@ export function parseProject(text: string): ProjectData {
 
   return {
     width, height, pixels, paletteId, freeColor, primary, secondary, recent, canvases,
-    activeCanvasId, references, tilemap, animationFrames, brushes, metadata, customPalettes,
+    activeCanvasId, references, tilemap, animationFrames, brushes, metadata, customPalettes, notes, notesMetadata,
   };
 }
 

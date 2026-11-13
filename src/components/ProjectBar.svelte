@@ -23,7 +23,7 @@
     onscale: (scale: ExportScale) => void;
     onwelcome: (trigger: HTMLElement) => void;
     onhelp: (trigger: HTMLElement) => void;
-    onsettings: (trigger: HTMLElement) => void;
+    onfeedbacknotes: (trigger: HTMLElement) => void;
   }
 
   let {
@@ -47,7 +47,7 @@
     onscale,
     onwelcome,
     onhelp,
-    onsettings,
+    onfeedbacknotes,
   }: Props = $props();
 
   let fileInput: HTMLInputElement | undefined = $state();
@@ -148,7 +148,7 @@
     <input
       class="hidden"
       type="file"
-      accept=".json,.png,.jpg,.jpeg,.webp,.bmp,application/json,image/png,image/jpeg,image/webp,image/bmp"
+      accept=".pxproj,.json,.png,.jpg,.jpeg,.webp,.bmp,application/json,image/png,image/jpeg,image/webp,image/bmp"
       tabindex="-1"
       aria-hidden="true"
       bind:this={fileInput}
@@ -194,23 +194,18 @@
     <button
       type="button"
       class="btn icon"
-      title="Настройки"
-      aria-label="Настройки"
-      onclick={(event) => onsettings(event.currentTarget)}
-    >
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <circle cx="12" cy="12" r="3" />
-        <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-1.6 2.77-.08-.03a1.7 1.7 0 0 0-1.8.38l-.06.06h-3.2l-.02-.08a1.7 1.7 0 0 0-1.23-1.37l-.08-.02-1.6-2.77.06-.06A1.7 1.7 0 0 0 10.6 14l-.08-.02v-3.2l.08-.02a1.7 1.7 0 0 0 1.23-1.37l.02-.08h3.2l.06.06a1.7 1.7 0 0 0 1.8.38l.08-.03 1.6 2.77-.06.06A1.7 1.7 0 0 0 19.4 15Z" />
-      </svg>
-    </button>
-    <button
-      type="button"
-      class="btn icon"
-      title={`Горячие клавиши (${helpShortcut})`}
-      aria-label="Горячие клавиши"
+      title={`Справка и горячие клавиши (${helpShortcut})`}
+      aria-label="Справка"
       aria-keyshortcuts={helpShortcut}
       onclick={(event) => onhelp(event.currentTarget)}
     >?</button>
+    <button
+      type="button"
+      class="btn"
+      title="Заметки обратной связи"
+      aria-label="Заметки обратной связи"
+      onclick={(event) => onfeedbacknotes(event.currentTarget)}
+    >Заметки обратной связи</button>
     <button type="button" class="btn" title={`Сохранить проект в файл JSON (${saveShortcut})`} aria-keyshortcuts={saveShortcut} onclick={onsave}>
       Сохранить <span class="kbd save-hint">{saveShortcut}</span>
     </button>

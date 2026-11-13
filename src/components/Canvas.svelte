@@ -26,7 +26,6 @@
     centerView,
     ensurePixelVisible,
     fitView,
-    nearestZoomLevel,
     screenToPixel,
     zoomAt,
     type PixelPos,
@@ -34,6 +33,20 @@
   } from '../core/viewport';
   import type { GridMode } from '../core/preferences';
   import { referenceAtPoint, sampleReferenceColor, type ReferenceImage } from '../core/reference';
+  import {
+    getSceneBounds as getCanvasSceneBounds,
+    guideBox as getAlignmentGuideBox,
+    guideLine as getAlignmentGuideLine,
+    snapBoardPosition as snapCanvasBoardPosition,
+    type AlignmentGuide,
+    type CanvasBoardGeometry,
+  } from '../core/canvasNavigation';
+  import {
+    beginPinchGesture,
+    updatePinchGesture,
+    type PinchGesture,
+    type TouchPoint,
+  } from '../core/canvasGestures';
 
   interface Board {
     id: string;
@@ -282,13 +295,6 @@
     void currentActiveBoard;
   });
 
-  interface AlignmentGuide {
-    x1: number;
-    y1: number;
-    x2: number;
-    y2: number;
-  }
-
   interface Props {
     buffer: PixelBuffer;
     boards: readonly Board[];
@@ -335,9 +341,10 @@
     onfill: (x: number, y: number, slot: ColorSlot) => void;
     onrender: () => void;
     onselectboard: (id: string) => void;
-    ondeleteboard: (id: string) => void;
     onmoveboard: (id: string, x: number, y: number) => void;
     onmoveboards: (positions: Array<{ id: string; x: number; y: number }>) => void;
+    ondeleteboard: (id: string) => void;
+    onfitboard: (id: string) => void;
     onselectreference: (id: string) => void;
     onreferencemovestart: () => void;
     onreferencemove: (id: string, x: number, y: number) => void;
@@ -394,9 +401,10 @@
     onfill,
     onrender,
     onselectboard,
-    ondeleteboard,
     onmoveboard,
     onmoveboards,
+    ondeleteboard,
+    onfitboard,
     onselectreference,
     onreferencemovestart,
     onreferencemove,
@@ -411,8 +419,6 @@
 
   /** Ниже этого зума линии сетки слишком частые и не рисуются. */
   const GRID_MIN_ZOOM = 4;
-  const HORIZONTAL_SCROLL_RANGE = 1000;
-  const ALIGNMENT_SNAP_DISTANCE = 8;
   /** Накопленный deltaY колеса, соответствующий одному шагу зума. */
   const WHEEL_STEP = 100;
   const MAX_WHEEL_STEPS = 3;
@@ -425,18 +431,7 @@
     ArrowDown: [0, 1],
   };
 
-  interface Gesture {
-    ids: [number, number];
-    startDistance: number;
-    startZoom: number;
-    startMidX: number;
-    startMidY: number;
-    startOffsetX: number;
-    startOffsetY: number;
-  }
-
   let viewportEl: HTMLDivElement | undefined = $state();
-  let horizontalScrollEl: HTMLDivElement | undefined = $state();
   let tiledPreviewCanvas: HTMLCanvasElement | undefined = $state();
   let panning = $state(false);
   let focused = $state(false);
@@ -464,6 +459,8 @@
   let lastClient: { x: number; y: number } | null = null;
   let panPointerId = -1;
   let rightPanPointerId = -1;
+  let rightClickBoardId: string | null = null;
+  let boardContextMenu = $state<{ boardId: string; x: number; y: number } | null>(null);
   let movingPointerId = -1;
   let movingBoardId: string | null = null;
   let movingBoardIds: string[] = [];
@@ -484,9 +481,6 @@
   let dragPreview = $state.raw<Array<{ id: string; x: number; y: number }>>([]);
   let alignmentGuides = $state.raw<AlignmentGuide[]>([]);
   let movingBoardStart = { x: 0, y: 0, boardX: 0, boardY: 0 };
-  let rightClickBoardId: string | null = null;
-  let boardContextMenu = $state<{ boardId: string; x: number; y: number } | null>(null);
-  let boardContextMenuEl: HTMLDivElement | undefined = $state();
   let activeStrokeBoardId: string | null = null;
   let selectionDrag: {
     pointerId: number;
@@ -498,38 +492,14 @@
   let polygonPoints = $state<PixelPos[]>([]);
   let panStart = { x: 0, y: 0, offsetX: 0, offsetY: 0 };
 
-  const touches = new Map<number, { x: number; y: number }>();
-  let gesture: Gesture | null = null;
+  const touches = new Map<number, TouchPoint>();
+  let gesture: PinchGesture | null = null;
 
   $effect(() => {
     if (selectionMode !== 'polygon') polygonPoints = [];
   });
-  const sceneBounds = $derived(getSceneBounds());
-  const horizontalScroll = $derived(getHorizontalScrollMetrics());
   /** После жеста палец, оставшийся на экране, не должен рисовать. */
   let touchLocked = false;
-
-  $effect(() => {
-    if (boardContextMenu) boardContextMenuEl?.focus();
-  });
-
-  function openBoardContextMenu(boardId: string, clientX: number, clientY: number): void {
-    if (!boards.some((board) => board.id === boardId) || !viewportEl) return;
-    const rect = viewportEl.getBoundingClientRect();
-    boardContextMenu = {
-      boardId,
-      x: Math.max(0, Math.min(viewportEl.clientWidth - 196, clientX - rect.left)),
-      y: Math.max(0, Math.min(viewportEl.clientHeight - 76, clientY - rect.top)),
-    };
-  }
-
-  function deleteBoardFromContextMenu(): void {
-    if (!boardContextMenu || boards.length <= 1) return;
-    const boardId = boardContextMenu.boardId;
-    boardContextMenu = null;
-    selectedBoardIds = new Set([...selectedBoardIds].filter((id) => id !== boardId));
-    ondeleteboard(boardId);
-  }
 
   function makeContext(slot: ColorSlot, pressure = 1): ToolContext {
     return {
@@ -658,11 +628,11 @@
   export function focusBoard(id: string): void {
     const board = boards.find((entry) => entry.id === id);
     if (!board) return;
-    view = clampSceneView({
+    view = {
       ...centerView(view.zoom, board.buffer.width, board.buffer.height, viewW, viewH),
       offsetX: (viewW - board.buffer.width * view.zoom) / 2 - board.x * view.zoom,
       offsetY: (viewH - board.buffer.height * view.zoom) / 2 - board.y * view.zoom,
-    });
+    };
   }
 
   export function centerActiveBoard(): void {
@@ -707,139 +677,22 @@
     return `${buffer.width}x${buffer.height}`;
   }
 
-  function snapBoardPosition(board: Board, x: number, y: number, ignoredBoardIds: ReadonlySet<string> = new Set([board.id])): {
-    x: number;
-    y: number;
-    guides: AlignmentGuide[];
-  } {
-    let bestX: { coordinate: number; edge: 'left' | 'right'; board: Board; distance: number } | null = null;
-    let bestY: { coordinate: number; edge: 'top' | 'bottom'; board: Board; distance: number } | null = null;
-    const threshold = Math.max(1, ALIGNMENT_SNAP_DISTANCE / view.zoom);
-
-    for (const other of boards) {
-      if (ignoredBoardIds.has(other.id)) continue;
-      for (const movingEdge of ['left', 'right'] as const) {
-        const movingCoordinate = x + (movingEdge === 'right' ? board.buffer.width : 0);
-        for (const stationaryEdge of ['left', 'right'] as const) {
-          const coordinate = other.x + (stationaryEdge === 'right' ? other.buffer.width : 0);
-          const distance = Math.abs(coordinate - movingCoordinate);
-          if (distance <= threshold && (!bestX || distance < bestX.distance)) {
-            bestX = { coordinate, edge: movingEdge, board: other, distance };
-          }
-        }
-      }
-      for (const movingEdge of ['top', 'bottom'] as const) {
-        const movingCoordinate = y + (movingEdge === 'bottom' ? board.buffer.height : 0);
-        for (const stationaryEdge of ['top', 'bottom'] as const) {
-          const coordinate = other.y + (stationaryEdge === 'bottom' ? other.buffer.height : 0);
-          const distance = Math.abs(coordinate - movingCoordinate);
-          if (distance <= threshold && (!bestY || distance < bestY.distance)) {
-            bestY = { coordinate, edge: movingEdge, board: other, distance };
-          }
-        }
-      }
-    }
-
-    let snappedX = bestX
-      ? bestX.coordinate - (bestX.edge === 'right' ? board.buffer.width : 0)
-      : x;
-    let snappedY = bestY
-      ? bestY.coordinate - (bestY.edge === 'bottom' ? board.buffer.height : 0)
-      : y;
-    if (snapToGrid) {
-      snappedX = Math.round(snappedX / gridSpacing) * gridSpacing;
-      snappedY = Math.round(snappedY / gridSpacing) * gridSpacing;
-    }
-    const guides: AlignmentGuide[] = [];
-
-    if (bestX) {
-      const movingY = bestX.edge === 'left' ? snappedY : snappedY + board.buffer.height;
-      const stationaryY = Math.abs(movingY - bestX.board.y) <=
-          Math.abs(movingY - (bestX.board.y + bestX.board.buffer.height))
-        ? bestX.board.y
-        : bestX.board.y + bestX.board.buffer.height;
-      guides.push({
-        x1: bestX.coordinate,
-        y1: movingY,
-        x2: bestX.coordinate,
-        y2: stationaryY,
-      });
-    }
-
-    if (bestY) {
-      const movingX = bestY.edge === 'top' ? snappedX : snappedX + board.buffer.width;
-      const stationaryX = Math.abs(movingX - bestY.board.x) <=
-          Math.abs(movingX - (bestY.board.x + bestY.board.buffer.width))
-        ? bestY.board.x
-        : bestY.board.x + bestY.board.buffer.width;
-      guides.push({
-        x1: movingX,
-        y1: bestY.coordinate,
-        x2: stationaryX,
-        y2: bestY.coordinate,
-      });
-    }
-
-    return { x: snappedX, y: snappedY, guides };
-  }
-
-  function guideBox(guide: AlignmentGuide): { left: number; top: number; width: number; height: number } {
+  function geometryForBoard(board: Board): CanvasBoardGeometry {
     return {
-      left: Math.min(guide.x1, guide.x2) * view.zoom,
-      top: Math.min(guide.y1, guide.y2) * view.zoom,
-      width: Math.max(1, Math.abs(guide.x2 - guide.x1) * view.zoom),
-      height: Math.max(1, Math.abs(guide.y2 - guide.y1) * view.zoom),
+      id: board.id,
+      x: board.x,
+      y: board.y,
+      width: board.buffer.width,
+      height: board.buffer.height,
     };
   }
 
-  function guideLine(guide: AlignmentGuide): { x1: number; y1: number; x2: number; y2: number } {
-    const box = guideBox(guide);
-    if (guide.x1 === guide.x2) {
-      return {
-        x1: box.width / 2,
-        y1: guide.y1 <= guide.y2 ? 0 : box.height,
-        x2: box.width / 2,
-        y2: guide.y1 <= guide.y2 ? box.height : 0,
-      };
-    }
-    if (guide.y1 === guide.y2) {
-      return {
-        x1: guide.x1 <= guide.x2 ? 0 : box.width,
-        y1: box.height / 2,
-        x2: guide.x1 <= guide.x2 ? box.width : 0,
-        y2: box.height / 2,
-      };
-    }
-    return {
-      x1: guide.x1 <= guide.x2 ? 0 : box.width,
-      y1: guide.y1 <= guide.y2 ? 0 : box.height,
-      x2: guide.x1 <= guide.x2 ? box.width : 0,
-      y2: guide.y1 <= guide.y2 ? box.height : 0,
-    };
-  }
-
-  function getSceneBounds(): { minX: number; minY: number; maxX: number; maxY: number; width: number; height: number } {
-    if (boards.length === 0) {
-      return { minX: 0, minY: 0, maxX: buffer.width, maxY: buffer.height, width: buffer.width, height: buffer.height };
-    }
-    const minX = Math.min(...boards.map((board) => board.x));
-    const minY = Math.min(...boards.map((board) => board.y));
-    const maxX = Math.max(...boards.map((board) => board.x + board.buffer.width));
-    const maxY = Math.max(...boards.map((board) => board.y + board.buffer.height));
-    return { minX, minY, maxX, maxY, width: maxX - minX, height: maxY - minY };
-  }
-
-  function clampSceneView(next: ViewState): ViewState {
-    const bounds = getSceneBounds();
-    const width = bounds.width * next.zoom;
-    const height = bounds.height * next.zoom;
-    const marginX = Math.min(48, width, viewW / 2);
-    const marginY = Math.min(48, height, viewH / 2);
-    return {
-      zoom: next.zoom,
-      offsetX: Math.round(Math.max(viewW - marginX - bounds.maxX * next.zoom, Math.min(marginX - bounds.minX * next.zoom, next.offsetX))),
-      offsetY: Math.round(Math.max(viewH - marginY - bounds.maxY * next.zoom, Math.min(marginY - bounds.minY * next.zoom, next.offsetY))),
-    };
+  function getSceneBounds() {
+    return getCanvasSceneBounds(
+      boards.map(geometryForBoard),
+      buffer.width,
+      buffer.height,
+    );
   }
 
   function boardAt(clientX: number, clientY: number): Board | null {
@@ -880,37 +733,6 @@
     onselection(combineSelections(selectionMask, next, selectionOperation));
     polygonPoints = [];
   }
-
-  function getHorizontalScrollMetrics(): {
-    scrollContentWidth: number;
-  } {
-    return { scrollContentWidth: viewW + HORIZONTAL_SCROLL_RANGE };
-  }
-
-  function onHorizontalScroll(): void {
-    if (!horizontalScrollEl) return;
-    const margin = Math.min(48, sceneBounds.width * view.zoom, viewW / 2);
-    const minOffset = viewW - margin - sceneBounds.maxX * view.zoom;
-    const maxOffset = margin - sceneBounds.minX * view.zoom;
-    const range = maxOffset - minOffset;
-    const ratio = horizontalScrollEl.scrollLeft / HORIZONTAL_SCROLL_RANGE;
-    view = clampSceneView({ ...view, offsetX: maxOffset - range * ratio });
-  }
-
-  $effect(() => {
-    const currentScroll = horizontalScrollEl;
-    const margin = Math.min(48, sceneBounds.width * view.zoom, viewW / 2);
-    const minOffset = viewW - margin - sceneBounds.maxX * view.zoom;
-    const maxOffset = margin - sceneBounds.minX * view.zoom;
-    const range = maxOffset - minOffset;
-    const ratio = range > 0 ? (maxOffset - view.offsetX) / range : 0;
-    const target = ratio * HORIZONTAL_SCROLL_RANGE;
-    if (currentScroll && Math.abs(currentScroll.scrollLeft - target) > 1) {
-      untrack(() => {
-        currentScroll.scrollLeft = Math.max(0, target);
-      });
-    }
-  });
 
   function refreshOrigin(): void {
     if (!viewportEl) return;
@@ -964,42 +786,18 @@
   // ——— Касания: два пальца — масштаб и перемещение ———
 
   function startGesture(): void {
-    const [first, second] = [...touches.entries()];
-    if (!first || !second) return;
+    const nextGesture = beginPinchGesture(touches, originX, originY, view);
+    if (!nextGesture) return;
     // Первый палец уже мог начать штрих: он отменяется целиком, чтобы не остаться случайной точке
     session.abortAny();
-
-    const midX = (first[1].x + second[1].x) / 2 - originX;
-    const midY = (first[1].y + second[1].y) / 2 - originY;
-    gesture = {
-      ids: [first[0], second[0]],
-      startDistance: Math.max(1, Math.hypot(first[1].x - second[1].x, first[1].y - second[1].y)),
-      startZoom: view.zoom,
-      startMidX: midX,
-      startMidY: midY,
-      startOffsetX: view.offsetX,
-      startOffsetY: view.offsetY,
-    };
+    gesture = nextGesture;
     touchLocked = true;
   }
 
   function updateGesture(): void {
     if (!gesture) return;
-    const a = touches.get(gesture.ids[0]);
-    const b = touches.get(gesture.ids[1]);
-    if (!a || !b) return;
-
-    const distance = Math.hypot(a.x - b.x, a.y - b.y);
-    const midX = (a.x + b.x) / 2 - originX;
-    const midY = (a.y + b.y) / 2 - originY;
-    const zoom = nearestZoomLevel((gesture.startZoom * distance) / gesture.startDistance);
-
-    // Точка холста, бывшая под серединой в начале жеста, остаётся под серединой
-    const canvasX = (gesture.startMidX - gesture.startOffsetX) / gesture.startZoom;
-    const canvasY = (gesture.startMidY - gesture.startOffsetY) / gesture.startZoom;
-    view = clampSceneView(
-      { zoom, offsetX: Math.round(midX - canvasX * zoom), offsetY: Math.round(midY - canvasY * zoom) },
-    );
+    const nextView = updatePinchGesture(gesture, touches, originX, originY);
+    if (nextView) view = nextView;
   }
 
   function forgetTouch(pointerId: number): void {
@@ -1096,7 +894,7 @@
       if (panning || session.isActive) return;
       e.preventDefault();
       rightPanPointerId = e.pointerId;
-      rightClickBoardId = board?.id ?? null;
+      rightClickBoardId = board?.id === activeBoardId ? board.id : null;
       panStart = { x: e.clientX, y: e.clientY, offsetX: view.offsetX, offsetY: view.offsetY };
       viewportEl.focus({ preventScroll: true });
       viewportEl.setPointerCapture(e.pointerId);
@@ -1223,10 +1021,14 @@
         const movingBoard = boards.find((entry) => entry.id === movingBoardId);
         const initialPosition = movingBoardPositions.find((entry) => entry.id === movingBoardId);
         if (!movingBoard || !initialPosition) return;
-        const snapped = snapBoardPosition(
-          movingBoard,
+        const snapped = snapCanvasBoardPosition(
+          geometryForBoard(movingBoard),
+          boards.map(geometryForBoard),
           initialPosition.x + dx,
           initialPosition.y + dy,
+          view.zoom,
+          snapToGrid,
+          gridSpacing,
           new Set(movingBoardIds),
         );
         const offsetX = snapped.x - initialPosition.x;
@@ -1345,14 +1147,19 @@
     }
 
     if (rightPanPointerId === e.pointerId) {
-      rightPanPointerId = -1;
-      if (!panning) {
-        const board = rightClickBoardId ? boards.find((entry) => entry.id === rightClickBoardId) : undefined;
-        if (board && boardAt(e.clientX, e.clientY)?.id === board.id) {
-          openBoardContextMenu(board.id, e.clientX, e.clientY);
-        }
-      }
+      const clickedBoardId = rightClickBoardId;
       rightClickBoardId = null;
+      rightPanPointerId = -1;
+      if (!panning && clickedBoardId === activeBoardId && boardAt(e.clientX, e.clientY)?.id === clickedBoardId) {
+        const rect = viewportEl!.getBoundingClientRect();
+        const menuWidth = 212;
+        const menuHeight = 82;
+        boardContextMenu = {
+          boardId: clickedBoardId,
+          x: Math.max(8, Math.min(e.clientX - rect.left, rect.width - menuWidth - 8)),
+          y: Math.max(8, Math.min(e.clientY - rect.top, rect.height - menuHeight - 8)),
+        };
+      }
     }
 
     if (panning && e.pointerId === panPointerId) {
@@ -1386,7 +1193,10 @@
       draggingGuide = null;
       releasePointer(e.pointerId);
     }
-    if (rightPanPointerId === e.pointerId) rightPanPointerId = -1;
+    if (rightPanPointerId === e.pointerId) {
+      rightPanPointerId = -1;
+      rightClickBoardId = null;
+    }
     if (selectionDrag?.pointerId === e.pointerId) {
       onselection(selectionDrag.original);
       selectionDrag = null;
@@ -1426,7 +1236,10 @@
       onreferencemovecancel();
     }
     if (draggingGuide?.pointerId === e.pointerId) draggingGuide = null;
-    if (rightPanPointerId === e.pointerId) rightPanPointerId = -1;
+    if (rightPanPointerId === e.pointerId) {
+      rightPanPointerId = -1;
+      rightClickBoardId = null;
+    }
     if (selectionDrag?.pointerId === e.pointerId) {
       onselection(selectionDrag.original);
       selectionDrag = null;
@@ -1474,7 +1287,7 @@
     cursor = { x: keyboardX, y: keyboardY };
     const board = boards.find((entry) => entry.id === activeBoardId);
     if (board) {
-      view = clampSceneView(ensurePixelVisible(view, board.x + keyboardX, board.y + keyboardY, viewW, viewH));
+      view = ensurePixelVisible(view, board.x + keyboardX, board.y + keyboardY, viewW, viewH);
     }
     if (session.isActiveFor('keyboard')) session.move('keyboard', [{ x: keyboardX, y: keyboardY }]);
   }
@@ -1497,7 +1310,7 @@
   }
 
   function onKeyDown(e: KeyboardEvent): void {
-    if (e.key === 'Escape' && boardContextMenu) {
+    if (boardContextMenu && e.key === 'Escape') {
       e.preventDefault();
       boardContextMenu = null;
       return;
@@ -1563,24 +1376,28 @@
   onMount(() => {
     const el = viewportEl;
     if (!el) return;
+    const dismissBoardContextMenu = (event: PointerEvent) => {
+      if (event.target instanceof Element && event.target.closest('.board-context-menu')) return;
+      if (boardContextMenu) boardContextMenu = null;
+    };
 
     const observer = new ResizeObserver((entries) => {
       const rect = entries[0].contentRect;
       viewW = rect.width;
       viewH = rect.height;
       refreshOrigin();
-      if (!ensureFit()) {
-        view = clampSceneView(view);
-      }
+      ensureFit();
     });
     observer.observe(el);
 
     // passive: false нужен, чтобы колесо не прокручивало страницу
     el.addEventListener('wheel', onWheel, { passive: false });
+    document.addEventListener('pointerdown', dismissBoardContextMenu, true);
 
     return () => {
       observer.disconnect();
       el.removeEventListener('wheel', onWheel);
+      document.removeEventListener('pointerdown', dismissBoardContextMenu, true);
       if (tiledRenderFrame) cancelAnimationFrame(tiledRenderFrame);
       if (previewWindowTimer) clearInterval(previewWindowTimer);
       previewWindow?.close();
@@ -1599,7 +1416,7 @@
     bind:this={viewportEl}
     role="application"
     tabindex="0"
-    aria-label="Рабочее поле. Правый клик по холсту открывает меню действий. Перетаскивайте пустое пространство правой кнопкой мыши, чтобы перемещаться. Ctrl и клик правой кнопкой выделяют холсты; перетаскивание выделенного холста перемещает группу."
+    aria-label="Рабочее поле. Перетаскивайте пустое пространство правой кнопкой мыши, чтобы перемещаться. Ctrl и клик правой кнопкой выделяют холсты; перетаскивание выделенного холста перемещает группу."
     oncontextmenu={(e) => e.preventDefault()}
     onpointerdown={onPointerDown}
     onpointermove={onPointerMove}
@@ -1611,31 +1428,6 @@
     onfocus={onFocus}
     onblur={onBlur}
   >
-    {#if boardContextMenu}
-      <div
-        class="board-context-menu"
-        role="menu"
-        aria-label="Действия холста"
-        tabindex="-1"
-        bind:this={boardContextMenuEl}
-        style:left="{boardContextMenu.x}px"
-        style:top="{boardContextMenu.y}px"
-        onpointerdown={(event) => event.stopPropagation()}
-        onpointerup={(event) => event.stopPropagation()}
-        oncontextmenu={(event) => event.preventDefault()}
-      >
-        <button
-          type="button"
-          role="menuitem"
-          aria-label="Удалить холст"
-          disabled={boards.length <= 1}
-          onclick={deleteBoardFromContextMenu}
-        >Удалить холст</button>
-        {#if boards.length <= 1}
-          <span>В проекте должен остаться хотя бы один холст.</span>
-        {/if}
-      </div>
-    {/if}
     {#if tiledMode}
       <canvas class="tiled-background" bind:this={tiledPreviewCanvas} aria-hidden="true"></canvas>
     {/if}
@@ -1747,8 +1539,8 @@
         {/if}
       {/each}
       {#each alignmentGuides as guide, index (`${guide.x1}:${guide.y1}:${guide.x2}:${guide.y2}:${index}`)}
-        {@const box = guideBox(guide)}
-        {@const line = guideLine(guide)}
+        {@const box = getAlignmentGuideBox(guide, view.zoom)}
+        {@const line = getAlignmentGuideLine(guide, view.zoom)}
         <svg
           class="alignment-guide"
           style:left="{box.left}px"
@@ -1787,17 +1579,35 @@
         <button type="button" onclick={oncanceltransform}>Отмена</button>
       </div>
     {/if}
-  </div>
-  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-  <div
-    class="horizontal-scroll"
-    bind:this={horizontalScrollEl}
-    role="region"
-    aria-label="Горизонтальная прокрутка холста"
-    tabindex="0"
-    onscroll={onHorizontalScroll}
-  >
-    <div class="horizontal-scroll-content" style:width="{horizontalScroll.scrollContentWidth}px"></div>
+    {#if boardContextMenu}
+      <div
+        class="board-context-menu"
+        role="group"
+        aria-label="Действия холста"
+        style:left="{boardContextMenu.x}px"
+        style:top="{boardContextMenu.y}px"
+        onpointerdown={(event) => event.stopPropagation()}
+        onpointerup={(event) => event.stopPropagation()}
+        oncontextmenu={(event) => event.preventDefault()}
+      >
+        <button
+          type="button"
+          onclick={() => {
+            const boardId = boardContextMenu?.boardId;
+            boardContextMenu = null;
+            if (boardId) ondeleteboard(boardId);
+          }}
+        >Удалить</button>
+        <button
+          type="button"
+          onclick={() => {
+            const boardId = boardContextMenu?.boardId;
+            boardContextMenu = null;
+            if (boardId) onfitboard(boardId);
+          }}
+        >Подогнать холст под изображение</button>
+      </div>
+    {/if}
   </div>
 </div>
 
@@ -1836,32 +1646,25 @@
     cursor: grabbing;
   }
 
-  .stage {
-    position: absolute;
-    left: 0;
-    top: 0;
-    will-change: transform;
-  }
-
   .board-context-menu {
     position: absolute;
-    z-index: 20;
+    z-index: 30;
     display: grid;
+    min-width: 196px;
     gap: 4px;
-    min-width: 184px;
     padding: 6px;
     border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--surface);
+    border-radius: var(--radius);
+    background: var(--panel);
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
     color: var(--text);
-    font: inherit;
   }
 
   .board-context-menu button {
-    padding: 7px 10px;
-    border: 0;
-    border-radius: 5px;
+    min-height: 30px;
+    padding: 5px 8px;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
     background: transparent;
     color: inherit;
     font: inherit;
@@ -1869,25 +1672,18 @@
     cursor: pointer;
   }
 
-  .board-context-menu button:hover:not(:disabled),
+  .board-context-menu button:hover,
   .board-context-menu button:focus-visible {
-    background: var(--surface-hover);
+    border-color: var(--border);
+    background: var(--panel-2);
     outline: none;
   }
 
-  .board-context-menu button:disabled {
-    color: var(--muted);
-    cursor: not-allowed;
-  }
-
-  .board-context-menu:focus {
-    outline: none;
-  }
-
-  .board-context-menu span {
-    padding: 2px 6px 4px;
-    color: var(--muted);
-    font-size: 11px;
+  .stage {
+    position: absolute;
+    left: 0;
+    top: 0;
+    will-change: transform;
   }
 
   .tiled-background {
@@ -1953,19 +1749,6 @@
     position: absolute;
     overflow: visible;
     pointer-events: none;
-  }
-
-  .horizontal-scroll {
-    flex: 0 0 16px;
-    overflow-x: auto;
-    overflow-y: hidden;
-    background: var(--panel-2);
-    scrollbar-color: var(--text-dim) var(--panel-2);
-    touch-action: pan-x;
-  }
-
-  .horizontal-scroll-content {
-    height: 1px;
   }
 
   canvas {

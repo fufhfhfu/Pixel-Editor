@@ -1,9 +1,12 @@
 <script lang="ts">
-  import { onDestroy, tick, untrack } from 'svelte';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
+  import { dispatchEditorCommand, type SelectionAction } from './editorCommands';
   import Canvas, { type ViewportGuide } from './components/Canvas.svelte';
   import ConfirmDialog from './components/ConfirmDialog.svelte';
   import HelpDialog from './components/HelpDialog.svelte';
+  import AboutDialog from './components/AboutDialog.svelte';
   import FeedbackNotesDialog from './components/FeedbackNotesDialog.svelte';
+  import NotesDialog from './components/NotesDialog.svelte';
   import WelcomeDialog from './components/WelcomeDialog.svelte';
   import SettingsDialog from './components/SettingsDialog.svelte';
   import ReferencesPanel from './components/ReferencesPanel.svelte';
@@ -20,6 +23,7 @@
   import TimelinePanel from './components/TimelinePanel.svelte';
   import EditorMenuBar, { type EditorMenuGroup } from './components/EditorMenuBar.svelte';
   import LayersPanel from './components/LayersPanel.svelte';
+  import RecentProjectsDialog from './components/RecentProjectsDialog.svelte';
   import {
     DEFAULT_EXPORT_SCALE,
     exportPngBlob,
@@ -32,7 +36,13 @@
     type ExportFormat,
     type ExportScale,
   } from './core/export';
-  import { decodeRasterImage, MAX_IMAGE_FILE_BYTES, rasterImageToProject } from './core/imageImport';
+  import {
+    decodeRasterImage,
+    MAX_IMAGE_FILE_BYTES,
+    type DecodedRasterImage,
+    type RasterImportStage,
+  } from './core/imageImport';
+  import { MAX_NOTES_IMPORT_BYTES, parseNotesImportDocument } from './core/notesImport';
   import {
     MAX_PROJECT_REFERENCES,
     MAX_REFERENCE_TOTAL_PIXELS,
@@ -42,6 +52,7 @@
     type ReferenceImage,
   } from './core/reference';
   import { History } from './core/history';
+  import { buildProjectSnapshot } from './core/projectSnapshot';
   import {
     advanceAnimation,
     createAnimationFrame,
@@ -76,6 +87,7 @@
     serializeProject,
     type ProjectData,
     type ProjectMetadata,
+    type ProjectNotesMetadata,
   } from './core/project';
   import {
     loadEditorPreferences,
@@ -109,7 +121,7 @@
     AutosaveRepository,
     type AutosaveStorageMode,
   } from './core/autosave';
-  import { saveDesktopBlob } from './core/desktopFiles';
+  import { saveDesktopBlob, saveDesktopProject } from './core/desktopFiles';
   import { DEFAULT_GRID_SIZE, PixelBuffer, isValidCanvasSize, type RGBA } from './core/state';
   import {
     compositeLayers,
@@ -175,11 +187,6 @@
     type WorkspacePanelId,
     type WorkspaceLayout,
   } from './core/workspace';
-  type SelectionAction =
-    | 'select-all' | 'select-opaque' | 'invert' | 'deselect' | 'copy' | 'cut' | 'paste' | 'clear' | 'crop'
-    | 'move-left' | 'move-right' | 'move-up' | 'move-down'
-    | 'flip-horizontal' | 'flip-vertical' | 'rotate-left' | 'rotate-right' | 'scale-up' | 'scale-down';
-
   interface Props {
     initialProject: ProjectData | null;
     initialLoadError: string | null;
@@ -246,7 +253,8 @@
     selectedBrushId = id;
     const brush = brushLibrary.find((entry) => entry.id === id);
     if (!brush) return;
-    brushSize = brush.size;
+    if (activeToolId === 'eraser') eraserSize = brush.size;
+    else pencilSize = brush.size;
     brushShape = brush.type === 'circle' ? 'circle' : 'square';
   }
 
@@ -268,8 +276,14 @@
   /** Действие, которое ждёт подтверждения в диалоге. */
   type PendingAction =
     | { kind: 'resize'; width: number; height: number }
-    | { kind: 'import'; project: ProjectData; fileName: string }
-    | { kind: 'image'; project: ProjectData; fileName: string }
+    | {
+        kind: 'import';
+        project: ProjectData;
+        fileName: string;
+        projectHandle: string | null;
+        restoringBackup: boolean;
+      }
+    | { kind: 'image'; image: DecodedRasterImage; fileName: string; boardId: string }
     | { kind: 'clear' };
 
   interface Notice {
@@ -358,6 +372,7 @@
   const savedShortcuts = loadShortcutMap(storage);
   const savedWorkspace = loadWorkspaceLayout(storage);
   const start = untrack(() => initialProject);
+  const initialNotesCreatedAt = start?.notesMetadata?.createdAt ?? Date.now();
   const startupStorageMode = untrack(() => initialStorageMode);
   const startPalette = PALETTES.find((entry) => entry.id === start?.paletteId) ??
     start?.customPalettes?.find((entry) => entry.id === start?.paletteId) ??
@@ -541,8 +556,19 @@
   let welcomeTrigger = $state<HTMLElement | null>(null);
   let feedbackNotesOpen = $state(false);
   let feedbackNotesTrigger = $state<HTMLElement | null>(null);
+  let projectNotesOpen = $state(false);
+  let projectNotesTrigger = $state<HTMLElement | null>(null);
+  let commandSearchOpen = $state(false);
+  let notesText = $state(start?.notes ?? '');
+  let notesTitle = $state(start?.notesMetadata?.title ?? 'Заметки проекта');
+  let notesCreatedAt = $state(initialNotesCreatedAt);
+  let notesUpdatedAt = $state(start?.notesMetadata?.updatedAt ?? initialNotesCreatedAt);
+  let notesStatus = $state('сохранено в проекте');
+  let notesBackup = $state<DesktopNotesBackup | null>(null);
   let helpOpen = $state(false);
   let helpTrigger = $state<HTMLElement | null>(null);
+  let aboutOpen = $state(false);
+  let aboutTrigger = $state<HTMLElement | null>(null);
   let settingsOpen = $state(false);
   let settingsTab = $state<'general' | 'background' | 'hotkeys'>('general');
   let settingsTrigger = $state<HTMLElement | null>(null);
@@ -556,6 +582,8 @@
 
   let activeToolId = $state<ToolId>('pencil');
   let fillInProgress = $state(false);
+  let imageImportProgress = $state<{ fileName: string; stage: RasterImportStage } | null>(null);
+  let batchExportProgress = $state<{ completed: number; total: number } | null>(null);
   let selectionMask = $state.raw<SelectionMask | null>(null);
   let selectionMode = $state<SelectionMode | null>(null);
   let selectionOperation = $state<SelectionOperation>('replace');
@@ -567,12 +595,19 @@
     selection: SelectionMask;
     preview: PixelBuffer;
   } | null>(null);
-  let brushSize = $state(MIN_BRUSH_SIZE);
+  let pencilSize = $state(MIN_BRUSH_SIZE);
+  let eraserSize = $state(MIN_BRUSH_SIZE);
+  const brushSize = $derived(activeToolId === 'eraser' ? eraserSize : pencilSize);
   let brushShape = $state<BrushShape>('square');
   let brushOpacity = $state(100);
   const BRUSH_LIBRARY_KEY = 'pixel-editor:brush-library';
   let brushLibrary = $state.raw<BrushDefinition[]>(start?.brushes?.map((brush) => ({ ...brush, mask: [...brush.mask] })) ?? []);
   let projectMetadata = $state.raw<ProjectMetadata>(start?.metadata ?? {});
+  let projectFileName = $state<string | null>(null);
+  let projectHandle = $state<string | null>(null);
+  let projectHasUnsavedChanges = $state(false);
+  let recentProjects = $state<DesktopRecentProject[]>([]);
+  let recentProjectsOpen = $state(false);
   let brushPanelName = $state('Моя кисть');
   let brushPanelType = $state<BrushType>('pencil');
   let selectedBrushId = $state('');
@@ -636,6 +671,7 @@
   let autosaveFailureReported = false;
   let autosaveArmed = false;
   let autosaveRevision = 0;
+  let suppressNextProjectDirtyMark = false;
 
   const activeTool = $derived(getTool(activeToolId));
   function shortcutLabel(actionId: string): string {
@@ -664,6 +700,24 @@
     document.documentElement.dataset.theme = theme;
   });
 
+  $effect(() => {
+    const updateWindowState = window.pixelEditorDesktop?.updateWindowState;
+    if (typeof updateWindowState === 'function') {
+      updateWindowState({
+        fileName: projectFileName,
+        dirty: projectHasUnsavedChanges,
+        canUndo,
+        canRedo,
+        notesBackup: {
+          title: notesTitle,
+          notes: notesText,
+          createdAt: notesCreatedAt,
+          updatedAt: notesUpdatedAt,
+        },
+      });
+    }
+  });
+
   // ——— Уведомления ———
 
   function dismissNotice(): void {
@@ -684,11 +738,97 @@
     welcomeOpen = true;
   }
 
-  function showFeedbackNotes(trigger: HTMLElement | null = null): void {
-    feedbackNotesTrigger = trigger?.isConnected
-      ? trigger
-      : document.querySelector<HTMLElement>('[aria-label="Горячие клавиши"]');
+  function showFeedbackNotes(trigger: HTMLElement): void {
+    feedbackNotesTrigger = trigger;
     feedbackNotesOpen = true;
+  }
+
+  async function showProjectNotes(trigger: HTMLElement | null = null): Promise<void> {
+    projectNotesTrigger = trigger?.isConnected ? trigger : null;
+    try {
+      notesBackup = await window.pixelEditorDesktop?.getNotesBackup() ?? null;
+    } catch (error) {
+      notify(
+        `Не удалось проверить резервную копию заметок: ${error instanceof Error ? error.message : String(error)}`,
+        'error',
+      );
+    }
+    projectNotesOpen = true;
+  }
+
+  function updateProjectNotesTitle(value: string): void {
+    notesTitle = value.slice(0, 200);
+    notesUpdatedAt = Date.now();
+    notesStatus = 'сохраняется…';
+    scheduleAutosave();
+  }
+
+  function updateProjectNotes(value: string): void {
+    notesText = value;
+    notesUpdatedAt = Date.now();
+    notesStatus = 'сохраняется…';
+    scheduleAutosave();
+  }
+
+  async function importNotesFile(file: File): Promise<void> {
+    if (file.size > MAX_NOTES_IMPORT_BYTES) {
+      notify('Файл заметок превышает допустимый размер 5 МБ.', 'error');
+      return;
+    }
+    try {
+      const imported = parseNotesImportDocument(file.name, await file.text());
+      updateProjectNotes(imported.notes);
+      if (imported.title !== undefined) notesTitle = imported.title;
+      if (imported.createdAt !== undefined && imported.updatedAt !== undefined) {
+        notesCreatedAt = imported.createdAt;
+        notesUpdatedAt = imported.updatedAt;
+      }
+      notify('Заметки импортированы в проект.');
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Не удалось импортировать заметки.', 'error');
+    }
+  }
+
+  async function exportProjectNotes(format: 'markdown' | 'text' | 'json' | 'pdf'): Promise<void> {
+    if (format === 'pdf') {
+      try {
+        const result = await window.pixelEditorDesktop?.exportNotesPdf({
+          title: notesTitle,
+          notes: notesText,
+          createdAt: notesCreatedAt,
+          updatedAt: notesUpdatedAt,
+        });
+        if (result?.status === 'saved') notify('Заметки экспортированы в PDF.');
+      } catch (error) {
+        notify(error instanceof Error ? error.message : 'Не удалось экспортировать заметки в PDF.', 'error');
+      }
+      return;
+    }
+    const config = format === 'json'
+      ? { filename: 'pixel-editor-notes.json', mime: 'application/json' }
+      : format === 'text'
+        ? { filename: 'pixel-editor-notes.txt', mime: 'text/plain' }
+        : { filename: 'pixel-editor-notes.md', mime: 'text/markdown' };
+    const content = format === 'json'
+      ? JSON.stringify({
+          format: 'pixel-editor-notes',
+          version: 1,
+          exportedAt: new Date().toISOString(),
+          title: notesTitle,
+          createdAt: notesCreatedAt,
+          updatedAt: notesUpdatedAt,
+          notes: notesText,
+        }, null, 2)
+      : format === 'text'
+        ? `${notesText.trim()}\n`
+        : `# Заметки Pixel Editor\n\n${notesText.trim()}\n`;
+    try {
+      if (await saveDesktopBlob(new Blob([content], { type: config.mime }), config.filename) === 'saved') {
+        notify('Заметки экспортированы.');
+      }
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Не удалось экспортировать заметки.', 'error');
+    }
   }
 
   function acknowledgeWelcome(): void {
@@ -896,86 +1036,103 @@
     scheduleWorkspaceSave();
   }
 
-  function handleEditorCommand(command: string): void {
-    if (command.startsWith('tool:')) {
-      const toolId = command.slice(5);
+  const editorCommandActions = new Map<string, () => void>([
+    ['save', () => void saveProject()],
+    ['save-as', () => void saveProject(true)],
+    ['export', () => void exportImage()],
+    ['batch-export', () => void exportAllBoards()],
+    ['recent-projects', () => void showRecentProjects()],
+    ['save-before-close', () => {
+      void saveProject().then(async (saved) => {
+        if (saved) await window.pixelEditorDesktop?.closeWindowAfterSave();
+      }).catch((error: unknown) => notify(
+        `Не удалось сохранить проект перед закрытием: ${error instanceof Error ? error.message : String(error)}`,
+        'error',
+      ));
+    }],
+    ['undo', undo],
+    ['redo', redo],
+    ['clear', requestClear],
+    ['delete-board', () => removeBoard(activeBoardId)],
+    ['select-all', () => runSelectionAction('select-all')],
+    ['select-opaque', () => runSelectionAction('select-opaque')],
+    ['selection-mode:none', () => { selectionMode = null; }],
+    ['selection-mode:rect', () => { selectionMode = 'rect'; }],
+    ['selection-mode:ellipse', () => { selectionMode = 'ellipse'; }],
+    ['selection-mode:lasso', () => { selectionMode = 'lasso'; }],
+    ['selection-mode:polygon', () => { selectionMode = 'polygon'; }],
+    ['selection-mode:wand', () => { selectionMode = 'wand'; }],
+    ['selection-mode:color', () => { selectionMode = 'color'; }],
+    ['selection-operation:replace', () => { selectionOperation = 'replace'; }],
+    ['selection-operation:add', () => { selectionOperation = 'add'; }],
+    ['selection-operation:subtract', () => { selectionOperation = 'subtract'; }],
+    ['selection-operation:intersect', () => { selectionOperation = 'intersect'; }],
+    ['toggle-grid', toggleGrid],
+    ['fit', fitCanvas],
+    ['center', () => canvasApi?.centerActiveBoard()],
+    ['zoom-in', () => canvasApi?.zoomBy(1)],
+    ['zoom-out', () => canvasApi?.zoomBy(-1)],
+    ['add-layer', addLayer],
+    ['duplicate-layer', () => duplicateLayer(activeLayerId)],
+    ['delete-layer', () => deleteLayer(activeLayerId)],
+    ['frame-add', addAnimationFrame],
+    ['frame-duplicate', duplicateAnimationFrameAtCurrent],
+    ['frame-remove', removeAnimationFrameAtCurrent],
+    ['frame-previous', () => selectAnimationFrame(Math.max(0, activeFrameIndex - 1))],
+    ['frame-next', () => selectAnimationFrame(Math.min(animationFrames.length - 1, activeFrameIndex + 1))],
+    ['animation-play', toggleAnimationPlayback],
+    ['workspace-drawing', () => selectWorkspace('drawing')],
+    ['workspace-animation', () => selectWorkspace('animation')],
+    ['workspace-tileset', () => selectWorkspace('tileset')],
+    ['workspace-minimal', () => selectWorkspace('minimal')],
+    ['toggle-tools', () => toggleWorkspaceDock('tools')],
+    ['toggle-palette', () => toggleWorkspaceDock('palette')],
+    ['toggle-timeline', () => toggleWorkspaceDock('timeline')],
+    ['preview', openPreviewWindow],
+    ['settings', () => {
+      settingsTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      settingsTab = 'general';
+      settingsOpen = true;
+    }],
+    ['help', () => {
+      helpTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      helpOpen = true;
+    }],
+    ['about', () => {
+      aboutTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      aboutOpen = true;
+    }],
+    ['project-notes', () => showProjectNotes()],
+    ['welcome', () => showWelcome()],
+  ]);
+  const editorCommandContext = {
+    actions: editorCommandActions,
+    toolIds: TOOLS.map((tool) => tool.id),
+    panelIds: workspacePanels.map((panel) => panel.id),
+    selectTool: (toolId: string) => {
       const tool = TOOLS.find((entry) => entry.id === toolId);
       if (tool) selectTool(tool.id);
-      return;
-    }
-    if (command.startsWith('panel:')) {
-      const panel = workspacePanels.find((entry) => entry.id === command.slice(6));
+    },
+    selectPanel: (panelId: string) => {
+      const panel = workspacePanels.find((entry) => entry.id === panelId);
       if (panel) selectWorkspacePanel(panel.id);
-      return;
-    }
-    switch (command) {
-      case 'save': void saveProject(); break;
-      case 'export': void exportImage(); break;
-      case 'undo': undo(); break;
-      case 'redo': redo(); break;
-      case 'clear': requestClear(); break;
-      case 'select-all': runSelectionAction('select-all'); break;
-      case 'select-opaque': runSelectionAction('select-opaque'); break;
-      case 'selection-mode:none': selectionMode = null; break;
-      case 'selection-mode:rect': selectionMode = 'rect'; break;
-      case 'selection-mode:ellipse': selectionMode = 'ellipse'; break;
-      case 'selection-mode:lasso': selectionMode = 'lasso'; break;
-      case 'selection-mode:polygon': selectionMode = 'polygon'; break;
-      case 'selection-mode:wand': selectionMode = 'wand'; break;
-      case 'selection-mode:color': selectionMode = 'color'; break;
-      case 'selection-operation:replace': selectionOperation = 'replace'; break;
-      case 'selection-operation:add': selectionOperation = 'add'; break;
-      case 'selection-operation:subtract': selectionOperation = 'subtract'; break;
-      case 'selection-operation:intersect': selectionOperation = 'intersect'; break;
-      case 'toggle-grid': toggleGrid(); break;
-      case 'fit': fitCanvas(); break;
-      case 'center': canvasApi?.centerActiveBoard(); break;
-      case 'zoom-in': canvasApi?.zoomBy(1); break;
-      case 'zoom-out': canvasApi?.zoomBy(-1); break;
-      case 'add-layer': addLayer(); break;
-      case 'duplicate-layer': duplicateLayer(activeLayerId); break;
-      case 'delete-layer': deleteLayer(activeLayerId); break;
-      case 'frame-add': addAnimationFrame(); break;
-      case 'frame-duplicate': duplicateAnimationFrameAtCurrent(); break;
-      case 'frame-remove': removeAnimationFrameAtCurrent(); break;
-      case 'frame-previous': selectAnimationFrame(Math.max(0, activeFrameIndex - 1)); break;
-      case 'frame-next': selectAnimationFrame(Math.min(animationFrames.length - 1, activeFrameIndex + 1)); break;
-      case 'animation-play': toggleAnimationPlayback(); break;
-      case 'workspace-drawing': selectWorkspace('drawing'); break;
-      case 'workspace-animation': selectWorkspace('animation'); break;
-      case 'workspace-tileset': selectWorkspace('tileset'); break;
-      case 'workspace-minimal': selectWorkspace('minimal'); break;
-      case 'toggle-tools': toggleWorkspaceDock('tools'); break;
-      case 'toggle-palette': toggleWorkspaceDock('palette'); break;
-      case 'toggle-timeline': toggleWorkspaceDock('timeline'); break;
-      case 'preview': openPreviewWindow(); break;
-      case 'settings':
-        settingsTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-        settingsTab = 'general';
-        settingsOpen = true;
-        break;
-      case 'help':
-        helpTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-        helpOpen = true;
-        break;
-      case 'feedback-notes': showFeedbackNotes(); break;
-      case 'welcome': showWelcome(); break;
-      default: {
-        const action = ([
-          'invert', 'deselect', 'copy', 'cut', 'paste', 'clear', 'crop',
-          'move-left', 'move-right', 'move-up', 'move-down',
-          'flip-horizontal', 'flip-vertical', 'rotate-left', 'rotate-right', 'scale-up', 'scale-down',
-        ] as const).find((entry) => command === `selection-action:${entry}`);
-        if (action) runSelectionAction(action);
-      }
-    }
+    },
+    runSelectionAction,
+  };
+
+  function handleEditorCommand(command: string): void {
+    dispatchEditorCommand(command, editorCommandContext);
   }
 
   const editorMenuGroups = $derived<EditorMenuGroup[]>([
     { label: 'Файл', items: [
       { label: 'Открыть…', command: 'open' },
       { label: 'Сохранить проект', command: 'save' },
+      { label: 'Сохранить как…', command: 'save-as' },
       { label: 'Экспорт изображения', command: 'export' },
+      { label: 'Пакетный экспорт холстов…', command: 'batch-export' },
+      { label: 'Недавние проекты…', command: 'recent-projects' },
+      { label: 'Заметки проекта…', command: 'project-notes', separatorBefore: true },
     ] },
     { label: 'Правка', items: [
       { label: 'Отменить', command: 'undo', disabled: !canUndo },
@@ -1019,9 +1176,8 @@
       { label: 'Уменьшить', command: 'zoom-out' },
       { label: 'Предпросмотр', command: 'preview', separatorBefore: true },
     ] },
-    { label: 'Изображение', items: [
-      { label: 'Центрировать холст', command: 'center' },
-      { label: 'Вписать холсты в окно', command: 'fit' },
+    { label: 'Холст', items: [
+      { label: 'Удалить активный холст', command: 'delete-board', disabled: boards.length <= 1 },
     ] },
     { label: 'Слой', items: [
       { label: 'Новый слой', command: 'add-layer' },
@@ -1037,7 +1193,7 @@
     ] },
     { label: 'Анимация', items: [
       { label: animationPlaying ? 'Остановить' : 'Воспроизвести', command: 'animation-play' },
-      { label: 'Показать Timeline', command: 'toggle-timeline' },
+      { label: workspaceLayout.timelineVisible ? 'Скрыть Timeline' : 'Показать Timeline', command: 'toggle-timeline' },
     ] },
     { label: 'Инструменты', items: TOOLS.map((tool) => ({
       label: `${tool.label} (${shortcutLabel(`tool:${tool.id}`)})`,
@@ -1050,70 +1206,41 @@
       { label: 'Рабочее пространство: Минимальное', command: 'workspace-minimal' },
       { label: workspaceLayout.toolsVisible ? 'Скрыть инструменты' : 'Показать инструменты', command: 'toggle-tools', separatorBefore: true },
       { label: workspaceLayout.paletteVisible ? 'Скрыть палитру' : 'Показать палитру', command: 'toggle-palette' },
-      { label: workspaceLayout.timelineVisible ? 'Скрыть Timeline' : 'Показать Timeline', command: 'toggle-timeline' },
       ...workspacePanels.map((panel) => ({
         label: `Панель: ${panel.label}`,
         command: `panel:${panel.id}`,
         separatorBefore: panel.id === 'colors',
       })),
-    ] },
-    { label: 'Справка', items: [
-      { label: 'Горячие клавиши', command: 'help' },
-      { label: 'Заметки обратной связи', command: 'feedback-notes' },
-      { label: 'Приветствие', command: 'welcome' },
-      { label: 'Настройки', command: 'settings' },
+      { label: 'О программе и обновлениях…', command: 'about', separatorBefore: true },
     ] },
   ]);
 
   // ——— Автосохранение ———
 
   function currentProject(): ProjectData {
-    return {
-      width: buffer.width,
-      height: buffer.height,
-      pixels: buffer.data,
+    return buildProjectSnapshot({
+      buffer,
       paletteId,
       freeColor,
       primary,
       secondary,
       recent,
+      notes: notesText,
+      notesMetadata: {
+        title: notesTitle,
+        createdAt: notesCreatedAt,
+        updatedAt: notesUpdatedAt,
+      },
       references,
-      customPalettes: customPalettes.length ? customPalettes : undefined,
-      tilemap: tilemap ?? undefined,
+      customPalettes,
+      tilemap,
       brushes: brushLibrary,
       metadata: projectMetadata,
-      canvases: boards.map((board) => ({
-        id: board.id,
-        x: board.x,
-        y: board.y,
-        width: board.buffer.width,
-        height: board.buffer.height,
-        pixels: board.buffer.data,
-        activeLayerId: board.activeLayerId,
-        layers: board.layers.map((layer) => ({
-          id: layer.id,
-          name: layer.name,
-          pixels: layer.buffer.data,
-          visible: layer.visible,
-          locked: layer.locked,
-          opacity: layer.opacity,
-          blendMode: layer.blendMode,
-          alphaLock: layer.alphaLock,
-          clippingMask: layer.clippingMask,
-          role: layer.role ?? 'paint',
-          effects: layer.effects,
-          filters: layer.filters,
-          groupId: layer.groupId ?? null,
-          animationFrames: animationFramesByLayer.get(getAnimationLayerKey(board.id, layer.id))?.map((frame) => ({
-            id: frame.id,
-            durationMs: frame.durationMs,
-            pixels: frame.buffer.data,
-          })),
-        })),
-        groups: board.groups,
-      })),
-      activeCanvasId: activeBoardId,
-    };
+      boards,
+      activeBoardId,
+      getAnimationFrames: (boardId, layerId) =>
+        animationFramesByLayer.get(getAnimationLayerKey(boardId, layerId)),
+    });
   }
 
   function groupHasLock(groups: readonly LayerGroup[], groupId: string | null | undefined): boolean {
@@ -1356,8 +1483,120 @@
     notify('Холст удалён. Отменить удаление можно через Ctrl+Z.');
   }
 
+  function fitBoardToArtwork(id: string): void {
+    const board = boards.find((entry) => entry.id === id);
+    if (!board || id !== activeBoardId) return;
+
+    for (const layer of board.layers) getAnimationFramesForLayer(id, layer);
+
+    let minX = board.buffer.width;
+    let minY = board.buffer.height;
+    let maxX = -1;
+    let maxY = -1;
+    const framesByLayer = new Map(
+      board.layers.map((layer) => [
+        layer.id,
+        animationFramesByLayer.get(getAnimationLayerKey(id, layer.id))!,
+      ]),
+    );
+
+    for (const frames of framesByLayer.values()) {
+      for (const frame of frames) {
+        const { width, height, data } = frame.buffer;
+        for (let y = 0; y < height; y++) {
+          for (let x = 0; x < width; x++) {
+            if (data[(y * width + x) * 4 + 3] === 0) continue;
+            minX = Math.min(minX, x);
+            minY = Math.min(minY, y);
+            maxX = Math.max(maxX, x);
+            maxY = Math.max(maxY, y);
+          }
+        }
+      }
+    }
+
+    if (maxX < minX || maxY < minY) {
+      notify('Нечего подгонять: холст не содержит непрозрачных пикселей.', 'error');
+      return;
+    }
+
+    const width = maxX - minX + 1;
+    const height = maxY - minY + 1;
+    if (width === board.buffer.width && height === board.buffer.height) {
+      notify('Холст уже подогнан под содержимое.');
+      return;
+    }
+
+    stopAnimationPlayback();
+    const cropBuffer = (source: PixelBuffer): PixelBuffer => {
+      const cropped = new PixelBuffer(width, height);
+      for (let y = 0; y < height; y++) {
+        const sourceStart = ((minY + y) * source.width + minX) * 4;
+        const targetStart = y * width * 4;
+        cropped.data.set(source.data.subarray(sourceStart, sourceStart + width * 4), targetStart);
+      }
+      cropped.markAllDirty();
+      return cropped;
+    };
+
+    const beforeLayers = board.layers;
+    const beforeAnimationFrames = animationFrames;
+    const beforeActiveFrameIndex = activeFrameIndex;
+    const beforeAnimationFramesByLayer = new Map(animationFramesByLayer);
+    const afterAnimationFramesByLayer = new Map(beforeAnimationFramesByLayer);
+    for (const layer of board.layers) {
+      const key = getAnimationLayerKey(id, layer.id);
+      const croppedFrames = framesByLayer.get(layer.id)!.map((frame) => {
+        const next = createAnimationFrame(frame.id, width, height, cropBuffer(frame.buffer).data, frame.durationMs);
+        frameBufferIds.set(next.buffer, next.id);
+        return next;
+      });
+      afterAnimationFramesByLayer.set(key, croppedFrames);
+    }
+
+    const activeLayerFrames = afterAnimationFramesByLayer.get(getAnimationLayerKey(id, activeLayerId))!;
+    const afterLayers = board.layers.map((layer) => {
+      const frames = afterAnimationFramesByLayer.get(getAnimationLayerKey(id, layer.id))!;
+      return {
+        ...layer,
+        buffer: frames[layer.id === activeLayerId ? activeFrameIndex : 0]!.buffer,
+      };
+    });
+
+    animationFramesByLayer.clear();
+    for (const [key, frames] of afterAnimationFramesByLayer) animationFramesByLayer.set(key, frames);
+    const beforeSelection = selectionMask;
+    selectionMask = null;
+    selectionPreview = null;
+    replaceLayerStack(id, afterLayers, activeLayerId, board.groups);
+    animationFrames = activeLayerFrames;
+    activeFrameIndex = Math.min(beforeActiveFrameIndex, activeLayerFrames.length - 1);
+    pushUndoEntry({
+      kind: 'layer-stack',
+      boardId: id,
+      beforeLayers,
+      afterLayers,
+      beforeGroups: board.groups,
+      afterGroups: board.groups,
+      beforeActiveLayerId: activeLayerId,
+      afterActiveLayerId: activeLayerId,
+      beforeSelection,
+      afterSelection: null,
+      beforeAnimationFrames,
+      afterAnimationFrames: activeLayerFrames,
+      beforeAnimationFramesByLayer,
+      afterAnimationFramesByLayer,
+      beforeActiveFrameIndex,
+      afterActiveFrameIndex: activeFrameIndex,
+    });
+    cursor = null;
+    scheduleAutosave();
+    canvasApi?.requestRender();
+    notify(`Холст подогнан под изображение: ${width}×${height} px. Действие можно отменить через Ctrl+Z.`);
+  }
+
   function findBoardPosition(width: number, height: number, origin: Artboard): { x: number; y: number } | null {
-    const gap = 8;
+    const gap = 32;
     for (let radius = 1; radius <= boards.length + 1; radius++) {
       const candidates: Array<{ x: number; y: number; distance: number }> = [];
       for (let row = -radius; row <= radius; row++) {
@@ -1389,13 +1628,14 @@
           Math.abs(candidate.x) > MAX_PROJECT_CANVAS_COORDINATE ||
           Math.abs(candidate.y) > MAX_PROJECT_CANVAS_COORDINATE
         ) continue;
-        const overlaps = boards.some((board) =>
-          candidate.x < board.x + board.buffer.width &&
-          candidate.x + width > board.x &&
-          candidate.y < board.y + board.buffer.height &&
-          candidate.y + height > board.y,
-        );
-        if (!overlaps) return { x: candidate.x, y: candidate.y };
+        const tooClose = boards.some((board) => {
+          const separatedX = candidate.x + width + gap <= board.x ||
+            board.x + board.buffer.width + gap <= candidate.x;
+          const separatedY = candidate.y + height + gap <= board.y ||
+            board.y + board.buffer.height + gap <= candidate.y;
+          return !separatedX && !separatedY;
+        });
+        if (!tooClose) return { x: candidate.x, y: candidate.y };
       }
     }
     return null;
@@ -1471,6 +1711,7 @@
       saveStatus = mode === 'indexeddb' ? 'saved' : 'degraded';
       savedAt = Date.now();
       autosaveFailureReported = false;
+      notesStatus = 'сохранено в проекте';
       if (mode === 'localstorage' && !autosaveFailureReported) {
         autosaveFailureReported = true;
         notify('IndexedDB недоступна: проект сохранён в localStorage, где может не хватить места. Сохраните важную работу в JSON.', 'error');
@@ -1488,7 +1729,8 @@
     }
   }
 
-  function scheduleAutosave(): void {
+  function scheduleAutosave(markProjectDirty = true): void {
+    if (markProjectDirty) projectHasUnsavedChanges = true;
     if (!autosaveRepository.canPersist) {
       saveStatus = 'unavailable';
       return;
@@ -1529,7 +1771,38 @@
       autosaveArmed = true;
       return;
     }
-    scheduleAutosave();
+    const markAsUnsaved = !suppressNextProjectDirtyMark;
+    suppressNextProjectDirtyMark = false;
+    scheduleAutosave(markAsUnsaved);
+  });
+
+  onMount(() => {
+    const desktop = window.pixelEditorDesktop;
+    if (
+      typeof desktop?.onOpenProject !== 'function' ||
+      typeof desktop.takePendingProject !== 'function' ||
+      typeof desktop.listRecentProjects !== 'function'
+    ) return;
+
+    const handleOpenProject = (payload: DesktopOpenProjectPayload) => {
+      void importProjectFile(new File([payload.data], payload.fileName), payload.handle);
+    };
+    const unsubscribe = desktop.onOpenProject(handleOpenProject);
+    void desktop.takePendingProject()
+      .then((payload) => {
+        if (payload) handleOpenProject(payload);
+      })
+      .catch((error: unknown) => notify(
+        `Не удалось получить проект, переданный при запуске: ${error instanceof Error ? error.message : String(error)}`,
+        'error',
+      ));
+    void desktop.listRecentProjects()
+      .then((projects) => (recentProjects = projects))
+      .catch((error: unknown) => notify(
+        `Не удалось загрузить список недавних проектов: ${error instanceof Error ? error.message : String(error)}`,
+        'error',
+      ));
+    return unsubscribe;
   });
 
   onDestroy(() => {
@@ -2445,7 +2718,14 @@
   }
 
   function setBrushSize(size: number): void {
-    brushSize = clampBrushSize(size);
+    if (activeToolId === 'eraser') eraserSize = clampBrushSize(size);
+    else pencilSize = clampBrushSize(size);
+    selectedBrushId = '';
+  }
+
+  function setToolBrushSize(tool: 'pencil' | 'eraser', size: number): void {
+    if (tool === 'eraser') eraserSize = clampBrushSize(size);
+    else pencilSize = clampBrushSize(size);
     selectedBrushId = '';
   }
 
@@ -2462,6 +2742,10 @@
   }
 
   async function importReference(file: File): Promise<void> {
+    if (imageImportProgress) {
+      notify('Дождитесь завершения текущего импорта изображения.', 'error');
+      return;
+    }
     const extension = file.name.split('.').at(-1)?.toLowerCase();
     if (!extension || !['png', 'jpg', 'jpeg', 'webp', 'bmp'].includes(extension)) {
       notify('Поддерживаются изображения PNG, JPEG, WebP и BMP.', 'error');
@@ -2479,7 +2763,11 @@
         notify('Достигнут общий лимит пикселей референсов. Удалите или уменьшите один из референсов.', 'error');
         return;
       }
-      const image = await decodeRasterImage(file, { maxPixels: availablePixels });
+      imageImportProgress = { fileName: file.name, stage: 'decoding' };
+      const image = await decodeRasterImage(file, {
+        maxPixels: availablePixels,
+        onProgress: (stage) => (imageImportProgress = { fileName: file.name, stage }),
+      });
 
       const board = boards.find((entry) => entry.id === activeBoardId)!;
       const scale = Math.max(MIN_REFERENCE_SCALE, Math.min(1, 256 / image.width, 256 / image.height));
@@ -2506,6 +2794,8 @@
       notify('Референс импортирован.');
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Не удалось импортировать референс.', 'error');
+    } finally {
+      imageImportProgress = null;
     }
   }
 
@@ -2659,33 +2949,79 @@
 
   // ——— Файлы: проект JSON и PNG ———
 
-  async function saveProject(): Promise<void> {
-    const filename = `pixel-art-${boards.length}-canvases.json`;
+  async function saveProject(forceDialog = false): Promise<boolean> {
+    const filename = `pixel-art-${boards.length}-canvases.pxproj`;
     try {
       const text = serializeProject(currentProject());
       const blob = new Blob([text], { type: 'application/json' });
-      if (await saveDesktopBlob(blob, filename) === 'saved') notify('Проект сохранён в файл.');
+      const result = await saveDesktopProject(blob, filename, projectHandle, forceDialog);
+      if (result.status === 'cancelled') return false;
+      projectFileName = result.fileName;
+      projectHandle = result.handle;
+      recentProjects = result.recentProjects;
+      projectHasUnsavedChanges = false;
+      notify('Проект сохранён в файл.');
+      return true;
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Не удалось сохранить проект.', 'error');
+      return false;
     }
   }
 
-  async function importProjectFile(file: File): Promise<void> {
+  async function importProjectFile(file: File, knownHandle: string | null = null): Promise<void> {
     const extension = file.name.split('.').at(-1)?.toLowerCase();
-    if (extension === 'json') {
+    if (extension === 'json' || extension === 'pxproj') {
       if (file.size > MAX_PROJECT_JSON_LENGTH) {
         notify('Файл слишком большой для проекта.', 'error');
         return;
       }
+      let handle = knownHandle;
       try {
+        const registerSelectedProject = window.pixelEditorDesktop?.registerSelectedProject;
+        if (!handle && typeof registerSelectedProject === 'function') {
+          handle = (await registerSelectedProject(file)).handle;
+        }
         const project = parseProject(await file.text());
-        pending = { kind: 'import', project, fileName: file.name };
+        pending = {
+          kind: 'import',
+          project,
+          fileName: file.name,
+          projectHandle: handle,
+          restoringBackup: false,
+        };
       } catch (error) {
+        if (handle) {
+          try {
+            const backup = await window.pixelEditorDesktop?.getLatestProjectBackup(handle);
+            if (backup) {
+              const project = parseProject(new TextDecoder().decode(backup.data));
+              pending = {
+                kind: 'import',
+                project,
+                fileName: file.name,
+                projectHandle: handle,
+                restoringBackup: true,
+              };
+              notify('Файл проекта повреждён; доступна резервная копия для восстановления.');
+              return;
+            }
+          } catch (backupError) {
+            notify(
+              `Проект и его резервная копия не читаются: ${backupError instanceof Error ? backupError.message : String(backupError)}`,
+              'error',
+            );
+            return;
+          }
+        }
         notify(error instanceof ProjectFormatError ? error.message : 'Не удалось прочитать файл проекта.', 'error');
       }
       return;
     }
 
+    if (imageImportProgress) {
+      notify('Дождитесь завершения текущего импорта изображения.', 'error');
+      return;
+    }
     if (!extension || !['png', 'jpg', 'jpeg', 'webp', 'bmp'].includes(extension)) {
       notify('Поддерживаются проекты JSON и изображения PNG, JPEG, WebP и BMP.', 'error');
       return;
@@ -2696,11 +3032,46 @@
     }
 
     try {
-      const image = await decodeRasterImage(file);
-      const project = rasterImageToProject(image, { paletteId, freeColor, primary, secondary, recent, customPalettes });
-      pending = { kind: 'image', project, fileName: file.name };
+      const targetBoard = boards.find((board) => board.id === activeBoardId);
+      if (!targetBoard) throw new Error('Выбранный холст не найден.');
+      if (targetBoard.layers.length >= MAX_PROJECT_LAYERS) {
+        notify(`На выбранном холсте уже достигнут лимит слоёв (${MAX_PROJECT_LAYERS}).`, 'error');
+        return;
+      }
+      if (getTotalLayerPixels() + targetBoard.buffer.width * targetBoard.buffer.height > MAX_PROJECT_TOTAL_PIXELS) {
+        notify('Превышен лимит общего объёма пиксельных данных проекта.', 'error');
+        return;
+      }
+      imageImportProgress = { fileName: file.name, stage: 'decoding' };
+      const image = await decodeRasterImage(file, {
+        fitWithin: { width: targetBoard.buffer.width, height: targetBoard.buffer.height },
+        onProgress: (stage) => (imageImportProgress = { fileName: file.name, stage }),
+      });
+      pending = { kind: 'image', image, fileName: file.name, boardId: targetBoard.id };
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Не удалось декодировать изображение.', 'error');
+    } finally {
+      imageImportProgress = null;
+    }
+  }
+
+  async function openRecentProject(id: string): Promise<void> {
+    try {
+      const payload = await window.pixelEditorDesktop?.openRecentProject(id);
+      if (!payload) throw new Error('Список недавних проектов недоступен.');
+      recentProjectsOpen = false;
+      await importProjectFile(new File([payload.data], payload.fileName), payload.handle);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Не удалось открыть недавний проект.', 'error');
+    }
+  }
+
+  async function showRecentProjects(): Promise<void> {
+    try {
+      recentProjects = (await window.pixelEditorDesktop?.listRecentProjects()) ?? [];
+      recentProjectsOpen = true;
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Не удалось загрузить список недавних проектов.', 'error');
     }
   }
 
@@ -2730,8 +3101,59 @@
     }
   }
 
+  async function exportAllBoards(): Promise<void> {
+    const desktop = window.pixelEditorDesktop;
+    if (!desktop) {
+      notify('Пакетный экспорт доступен только в настольном приложении.', 'error');
+      return;
+    }
+
+    let sessionId: string | null = null;
+    try {
+      sessionId = await desktop.beginBatchExport();
+      if (!sessionId) return;
+      batchExportProgress = { completed: 0, total: boards.length };
+      const maxBatchScale = Math.min(...boards.map((board) =>
+        getAvailableExportScales(board.buffer.width, board.buffer.height).at(-1) ?? 1));
+      const scale = exportScale <= maxBatchScale ? exportScale : maxBatchScale;
+
+      for (let index = 0; index < boards.length; index++) {
+        const board = boards[index]!;
+        const exportLayers = board.layers.filter((layer) => layer.role !== 'reference');
+        const base = exportLayers.length
+          ? compositeLayers(board.buffer.width, board.buffer.height, exportLayers, undefined, undefined, board.groups)
+          : new PixelBuffer(board.buffer.width, board.buffer.height);
+        const exportBuffer = includeReferencesInExport
+          ? applyReferencesToBuffer(base, board.x, board.y, references)
+          : base;
+        const blob = await exportPngBlob(exportBuffer, scale);
+        const fileName = `pixel-editor-${Date.now()}-canvas-${index + 1}-${board.buffer.width * scale}x${board.buffer.height * scale}.png`;
+        await desktop.writeBatchExport(sessionId, fileName, new Uint8Array(await blob.arrayBuffer()));
+        batchExportProgress = { completed: index + 1, total: boards.length };
+        await tick();
+        notify(`Пакетный экспорт: ${index + 1} из ${boards.length}.`);
+      }
+      notify(`Экспортировано холстов: ${boards.length}.`);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Не удалось экспортировать холсты.', 'error');
+    } finally {
+      if (sessionId) {
+        try {
+          await desktop.endBatchExport(sessionId);
+        } catch (error) {
+          notify(
+            `Не удалось завершить сеанс пакетного экспорта: ${error instanceof Error ? error.message : String(error)}`,
+            'error',
+          );
+        }
+      }
+      batchExportProgress = null;
+    }
+  }
+
   /** Подставляет в редактор загруженный проект; история при этом начинается заново. */
   function applyProject(project: ProjectData): void {
+    suppressNextProjectDirtyMark = true;
     buffer.setClipMask(null);
     selectionMask = null;
     selectionPreview = null;
@@ -2808,6 +3230,11 @@
     primary = project.primary;
     secondary = project.secondary;
     recent = project.recent;
+    notesText = project.notes ?? '';
+    notesTitle = project.notesMetadata?.title ?? 'Заметки проекта';
+    notesCreatedAt = project.notesMetadata?.createdAt ?? Date.now();
+    notesUpdatedAt = project.notesMetadata?.updatedAt ?? notesCreatedAt;
+    notesStatus = 'сохранено в проекте';
     references = project.references?.map((reference) => ({ ...reference })) ?? [];
     tilemap = project.tilemap ?? null;
     projectMetadata = project.metadata ?? {};
@@ -2815,11 +3242,23 @@
       brushLibrary = mergeBrushDefinitions(brushLibrary, project.brushes);
       persistBrushLibrary();
     }
+
     stopAnimationPlayback();
     selectedReferenceId = references[0]?.id ?? null;
     syncHistory();
     cursor = null;
     scheduleAutosave();
+  }
+
+  function restoreNotesBackup(): void {
+    if (!notesBackup) return;
+    notesTitle = notesBackup.title;
+    notesText = notesBackup.notes;
+    notesCreatedAt = notesBackup.createdAt;
+    notesUpdatedAt = notesBackup.updatedAt;
+    notesStatus = 'восстановлено из резервной копии';
+    scheduleAutosave();
+    notify('Резервная копия заметок восстановлена.');
   }
 
   function updateTilemap(next: TilemapData, groupId: string | null = null): void {
@@ -2853,7 +3292,7 @@
     pending = { kind: 'resize', width, height };
   }
 
-  function confirmPending(): void {
+  async function confirmPending(): Promise<void> {
     const action = pending;
     pending = null;
     if (!action) return;
@@ -2922,9 +3361,54 @@
       });
       cursor = null;
       scheduleAutosave();
+    } else if (action.kind === 'image') {
+      const board = boards.find((entry) => entry.id === action.boardId);
+      if (!board) {
+        notify('Выбранный холст больше не существует. Изображение не импортировано.', 'error');
+        return;
+      }
+      if (board.layers.length >= MAX_PROJECT_LAYERS) {
+        notify(`На выбранном холсте уже достигнут лимит слоёв (${MAX_PROJECT_LAYERS}).`, 'error');
+        return;
+      }
+      if (getTotalLayerPixels() + board.buffer.width * board.buffer.height > MAX_PROJECT_TOTAL_PIXELS) {
+        notify('Превышен лимит общего объёма пиксельных данных проекта.', 'error');
+        return;
+      }
+      if (action.image.width !== board.buffer.width || action.image.height !== board.buffer.height) {
+        notify('Размер выбранного холста изменился. Импортируйте изображение повторно.', 'error');
+        return;
+      }
+      const id = `${board.id}-photo-${Date.now().toString(36)}-${layerSequence++}`;
+      const photoName = action.fileName.replace(/\.[^.]+$/, '').trim().slice(0, 75) ||
+        `Изображение ${board.layers.length + 1}`;
+      const layer = createRasterLayer(
+        id,
+        `Фото ${photoName}`,
+        board.buffer.width,
+        board.buffer.height,
+        action.image.pixels,
+      );
+      histories.set(getHistoryKey(board.id, layer), new History());
+      commitLayerStack(board.id, [...board.layers, layer], layer.id);
+      if (activeBoardId === board.id) cursor = null;
+      notify('Фото импортировано отдельным слоем на выбранный холст.');
     } else {
       applyProject(action.project);
-      notify(action.kind === 'image' ? 'Изображение импортировано.' : 'Проект открыт.');
+      projectFileName = action.fileName;
+      projectHandle = action.projectHandle;
+      projectHasUnsavedChanges = action.restoringBackup;
+      let recentWarning: string | null = null;
+      if (projectHandle && window.pixelEditorDesktop) {
+        try {
+          recentProjects = await window.pixelEditorDesktop.setCurrentProject(projectHandle);
+        } catch (error) {
+          recentWarning = `Проект открыт, но не удалось обновить список недавних файлов: ${error instanceof Error ? error.message : String(error)}`;
+        }
+      }
+      notify(recentWarning ?? (action.restoringBackup
+        ? 'Проект восстановлен из резервной копии. Сохраните его, чтобы заменить повреждённый файл.'
+        : 'Проект открыт.'), recentWarning ? 'error' : 'info');
     }
   }
 
@@ -2943,6 +3427,13 @@
 
     if (action.kind === 'import') {
       const { width, height } = action.project;
+      if (action.restoringBackup) {
+        return {
+          title: 'Восстановить проект из резервной копии?',
+          message: `Основной файл «${action.fileName}» повреждён. Будет восстановлена последняя корректная копия; сохраните проект, чтобы заменить повреждённый файл.`,
+          confirmText: 'Восстановить',
+        };
+      }
       return {
         title: 'Открыть проект?',
         message: `Файл «${action.fileName}» (${width}×${height}) заменит текущий рисунок. История действий будет очищена, отменить замену нельзя.`,
@@ -2951,9 +3442,10 @@
     }
 
     if (action.kind === 'image') {
+      const board = boards.find((entry) => entry.id === action.boardId);
       return {
         title: 'Импортировать изображение?',
-        message: `Изображение «${action.fileName}» будет преобразовано в пиксельное изображение ${action.project.width}×${action.project.height} и заменит текущий рисунок. Продолжить?`,
+        message: `Фото «${action.fileName}» будет вписано в выбранный холст ${board?.buffer.width ?? action.image.width}×${board?.buffer.height ?? action.image.height} с сохранением пропорций и добавлено отдельным слоем. Остальные холсты не изменятся.`,
         confirmText: 'Импортировать',
       };
     }
@@ -2979,7 +3471,7 @@
   }
 
   function onKeyDown(e: KeyboardEvent): void {
-    if (fillInProgress || pending || welcomeOpen || feedbackNotesOpen || helpOpen || settingsOpen || isTypingTarget(e.target)) return;
+    if (fillInProgress || pending || welcomeOpen || feedbackNotesOpen || projectNotesOpen || commandSearchOpen || helpOpen || aboutOpen || settingsOpen || isTypingTarget(e.target)) return;
 
     if (e.repeat) return;
     const resolution = resolveShortcutEvent(shortcuts, pendingShortcutSequence, e);
@@ -3043,7 +3535,7 @@
     const action = getTemporaryActionForCode(shortcuts, e.code);
     if (action === 'temporary-picker') temporaryPicker = false;
     if (action === 'pan') spaceHeld = false;
-    if (action && !pending && !welcomeOpen && !feedbackNotesOpen && !helpOpen && !settingsOpen && !isTypingTarget(e.target)) e.preventDefault();
+    if (action && !pending && !welcomeOpen && !feedbackNotesOpen && !projectNotesOpen && !helpOpen && !aboutOpen && !settingsOpen && !isTypingTarget(e.target)) e.preventDefault();
   }
 
   function onWindowBlur(): void {
@@ -3052,6 +3544,22 @@
     pendingShortcutSequence = [];
     if (shortcutSequenceTimer !== undefined) clearTimeout(shortcutSequenceTimer);
     shortcutSequenceTimer = undefined;
+  }
+
+  function onFileDragOver(event: DragEvent): void {
+    if (event.dataTransfer && Array.from(event.dataTransfer.types).includes('Files')) {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'copy';
+    }
+  }
+
+  function onFileDrop(event: DragEvent): void {
+    if (!event.dataTransfer || !Array.from(event.dataTransfer.types).includes('Files')) return;
+    event.preventDefault();
+    const files = Array.from(event.dataTransfer.files);
+    if (files.length > 1) notify('За один раз можно открыть или импортировать один файл.', 'error');
+    const file = files[0];
+    if (file) void importProjectFile(file);
   }
 
   if (storage) {
@@ -3073,14 +3581,24 @@
   if (brushLibraryError) notify(brushLibraryError, 'error');
 </script>
 
-<svelte:window onkeydown={onKeyDown} onkeyup={onKeyUp} onblur={onWindowBlur} onpagehide={flushAutosave} />
+<svelte:window
+  onkeydown={onKeyDown}
+  onkeyup={onKeyUp}
+  onblur={onWindowBlur}
+  onpagehide={flushAutosave}
+  ondragover={onFileDragOver}
+  ondrop={onFileDrop}
+/>
 <svelte:document onvisibilitychange={onVisibilityChange} />
 
 <div class="app">
   <EditorMenuBar
     groups={editorMenuGroups}
+    canSearch={!fillInProgress && !pending && !welcomeOpen && !feedbackNotesOpen && !projectNotesOpen && !helpOpen && !aboutOpen && !settingsOpen}
+    onsearchchange={(open) => (commandSearchOpen = open)}
     oncommand={handleEditorCommand}
     onopen={(file) => void importProjectFile(file)}
+    onsettings={(trigger) => openSettings('general', trigger)}
   />
   <ProjectBar
     {canUndo}
@@ -3097,18 +3615,18 @@
     onundo={undo}
     onredo={redo}
     onopen={importProjectFile}
-    onsave={saveProject}
+    onsave={() => void saveProject()}
     onexport={exportImage}
     onformat={(format) => (exportFormat = format)}
     onscale={(scale) => {
       if (availableExportScales.includes(scale)) exportScale = scale;
     }}
-    onsettings={(trigger) => openSettings('general', trigger)}
     onwelcome={(trigger) => showWelcome(trigger)}
     onhelp={(trigger) => {
       helpTrigger = trigger;
       helpOpen = true;
     }}
+    onfeedbacknotes={showFeedbackNotes}
   />
 
   <Toolbar
@@ -3169,8 +3687,11 @@
       panelWidth={workspaceLayout.toolsWidth}
       tools={keyboardTools}
       {activeToolId}
+      {pencilSize}
+      {eraserSize}
       settings={drawingSettings}
       onselect={selectTool}
+      onbrushsize={setToolBrushSize}
       onsettings={updateDrawingSettings}
       onaddboard={addBoard}
     />
@@ -3242,9 +3763,10 @@
         onstrokeend={endStroke}
         onrender={() => refreshComposite(activeBoardId, getActiveLayer())}
         onselectboard={selectBoard}
-        ondeleteboard={removeBoard}
         onmoveboard={moveBoard}
         onmoveboards={moveBoards}
+        ondeleteboard={removeBoard}
+        onfitboard={fitBoardToArtwork}
         onselectreference={(id) => (selectedReferenceId = id)}
         onreferencemovestart={beginReferenceMove}
         onreferencemove={(id, x, y) => updateReference(id, { x, y }, false)}
@@ -3395,10 +3917,6 @@
         {:else if workspaceLayout.rightPanel === 'brush-settings'}
           <section class="inspector-section">
             <h2>Настройки кисти</h2>
-            <label>Размер: {brushSize} px
-              <input type="range" min={MIN_BRUSH_SIZE} max={MAX_BRUSH_SIZE} value={brushSize}
-                oninput={(event) => setBrushSize(Number(event.currentTarget.value))} />
-            </label>
             <label>Непрозрачность: {brushOpacity}%
               <input type="range" min="1" max="100" value={brushOpacity}
                 oninput={(event) => setBrushOpacity(Number(event.currentTarget.value))} />
@@ -3533,6 +4051,27 @@
       <span>Выполняется заливка. Редактор временно заблокирован.</span>
     </div>
   {/if}
+  {#if imageImportProgress || batchExportProgress}
+    <div class="operation-progress" role="status" aria-live="polite">
+      {#if imageImportProgress}
+        <span>
+          {imageImportProgress.stage === 'decoding'
+            ? `Декодирование «${imageImportProgress.fileName}»…`
+            : imageImportProgress.stage === 'rasterizing'
+              ? `Подготовка пикселей «${imageImportProgress.fileName}»…`
+              : `Изображение «${imageImportProgress.fileName}» обработано.`}
+        </span>
+        <progress aria-label="Обработка изображения"></progress>
+      {:else if batchExportProgress}
+        <span>Пакетный экспорт: {batchExportProgress.completed} из {batchExportProgress.total}</span>
+        <progress
+          aria-label="Пакетный экспорт"
+          value={batchExportProgress.completed}
+          max={batchExportProgress.total}
+        ></progress>
+      {/if}
+    </div>
+  {/if}
 </div>
 
 {#if notice}
@@ -3544,11 +4083,14 @@
     tools={keyboardTools}
     {shortcuts}
     returnFocusTo={helpTrigger}
-    onnotes={() => {
-      helpOpen = false;
-      showFeedbackNotes(helpTrigger);
-    }}
     onclose={() => (helpOpen = false)}
+  />
+{/if}
+
+{#if aboutOpen}
+  <AboutDialog
+    returnFocusTo={aboutTrigger}
+    onclose={() => (aboutOpen = false)}
   />
 {/if}
 
@@ -3565,6 +4107,24 @@
     returnFocusTo={feedbackNotesTrigger}
     onclose={() => (feedbackNotesOpen = false)}
     onnotify={notify}
+  />
+{/if}
+
+{#if projectNotesOpen}
+  <NotesDialog
+    value={notesText}
+    title={notesTitle}
+    createdAt={notesCreatedAt}
+    updatedAt={notesUpdatedAt}
+    backup={notesBackup}
+    status={notesStatus}
+    returnFocusTo={projectNotesTrigger}
+    oninput={updateProjectNotes}
+    ontitle={updateProjectNotesTitle}
+    onimport={importNotesFile}
+    onexport={exportProjectNotes}
+    onrestore={restoreNotesBackup}
+    onclose={() => (projectNotesOpen = false)}
   />
 {/if}
 
@@ -3598,6 +4158,14 @@
   />
 {/if}
 
+{#if recentProjectsOpen}
+  <RecentProjectsDialog
+    projects={recentProjects}
+    onselect={(id) => void openRecentProject(id)}
+    onclose={() => (recentProjectsOpen = false)}
+  />
+{/if}
+
 <style>
   .app {
     display: grid;
@@ -3622,6 +4190,28 @@
     background: rgba(8, 10, 16, 0.62);
     color: var(--text);
     cursor: progress;
+  }
+
+  .operation-progress {
+    position: fixed;
+    z-index: 108;
+    right: 20px;
+    bottom: 20px;
+    display: grid;
+    gap: 8px;
+    width: min(320px, calc(100vw - 40px));
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--panel);
+    color: var(--text);
+    box-shadow: var(--shadow-md);
+    font-size: 13px;
+  }
+
+  .operation-progress progress {
+    width: 100%;
+    accent-color: var(--accent);
   }
 
   .fill-spinner {
@@ -3660,9 +4250,9 @@
     overflow: hidden;
   }
 
-  :global(.tool-dock:has(.options[open])) {
+  :global(.tool-dock:has(.options[open], .brush-size[open])) {
     position: relative;
-    z-index: 40;
+    z-index: 80;
     overflow: visible;
   }
 

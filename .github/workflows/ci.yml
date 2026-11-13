@@ -25,29 +25,12 @@ jobs:
       - run: npm test
       - run: npm run check
       - run: npm run build:renderer
+      - name: Check Electron security configuration
+        run: npm run security:check
       - name: Audit production dependencies
         run: npm audit --omit=dev
       - name: Audit all dependencies (fail on high or critical)
         run: npm audit --audit-level=high
-  browser-e2e:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - run: npx playwright install --with-deps chromium
-      - run: npm run test:e2e
-      - uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: pixel-editor-browser-e2e-failures
-          path: test-results/
-          if-no-files-found: ignore
-          retention-days: 7
   windows-desktop:
     needs: verify
     runs-on: windows-latest
@@ -59,10 +42,16 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npm run check:e2e
+      - run: npm run test:e2e:desktop
       - run: npm run dist:win
       - uses: actions/upload-artifact@v4
         with:
           name: pixel-editor-windows
-          path: release/*.exe
+          path: |
+            release/*.exe
+            release/*.blockmap
+            release/latest.yml
+            release/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14

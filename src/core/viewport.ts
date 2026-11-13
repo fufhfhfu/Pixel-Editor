@@ -23,9 +23,6 @@ export const ZOOM_LEVELS: readonly number[] = [
   0.25, 0.5, 1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 32, 48, 64, 96, 128, 192, 256,
 ];
 
-/** Сколько экранных пикселей холста должно оставаться видимым при панорамировании. */
-const VISIBLE_MARGIN = 48;
-
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
@@ -116,19 +113,6 @@ export function ensurePixelVisible(
 
   if (dx === 0 && dy === 0) return view;
   return { zoom: view.zoom, offsetX: Math.round(view.offsetX + dx), offsetY: Math.round(view.offsetY + dy) };
-}
-
-/** Не даёт увести холст за пределы области просмотра; смещения округляются до целых. */
-export function clampView(view: ViewState, imgW: number, imgH: number, viewW: number, viewH: number): ViewState {
-  const w = imgW * view.zoom;
-  const h = imgH * view.zoom;
-  const marginX = Math.min(VISIBLE_MARGIN, w, viewW / 2);
-  const marginY = Math.min(VISIBLE_MARGIN, h, viewH / 2);
-  return {
-    zoom: view.zoom,
-    offsetX: Math.round(clamp(view.offsetX, marginX - w, viewW - marginX)),
-    offsetY: Math.round(clamp(view.offsetY, marginY - h, viewH - marginY)),
-  };
 }
 
 /** Экранная точка (в координатах области просмотра) → пиксель холста. Может быть вне границ. */
